@@ -14,8 +14,12 @@ use ontixa_source::DefId;
 use serde::Serialize;
 
 /// A semantic type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-#[serde(tag = "kind")]
+///
+/// `Serialize` is implemented by hand: `Struct(DefId)` cannot use an
+/// internally-tagged enum representation (serde_json cannot serialize
+/// a tagged newtype containing an integer), so every variant emits
+/// `{"kind": name}` plus `{"def": id}` for structs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// `bool`
     Bool,
@@ -86,6 +90,36 @@ impl Ty {
     /// as unifying with anything (an error was already reported).
     pub fn compatible(self, other: Ty) -> bool {
         self == Ty::Poison || other == Ty::Poison || self == other
+    }
+
+    /// Stable lowercase name — the JSON `kind` and human form.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Ty::Bool => "bool",
+            Ty::I32 => "i32",
+            Ty::I64 => "i64",
+            Ty::U32 => "u32",
+            Ty::U64 => "u64",
+            Ty::F32 => "f32",
+            Ty::F64 => "f64",
+            Ty::Str => "str",
+            Ty::Unit => "unit",
+            Ty::Struct(_) => "struct",
+            Ty::Poison => "poison",
+        }
+    }
+}
+
+impl Serialize for Ty {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let len = if matches!(self, Ty::Struct(_)) { 2 } else { 1 };
+        let mut m = s.serialize_map(Some(len))?;
+        m.serialize_entry("kind", self.as_str())?;
+        if let Ty::Struct(d) = self {
+            m.serialize_entry("def", d)?;
+        }
+        m.end()
     }
 }
 

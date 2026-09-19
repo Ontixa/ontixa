@@ -5,15 +5,25 @@
 //!
 //! - `0` — success (diagnostics, if any, are warnings)
 //! - `1` — the source produced error diagnostics
-//! - `2` — runtime trap (interpreter) or missing entry function
+//! - `2` — runtime trap, missing entry function, or unreadable input
 //! - `3` — internal compiler error (ICE); never the user's fault
+//!
+//! Machine output: every `--json` invocation prints **exactly one**
+//! envelope document (`schema: 1`) — see `envelope.rs` and
+//! `docs/diagnostics.md`.
+
+mod envelope;
+mod explain;
 
 use clap::{Parser, Subcommand};
+use envelope::{CompileFailure, Envelope, emit_failure, emit_human_diags, print_timings};
 use ontixa_db::{Artifacts, Db};
 use ontixa_diagnostics::{Code, Diagnostic, Severity};
+use ontixa_interpreter::Value;
 use ontixa_source::{FileId, SourceFile, Span};
+use serde_json::{Value as Json, json};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -35,10 +45,10 @@ enum Cmd {
     Check {
         /// The `.ixa` source file.
         file: PathBuf,
-        /// Emit machine-readable JSON diagnostics.
+        /// Emit machine-readable JSON (one envelope document).
         #[arg(long)]
         json: bool,
-        /// Report per-stage compilation timings.
+        /// Include per-stage compilation timings.
         #[arg(long)]
         timings: bool,
     },
@@ -49,10 +59,10 @@ enum Cmd {
         /// Entry function name.
         #[arg(long, default_value = "main")]
         entry: String,
-        /// Emit the result as JSON.
+        /// Emit machine-readable JSON (one envelope document).
         #[arg(long)]
         json: bool,
-        /// Report per-stage compilation timings.
+        /// Include per-stage compilation timings.
         #[arg(long)]
         timings: bool,
     },
@@ -60,7 +70,7 @@ enum Cmd {
     Tokens {
         /// The `.ixa` source file.
         file: PathBuf,
-        /// Emit machine-readable JSON.
+        /// Emit machine-readable JSON (one envelope document).
         #[arg(long)]
         json: bool,
     },
@@ -68,25 +78,41 @@ enum Cmd {
     Ast {
         /// The `.ixa` source file.
         file: PathBuf,
+        /// Emit the schema-1 envelope (payload under `result.ast`).
+        /// Without it, prints the bare AST JSON for humans.
+        #[arg(long)]
+        json: bool,
     },
     /// Dump typed MIR.
     Mir {
         /// The `.ixa` source file.
         file: PathBuf,
+        /// Emit the schema-1 envelope (payload under `result.mir`).
+        #[arg(long)]
+        json: bool,
     },
-    /// Dump the Semantic Program Graph as JSON.
+    /// Dump the Semantic Program Graph.
     Graph {
         /// The `.ixa` source file.
         file: PathBuf,
+        /// Emit the schema-1 envelope (payload under `result.graph`).
+        /// Without it, prints the bare graph JSON for humans.
+        #[arg(long)]
+        json: bool,
     },
     /// Explain what the compiler inferred: signatures, ownership
-    /// contracts, timings.
+    /// contracts — or a single symbol when named.
     Explain {
         /// The `.ixa` source file.
         file: PathBuf,
-        /// Emit machine-readable JSON.
+        /// Optional symbol to explain (def, param, local, field).
+        symbol: Option<String>,
+        /// Emit machine-readable JSON (one envelope document).
         #[arg(long)]
         json: bool,
+        /// Include per-stage compilation timings.
+        #[arg(long)]
+        timings: bool,
     },
 }
 
@@ -106,30 +132,38 @@ fn main() -> ExitCode {
             timings,
         } => run(file, entry, json, timings),
         Cmd::Tokens { file, json } => tokens(file, json),
-        Cmd::Ast { file } => ast(file),
-        Cmd::Mir { file } => mir(file),
-        Cmd::Graph { file } => graph(file),
-        Cmd::Explain { file, json } => explain(file, json),
+        Cmd::Ast { file, json } => dump(file, json, "ast"),
+        Cmd::Mir { file, json } => dump(file, json, "mir"),
+        Cmd::Graph { file, json } => dump(file, json, "graph"),
+        Cmd::Explain {
+            file,
+            symbol,
+            json,
+            timings,
+        } => explain_cmd(file, symbol, json, timings),
     }
 }
 
 // ---------- shared plumbing ----------
 
 /// Reads a file, compiles it through `Db` inside `catch_unwind`, and
-/// returns the source file handle plus artifacts. `Err(code)` means
-/// the output was already emitted.
-fn compile(file: &PathBuf) -> Result<(SourceFile, Artifacts), ExitCode> {
+/// returns the source file handle plus artifacts. Failures are values
+/// (`CompileFailure`), not printed side effects — the caller picks the
+/// rendering.
+fn compile(file: &Path) -> Result<(SourceFile, Artifacts), CompileFailure> {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("error: cannot read {}: {e}", file.display());
-            return Err(ExitCode::from(2));
+            return Err(CompileFailure::Io(format!(
+                "cannot read {}: {e}",
+                file.display()
+            )));
         }
     };
     let sf = SourceFile::new(
         FileId::new(0),
         file.display().to_string(),
-        Some(file.clone()),
+        Some(file.to_path_buf()),
         text.clone(),
     );
     // The ICE boundary: any panic inside the pipeline becomes an
@@ -162,93 +196,147 @@ fn compile(file: &PathBuf) -> Result<(SourceFile, Artifacts), ExitCode> {
                 subject: None,
                 details: Default::default(),
             };
-            eprint!("{}", ontixa_diagnostics::render(&d, &sf));
-            Err(ExitCode::from(3))
+            Err(CompileFailure::Ice(sf, Box::new(d)))
         }
     }
 }
 
-/// Emits diagnostics; returns the exit code reflecting severity.
-fn emit_diags(a: &Artifacts, sf: &SourceFile, json: bool) -> ExitCode {
-    if a.diags.is_empty() {
-        return ExitCode::SUCCESS;
-    }
-    let diags: Vec<Diagnostic> = a.diags.iter().cloned().collect();
-    if json {
-        let doc = ontixa_diagnostics::to_json(&diags, sf);
-        println!("{}", serde_json::to_string_pretty(&doc).unwrap());
-    } else {
-        eprint!("{}", ontixa_diagnostics::render_all(&diags, sf));
-    }
-    if a.diags.has_errors() {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
-/// Prints `--timings` output when requested.
-fn emit_timings(a: &Artifacts, json: bool) {
-    if json {
-        println!("{}", serde_json::to_string_pretty(&a.timings).unwrap());
-    } else {
-        eprintln!("timings:");
-        for t in &a.timings {
-            eprintln!("  {:>9}  {:>7} µs", t.stage, t.nanos / 1000);
+/// Compiles, or emits the failure in the active mode and returns its
+/// exit code. Sorts diagnostics for deterministic output.
+fn compiled(
+    file: &Path,
+    command: &'static str,
+    json: bool,
+) -> Result<(SourceFile, Artifacts), ExitCode> {
+    match compile(file) {
+        Ok((sf, mut a)) => {
+            a.diags.sort();
+            Ok((sf, a))
         }
+        Err(f) => Err(emit_failure(f, command, json)),
     }
 }
 
 // ---------- commands ----------
 
 fn check(file: PathBuf, json: bool, timings: bool) -> ExitCode {
-    let (sf, a) = match compile(&file) {
+    let (sf, a) = match compiled(&file, "check", json) {
         Ok(x) => x,
         Err(c) => return c,
     };
-    let code = emit_diags(&a, &sf, json);
-    if timings {
-        emit_timings(&a, json);
+    if json {
+        let mut e = Envelope::new("check").diagnostics(&a.diags, &sf);
+        if timings {
+            e = e.timings(&a.timings);
+        }
+        return e.emit();
     }
-    if code == ExitCode::SUCCESS && !json {
+    let code = emit_human_diags(&a, &sf);
+    if timings {
+        print_timings(&a);
+    }
+    if code == ExitCode::SUCCESS {
         eprintln!("{}: ok", file.display());
     }
     code
 }
 
 fn run(file: PathBuf, entry: String, json: bool, timings: bool) -> ExitCode {
-    let (sf, a) = match compile(&file) {
+    let (sf, a) = match compiled(&file, "run", json) {
         Ok(x) => x,
         Err(c) => return c,
     };
-    let code = emit_diags(&a, &sf, json);
-    if timings {
-        emit_timings(&a, json);
-    }
-    if code != ExitCode::SUCCESS {
-        return code;
+    if a.diags.has_errors() {
+        return if json {
+            let mut e = Envelope::new("run").diagnostics(&a.diags, &sf);
+            if timings {
+                e = e.timings(&a.timings);
+            }
+            e.emit()
+        } else {
+            emit_human_diags(&a, &sf)
+        };
     }
     let interp = ontixa_interpreter::Interp::new(&a.mir, &a.module, &a.interner);
     match interp.run(&entry) {
         Ok(v) => {
-            let shown = interp.show(&v);
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
+                let mut e = Envelope::new("run")
+                    .diagnostics(&a.diags, &sf)
+                    .result(json!({
                         "entry": entry,
-                        "value": shown,
-                    }))
-                    .unwrap()
-                );
+                        "value": value_json(&v, &a),
+                        "display": interp.show(&v),
+                    }));
+                if timings {
+                    e = e.timings(&a.timings);
+                }
+                e.emit()
             } else {
-                println!("{shown}");
+                println!("{}", interp.show(&v));
+                if timings {
+                    print_timings(&a);
+                }
+                ExitCode::SUCCESS
             }
-            ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(2)
+            if json {
+                let mut env = Envelope::new("run").diagnostics(&a.diags, &sf).error(
+                    "runtime",
+                    e.to_string(),
+                    2,
+                );
+                if timings {
+                    env = env.timings(&a.timings);
+                }
+                env.emit()
+            } else {
+                eprintln!("error: {e}");
+                ExitCode::from(2)
+            }
+        }
+    }
+}
+
+/// A runtime value as JSON: scalars natively, structs as
+/// `{data: name, fields: {field: value}}`.
+/// serde_json cannot represent bare `i128` — emit a number when the
+/// value fits 64 bits, else a string.
+fn int_json(i: i128) -> Json {
+    if let Ok(v) = i64::try_from(i) {
+        json!(v)
+    } else if let Ok(v) = u64::try_from(i) {
+        json!(v)
+    } else {
+        json!(i.to_string())
+    }
+}
+
+fn value_json(v: &Value, a: &Artifacts) -> Json {
+    match v {
+        Value::Int(i) => int_json(*i),
+        Value::Float(f) => json!(f),
+        Value::Str(s) => json!(s.as_ref()),
+        Value::Bool(b) => json!(b),
+        Value::Unit => Json::Null,
+        Value::Hole => json!("<uninitialized>"),
+        Value::Struct(d, fields) => {
+            let name = a
+                .interner
+                .resolve(a.module.scope.symbols.get(a.module.scope.def(*d).name).name)
+                .to_string();
+            let mut fmap = serde_json::Map::new();
+            if let Some(shape) = a.module.scope.data_shape(*d) {
+                for (fdef, cell) in shape.fields.iter().zip(fields.iter()) {
+                    let fname = a
+                        .interner
+                        .resolve(a.module.scope.symbols.get(fdef.symbol).name)
+                        .to_string();
+                    fmap.insert(fname, value_json(&cell.borrow(), a));
+                }
+            }
+            json!({"data": name, "fields": Json::Object(fmap)})
         }
     }
 }
@@ -257,16 +345,25 @@ fn tokens(file: PathBuf, json: bool) -> ExitCode {
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("error: cannot read {}: {e}", file.display());
-            return ExitCode::from(2);
+            return emit_failure(
+                CompileFailure::Io(format!("cannot read {}: {e}", file.display())),
+                "tokens",
+                json,
+            );
         }
     };
-    let (toks, diags) = ontixa_syntax::lex(&text);
+    let sf = SourceFile::new(
+        FileId::new(0),
+        file.display().to_string(),
+        Some(file.clone()),
+        text.clone(),
+    );
+    let (toks, lex_diags) = ontixa_syntax::lex(&text);
     if json {
-        let items: Vec<serde_json::Value> = toks
+        let items: Vec<Json> = toks
             .iter()
             .map(|t| {
-                serde_json::json!({
+                json!({
                     "kind": format!("{:?}", t.kind),
                     "start": t.start,
                     "end": t.end,
@@ -274,163 +371,65 @@ fn tokens(file: PathBuf, json: bool) -> ExitCode {
                 })
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "tokens": items })).unwrap()
-        );
-    } else {
-        for t in &toks {
-            let text = &text[t.start as usize..t.end as usize];
-            println!("{:>6}..{:<6} {:?} {text:?}", t.start, t.end, t.kind);
-        }
+        return Envelope::new("tokens")
+            .diagnostics(&lex_diags, &sf)
+            .result(json!({"tokens": items}))
+            .emit();
     }
-    if diags.has_errors() {
+    for t in &toks {
+        let text = &text[t.start as usize..t.end as usize];
+        println!("{:>6}..{:<6} {:?} {text:?}", t.start, t.end, t.kind);
+    }
+    if !lex_diags.is_empty() {
+        let diags: Vec<Diagnostic> = lex_diags.iter().cloned().collect();
+        eprint!("{}", ontixa_diagnostics::render_all(&diags, &sf));
+    }
+    if lex_diags.has_errors() {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
 }
 
-fn ast(file: PathBuf) -> ExitCode {
-    match compile(&file) {
-        Ok((sf, a)) => {
-            let code = emit_diags(&a, &sf, true);
-            println!("{}", serde_json::to_string_pretty(&a.ast).unwrap());
-            code
-        }
-        Err(c) => c,
-    }
+/// Serializes an artifact to a `serde_json::Value`. Some artifacts
+/// contain maps with non-string keys (`DefId`, `SymbolId`), which
+/// `to_value` rejects — round-tripping through `to_string` normalizes
+/// them to string keys.
+fn to_json_value<T: serde::Serialize>(v: &T) -> Json {
+    serde_json::to_string(v)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Json::Null)
 }
 
-fn mir(file: PathBuf) -> ExitCode {
-    match compile(&file) {
-        Ok((sf, a)) => {
-            let code = emit_diags(&a, &sf, true);
-            println!("{}", serde_json::to_string_pretty(&a.mir).unwrap());
-            code
-        }
-        Err(c) => c,
-    }
-}
-
-fn graph(file: PathBuf) -> ExitCode {
-    match compile(&file) {
-        Ok((sf, a)) => {
-            let code = emit_diags(&a, &sf, true);
-            println!("{}", serde_json::to_string_pretty(&a.graph).unwrap());
-            code
-        }
-        Err(c) => c,
-    }
-}
-
-fn explain(file: PathBuf, json: bool) -> ExitCode {
-    let (sf, a) = match compile(&file) {
+/// `ast` / `mir` / `graph` — same contract, different payload.
+fn dump(file: PathBuf, json: bool, what: &'static str) -> ExitCode {
+    let (sf, a) = match compiled(&file, what, json) {
         Ok(x) => x,
         Err(c) => return c,
     };
-    let code = emit_diags(&a, &sf, json);
-
-    // Per-definition summary: signature + inferred param contracts.
-    let mut fns = Vec::new();
-    for def in &a.module.scope.defs {
-        let name = a
-            .interner
-            .resolve(a.module.scope.symbols.get(def.name).name)
-            .to_string();
-        match &def.kind {
-            ontixa_hir::DefKind::Function(sig) => {
-                let body = a.mir.body(def.id);
-                let params: Vec<serde_json::Value> = sig
-                    .params
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| {
-                        let pname = a
-                            .interner
-                            .resolve(a.module.scope.symbols.get(p.symbol).name)
-                            .to_string();
-                        let behavior = body
-                            .and_then(|b| b.param_behaviors.get(i))
-                            .map(|b| b.as_str())
-                            .unwrap_or("unknown");
-                        serde_json::json!({
-                            "name": pname,
-                            "behavior": behavior,
-                        })
-                    })
-                    .collect();
-                fns.push(serde_json::json!({
-                    "kind": "fn",
-                    "name": name,
-                    "params": params,
-                }));
-            }
-            ontixa_hir::DefKind::Data(shape) => {
-                let fields: Vec<String> = shape
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        a.interner
-                            .resolve(a.module.scope.symbols.get(f.symbol).name)
-                            .to_string()
-                    })
-                    .collect();
-                fns.push(serde_json::json!({
-                    "kind": "data",
-                    "name": name,
-                    "fields": fields,
-                }));
-            }
-        }
-    }
-
+    let payload = match what {
+        "ast" => to_json_value(&a.ast),
+        "mir" => to_json_value(&a.mir),
+        _ => to_json_value(&a.graph),
+    };
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "file": file.display().to_string(),
-                "defs": fns,
-                "timings": a.timings,
-            }))
-            .unwrap()
-        );
-    } else {
-        println!("{}", file.display());
-        for d in &fns {
-            if d["kind"] == "fn" {
-                let params: Vec<String> = d["params"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|p| {
-                        format!(
-                            "{}: {}",
-                            p["name"].as_str().unwrap(),
-                            p["behavior"].as_str().unwrap()
-                        )
-                    })
-                    .collect();
-                println!(
-                    "  fn {}({})",
-                    d["name"].as_str().unwrap(),
-                    params.join(", ")
-                );
-            } else {
-                let fields: Vec<&str> = d["fields"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|f| f.as_str().unwrap())
-                    .collect();
-                println!(
-                    "  data {} {{ {} }}",
-                    d["name"].as_str().unwrap(),
-                    fields.join(", ")
-                );
-            }
-        }
-        emit_timings(&a, false);
+        let mut res = serde_json::Map::new();
+        res.insert(what.to_string(), payload);
+        return Envelope::new(what)
+            .diagnostics(&a.diags, &sf)
+            .result(Json::Object(res))
+            .emit();
     }
+    let code = emit_human_diags(&a, &sf);
+    println!("{}", serde_json::to_string_pretty(&payload).unwrap());
     code
+}
+
+fn explain_cmd(file: PathBuf, symbol: Option<String>, json: bool, timings: bool) -> ExitCode {
+    let (sf, a) = match compiled(&file, "explain", json) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    explain::run(&file, sf, a, symbol.as_deref(), json, timings)
 }

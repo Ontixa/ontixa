@@ -46,8 +46,9 @@ impl Place {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", content = "value")]
 pub enum Const {
-    /// Integer (fits its [`Ty`]).
-    Int(i128),
+    /// Integer (fits its [`Ty`]). Serialized as i64/u64 when it fits —
+    /// `serde_json` cannot represent bare `i128`.
+    Int(#[serde(serialize_with = "ser_i128")] i128),
     /// Float.
     Float(f64),
     /// String.
@@ -56,6 +57,18 @@ pub enum Const {
     Bool(bool),
     /// Unit value.
     Unit,
+}
+
+/// Serializes an `i128` as a JSON number when it fits in 64 bits,
+/// else as a string (defensive — today's literals never exceed `u64`).
+fn ser_i128<S: serde::Serializer>(v: &i128, s: S) -> Result<S::Ok, S::Error> {
+    if let Ok(i) = i64::try_from(*v) {
+        s.serialize_i64(i)
+    } else if let Ok(u) = u64::try_from(*v) {
+        s.serialize_u64(u)
+    } else {
+        s.serialize_str(&v.to_string())
+    }
 }
 
 /// An operand: either a constant or a place.

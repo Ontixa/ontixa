@@ -41,6 +41,9 @@ Codes are a public contract. Never reuse; retire instead.
 | `E_CANNOT_INFER`       | types     | `let` with no annotation/init    |
 | `E_USE_AFTER_MOVE`     | ownership | read of a moved value            |
 | `E_UNINITIALIZED`      | ownership | read before any store            |
+| `E_IMMUTABLE_ASSIGNMENT` | ownership | write to a non-`mut` binding   |
+| `E_MUTABLE_BORROW_OF_IMMUTABLE` | ownership | `borrow_mut` arg lacks `mut` authority |
+| `E_AMBIGUOUS_SYMBOL`   | explain   | symbol query matched >1 symbol   |
 | `E_MISSING_RETURN`     | types     | non-unit fn can fall through     |
 | `E_LITERAL_OVERFLOW`   | types     | literal exceeds its type         |
 | `E_UNSUPPORTED_OP`     | types     | op not defined for operand types |
@@ -48,9 +51,14 @@ Codes are a public contract. Never reuse; retire instead.
 
 ## JSON schema (version 1)
 
+Every `--json` command emits **exactly one** envelope document on
+stdout — never concatenated documents, never bare logs:
+
 ```json
 {
-  "version": 1,
+  "schema": 1,
+  "command": "check",
+  "success": false,
   "diagnostics": [
     {
       "code": "E_USE_AFTER_MOVE",
@@ -60,12 +68,23 @@ Codes are a public contract. Never reuse; retire instead.
       "labels": [{ "start": 326, "end": 327, "message": "value moved here" }],
       "notes": [],
       "help": [],
-      "subject": "q",
-      "details": {}
+      "subject": "q"
     }
-  ]
+  ],
+  "result": null,
+  "timings": [],
+  "error": null
 }
 ```
 
-`ontixa check --json` emits this document. Agents should key off
-`code` + `details`, never off rendered text.
+- `success` is `false` when any error-severity diagnostic exists or
+  `error` is non-null.
+- `result` carries the command payload (`tokens`, `ast`, `mir`,
+  `graph`, `symbol`, or a `run` value); `null` when none.
+- `timings` is `[]` unless `--timings` was passed (timings are
+  nondeterministic and opt-in).
+- `error` is `{ "kind": "io"|"runtime"|"internal", "message": ... }`
+  for non-diagnostic failures, else `null`.
+
+Agents should key off `code` + `details`, never off rendered text.
+Exit codes: `0` ok, `1` error diagnostics, `2` io/runtime, `3` ICE.

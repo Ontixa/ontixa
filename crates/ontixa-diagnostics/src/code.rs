@@ -51,6 +51,9 @@ pub enum Code {
     ImmutableAssignment,
     /// A `borrow_mut`-behavior parameter received an immutable place.
     MutableBorrowOfImmutable,
+    /// A name lookup (e.g. `explain <symbol>`) matched more than one
+    /// semantic symbol.
+    AmbiguousSymbol,
     /// A non-unit function can complete without returning a value.
     MissingReturn,
     /// An integer literal does not fit its required type.
@@ -86,6 +89,7 @@ impl Code {
             Code::Uninitialized => "E_UNINITIALIZED",
             Code::ImmutableAssignment => "E_IMMUTABLE_ASSIGNMENT",
             Code::MutableBorrowOfImmutable => "E_MUTABLE_BORROW_OF_IMMUTABLE",
+            Code::AmbiguousSymbol => "E_AMBIGUOUS_SYMBOL",
             Code::MissingReturn => "E_MISSING_RETURN",
             Code::LiteralOverflow => "E_LITERAL_OVERFLOW",
             Code::UnsupportedOperation => "E_UNSUPPORTED_OP",
