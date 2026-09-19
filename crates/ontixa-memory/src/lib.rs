@@ -339,4 +339,92 @@ mod tests {
         );
         assert_eq!(b, ParamBehavior::Escape);
     }
+
+    // ---------- fixpoint convergence (no round cap) ----------
+
+    /// Builds `data P` + a call chain `f0 -> f1 -> ... -> f_{n-1}`.
+    /// `tail_body` is the body of the last function; every earlier
+    /// function is `fn fK(p: P) -> P { return f_{K+1}(p); }`.
+    fn chain(n: usize, tail_body: &str) -> String {
+        let mut src = String::from("data P { x: i32; } ");
+        for i in 0..n - 1 {
+            src.push_str(&format!("fn f{i}(p: P) -> P {{ return f{}(p); }} ", i + 1));
+        }
+        src.push_str(&format!("fn f{}(p: P) -> P {{ {tail_body} }}", n - 1));
+        src.push_str(" fn main() -> i32 { return 0; }");
+        src
+    }
+
+    #[test]
+    fn deep_chain_32_propagates_escape() {
+        let src = chain(32, "return p;");
+        assert_eq!(behavior(&src, "f0", 0), ParamBehavior::Escape);
+    }
+
+    #[test]
+    fn deep_chain_100_propagates_escape() {
+        // Would have collapsed to `Unknown` under the old 16-round cap.
+        let src = chain(100, "return p;");
+        assert_eq!(behavior(&src, "f0", 0), ParamBehavior::Escape);
+        assert_eq!(behavior(&src, "f42", 0), ParamBehavior::Escape);
+    }
+
+    #[test]
+    fn deep_chain_100_propagates_move() {
+        // The tail drops `p` and returns a fresh P — so p is consumed
+        // (Move) at every level, not escaped.
+        let src = chain(100, "return P { x: 0 };");
+        assert_eq!(behavior(&src, "f0", 0), ParamBehavior::Move);
+        assert_eq!(behavior(&src, "f50", 0), ParamBehavior::Move);
+        assert_eq!(behavior(&src, "f99", 0), ParamBehavior::Move);
+    }
+
+    #[test]
+    fn direct_recursion_converges() {
+        let b = behavior(
+            "data P { x: i32; } fn f(p: P) -> i32 { return f(p); } fn main() -> i32 { return 0; }",
+            "f",
+            0,
+        );
+        // f only forwards p to itself — never reads/mutates/moves it.
+        assert_eq!(b, ParamBehavior::Borrow);
+    }
+
+    #[test]
+    fn mutual_recursion_converges() {
+        let src = "data P { x: i32; } fn f(p: P) -> i32 { return g(p); } fn g(p: P) -> i32 { return f(p); } fn main() -> i32 { return 0; }";
+        assert_eq!(behavior(src, "f", 0), ParamBehavior::Borrow);
+        assert_eq!(behavior(src, "g", 0), ParamBehavior::Borrow);
+    }
+
+    #[test]
+    fn recursion_with_escape_converges() {
+        // The base case returns p — so p escapes through the cycle.
+        let src = "data P { x: i32; } fn f(p: P, c: bool) -> P { if c { p } else { f(p, false) } } fn main() -> i32 { return 0; }";
+        assert_eq!(behavior(src, "f", 0), ParamBehavior::Escape);
+    }
+
+    #[test]
+    fn multiple_sccs_converge() {
+        // Two independent recursion clusters plus a chain into them.
+        let src = "data P { x: i32; } \
+                   fn a1(p: P) -> i32 { return a2(p); } \
+                   fn a2(p: P) -> i32 { return a1(p); } \
+                   fn b1(p: P) -> i32 { return b2(p); } \
+                   fn b2(p: P) -> i32 { return b1(p); } \
+                   fn entry(p: P) -> i32 { return a1(p) + b1(p); } \
+                   fn main() -> i32 { return 0; }";
+        for f in ["a1", "a2", "b1", "b2", "entry"] {
+            assert_eq!(behavior(src, f, 0), ParamBehavior::Borrow, "{f}");
+        }
+    }
+
+    #[test]
+    fn fixpoint_is_deterministic() {
+        let src = chain(48, "return p;");
+        let b0 = behavior(&src, "f0", 0);
+        let b1 = behavior(&src, "f0", 0);
+        assert_eq!(b0, b1);
+        assert_eq!(b0, ParamBehavior::Escape);
+    }
 }

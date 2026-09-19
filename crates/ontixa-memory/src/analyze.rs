@@ -5,11 +5,17 @@
 //! **Phase A — contract inference.** For every function, a taint walk
 //! records how each parameter is *used*: read, mutated, moved, or
 //! escaped into the return value. Call arguments are judged by the
-//! callee's contract — which is itself being inferred — so the whole
-//! thing iterates to a fixpoint over the call graph. Recursion
-//! converges because the behavior lattice is finite and the update
-//! step is monotone; anything that fails to converge in 16 rounds is
-//! `Unknown`.
+//! callee's contract — which is itself being inferred — so contracts
+//! iterate to a fixpoint over the call graph. The fixpoint runs as a
+//! **reverse-dependency worklist**: a function is re-evaluated only
+//! when one of its callees' contracts changed. Facts are monotone in
+//! callee contracts and `classify` is monotone in facts on a finite
+//! lattice (`copy < borrow < borrow_mut < move < escape`), so the
+//! iteration converges to the unique least fixpoint — recursion,
+//! mutual recursion, and arbitrarily deep chains all terminate
+//! structurally. There is no round cap; `Unknown` is never produced
+//! by "the compiler got tired" — it is reserved for genuinely
+//! unanalyzable constructs (e.g. future indirect calls).
 //!
 //! **Phase B — enforcement.** With final contracts, a per-binding
 //! state walk (`initialized`, `moved`, `maybe-*`) emits
@@ -54,18 +60,22 @@ impl OwnershipTables {
 
 type ContractTable = FxHashMap<DefId, Vec<ParamBehavior>>;
 
-/// The maximum fixpoint rounds before remaining params become `Unknown`.
-const MAX_ROUNDS: usize = 16;
-
 /// Infers ownership for the whole module and enforces
-/// use-after-move / initialization rules.
+/// use-after-move / initialization / mutability rules.
 pub fn infer_ownership(
     module: &HirModule,
     tables: &TypeTables,
     interner: &Interner,
     diags: &mut Diagnostics,
 ) -> OwnershipTables {
-    // ---- Phase A: fixpoint over the call graph ----
+    // ---- Phase A: contract fixpoint ----
+    //
+    // Bottom values: `Copy` for copy types (fixed forever — a copy
+    // type can never need a stronger contract), `Borrow` for
+    // non-copy types (the weakest contract). Because callee contracts
+    // only strengthen and `classify` is monotone, every contract
+    // converges after at most a few strengthenings; the worklist is
+    // therefore finite by construction.
     let mut contracts: ContractTable = module
         .scope
         .defs
@@ -90,38 +100,50 @@ pub fn infer_ownership(
         })
         .collect();
 
-    for round in 0..MAX_ROUNDS {
-        let mut changed = false;
-        for def in module.scope.defs.iter() {
-            let Some(sig) = module.scope.fn_sig(def.id) else {
-                continue;
-            };
-            let Some(body) = module.body(def.id) else {
-                continue;
-            };
-            let facts = collect_facts(module, tables, &contracts, body, sig);
-            let mut next = Vec::with_capacity(sig.params.len());
-            for (i, p) in sig.params.iter().enumerate() {
-                let ty = Ty::from_ref(p.ty);
-                next.push(classify(ty, &facts[i]));
-            }
-            if contracts.get(&def.id) != Some(&next) {
-                contracts.insert(def.id, next);
-                changed = true;
-            }
+    // Reverse edges: callee -> its callers (sorted for deterministic
+    // enqueue order; the fixpoint result itself is order-independent).
+    let mut callers: FxHashMap<DefId, Vec<DefId>> = FxHashMap::default();
+    for def in &module.scope.defs {
+        if module.body(def.id).is_none() {
+            continue;
         }
-        if !changed {
-            break;
+        for callee in callees_of(module, module.body(def.id).unwrap().root) {
+            callers.entry(callee).or_default().push(def.id);
         }
-        if round == MAX_ROUNDS - 1 {
-            // Non-convergence: mark every non-copy param Unknown.
-            for (def, behaviors) in contracts.iter_mut() {
-                for b in behaviors.iter_mut() {
-                    if *b != ParamBehavior::Copy {
-                        *b = ParamBehavior::Unknown;
+    }
+    for v in callers.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
+
+    let mut work: Vec<DefId> = module
+        .scope
+        .defs
+        .iter()
+        .filter(|d| module.scope.fn_sig(d.id).is_some() && module.body(d.id).is_some())
+        .map(|d| d.id)
+        .collect();
+    let mut queued: FxHashSet<DefId> = work.iter().copied().collect();
+    let mut head = 0;
+    while head < work.len() {
+        let f = work[head];
+        head += 1;
+        queued.remove(&f);
+        let sig = module.scope.fn_sig(f).unwrap();
+        let body = module.body(f).unwrap();
+        let facts = collect_facts(module, tables, &contracts, body, sig);
+        let mut next = Vec::with_capacity(sig.params.len());
+        for (i, p) in sig.params.iter().enumerate() {
+            next.push(classify(Ty::from_ref(p.ty), &facts[i]));
+        }
+        if contracts.get(&f) != Some(&next) {
+            contracts.insert(f, next);
+            if let Some(cs) = callers.get(&f) {
+                for &caller in cs {
+                    if queued.insert(caller) {
+                        work.push(caller);
                     }
                 }
-                let _ = def;
             }
         }
     }
@@ -161,7 +183,63 @@ pub fn infer_ownership(
 
 // ================= Phase A: usage facts =================
 
-/// Per-parameter usage flags gathered by the taint walk.
+/// The set of `fn` defs called from the expression tree at `root`.
+/// Used to build the callee→caller worklist edges.
+fn callees_of(module: &HirModule, root: ExprId) -> FxHashSet<DefId> {
+    let mut out = FxHashSet::default();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        match &module.expr(id).kind {
+            HirExprKind::Call { def, args } => {
+                out.insert(*def);
+                stack.extend(args.iter().copied());
+            }
+            HirExprKind::Field { base, .. } => stack.push(*base),
+            HirExprKind::Binary { lhs, rhs, .. } => {
+                stack.push(*lhs);
+                stack.push(*rhs);
+            }
+            HirExprKind::Unary { expr, .. } => stack.push(*expr),
+            HirExprKind::If { cond, then, else_ } => {
+                stack.push(*cond);
+                stack.push(*then);
+                stack.extend(*else_);
+            }
+            HirExprKind::Block { stmts, tail } => {
+                for s in stmts {
+                    match s {
+                        HirStmt::Let { init: Some(e), .. } => stack.push(*e),
+                        HirStmt::Assign { value, .. } => stack.push(*value),
+                        HirStmt::Expr { expr, .. } => stack.push(*expr),
+                        HirStmt::Return { value: Some(v), .. } => stack.push(*v),
+                        _ => {}
+                    }
+                }
+                stack.extend(*tail);
+            }
+            HirExprKind::StructLit { fields, .. } => {
+                stack.extend(fields.iter().map(|(_, e)| *e));
+            }
+            HirExprKind::Literal(_) | HirExprKind::Var(_) | HirExprKind::Poison => {}
+        }
+    }
+    out
+}
+
+/// Per-parameter usage facts gathered by the taint walk — the
+/// *multi-dimensional* ownership domain (see `docs/ownership-lattice.md`):
+///
+/// | flag      | dimension        | meaning                          |
+/// | --------- | ---------------- | -------------------------------- |
+/// | `read`    | access ≥ read    | the value was observed           |
+/// | `mutated` | access = write   | written through field projection |
+/// | `moved`   | consumption      | ownership consumed, not escaped  |
+/// | `escaped` | escape           | may flow into the return value   |
+///
+/// `classify` derives the public [`ParamBehavior`] contract from
+/// these facts. Flags only ever go `false → true` during one walk,
+/// and callee contracts only strengthen between walks — the two
+/// monotonicities together are what make the fixpoint finite.
 #[derive(Debug, Default, Clone)]
 struct ParamFacts {
     read: bool,
