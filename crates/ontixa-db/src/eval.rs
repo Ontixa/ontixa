@@ -42,7 +42,7 @@ pub(crate) fn eval(db: &mut Db, key: QueryKey) -> (Value, Vec<Diagnostic>) {
             let Value::Tree(root) = tree else {
                 unreachable!("Parse produced wrong value")
             };
-            Value::Ast(ontixa_ast::lower_module(&root, &mut diags))
+            Value::Ast(Arc::new(ontixa_ast::lower_module(&root, &mut diags)))
         }
         QueryKey::Scope(f) => {
             let module_ast = ast(db, f);
@@ -82,7 +82,7 @@ fn text(db: &mut Db, f: FileId) -> Arc<str> {
     }
 }
 
-fn ast(db: &mut Db, f: FileId) -> AstModule {
+fn ast(db: &mut Db, f: FileId) -> Arc<AstModule> {
     match db.demand(QueryKey::Ast(f)) {
         Value::Ast(a) => a,
         _ => unreachable!("Ast produced wrong value"),
@@ -335,7 +335,7 @@ fn compile(db: &mut Db, f: FileId) -> Arc<Artifacts> {
         .collect();
     Arc::new(Artifacts {
         built_revision: db.revision,
-        ast: module_ast,
+        ast: (*module_ast).clone(),
         module,
         interner: db.interner.clone(),
         types,

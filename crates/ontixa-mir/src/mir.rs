@@ -176,6 +176,10 @@ pub struct LocalDecl {
     pub sym: Option<SymbolId>,
     /// The slot's type.
     pub ty: Ty,
+    /// Whether writes after initialization are legal (`mut` bindings
+    /// and compiler temporaries — temps are always internally
+    /// writable).
+    pub mutable: bool,
 }
 
 /// A function's MIR body.

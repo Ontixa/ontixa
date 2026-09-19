@@ -66,7 +66,7 @@ pub fn lower_fn(
     };
     // Params occupy locals 0..n in order.
     for p in &sig.params {
-        let local = l.alloc_local(Some(p.symbol), Ty::from_ref(p.ty));
+        let local = l.alloc_local(Some(p.symbol), Ty::from_ref(p.ty), p.mutable);
         l.local_of.insert(p.symbol, local);
     }
     l.cur = l.new_block(); // entry = block 0
@@ -112,21 +112,23 @@ struct FnLowerer<'a> {
 impl FnLowerer<'_> {
     // ---------- infrastructure ----------
 
-    fn alloc_local(&mut self, sym: Option<SymbolId>, ty: Ty) -> Local {
+    fn alloc_local(&mut self, sym: Option<SymbolId>, ty: Ty, mutable: bool) -> Local {
         let l = Local(self.locals.len() as u32);
-        self.locals.push(LocalDecl { sym, ty });
+        self.locals.push(LocalDecl { sym, ty, mutable });
         l
     }
 
     fn temp(&mut self, ty: Ty) -> Place {
-        Place::local(self.alloc_local(None, ty))
+        // Compiler temporaries are always internally writable.
+        Place::local(self.alloc_local(None, ty, true))
     }
 
     fn local(&mut self, sym: SymbolId, ty: Ty) -> Local {
         match self.local_of.get(&sym) {
             Some(l) => *l,
             None => {
-                let l = self.alloc_local(Some(sym), ty);
+                let mutable = self.body.symbol(self.scope, sym).mutable;
+                let l = self.alloc_local(Some(sym), ty, mutable);
                 self.local_of.insert(sym, l);
                 l
             }

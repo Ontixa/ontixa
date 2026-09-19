@@ -183,12 +183,6 @@ fn sink(p: P) -> i32 { return p.x; }";
         db.set_source(f, src.replace("return p.x;", "let r = p; return r.x;"));
         assert!(db.compile(f).is_valid());
         let evals = db.last_evaluated();
-        for (k, e) in &db.memo {
-            eprintln!(
-                "entry {:?}: computed_at={} verified_at={} deps={:?}",
-                k, e.computed_at, e.verified_at, e.deps
-            );
-        }
         assert!(evals.contains(&QueryKey::Ownership(FileId::new(0))));
         assert_eq!(evald_defs(&db, hir_key), ["sink"]);
         // Ownership's value changed → mir bodies that read contracts
@@ -211,6 +205,103 @@ fn sink(p: P) -> i32 { return p.x; }";
         }
         assert!(db.compile(a).is_valid());
         assert_eq!(db.last_evaluated(), Vec::new());
+    }
+
+    // ---- determinism -------------------------------------------------
+
+    const DIVERSE: &str = "\
+data P { x: i32; y: i32; }
+fn read(p: P) -> i32 { return p.x + p.y; }
+fn bump(mut p: P) { p.x = p.x + 1; }
+fn keep(p: P) -> P { return p; }
+fn main() -> i32 { let mut q = P { x: 1, y: 2 }; bump(q); let r = keep(q); return read(r); }";
+
+    /// Two independent `Db` sessions compiling the same source must
+    /// produce byte-identical serialized artifacts — no HashMap
+    /// iteration order, pointer, or timing leakage into the output.
+    #[test]
+    fn artifacts_are_byte_deterministic_across_sessions() {
+        let compile_once = || {
+            let mut db = Db::new();
+            let f = db.add_source(DIVERSE);
+            db.compile_owned(f)
+        };
+        let a = compile_once();
+        let b = compile_once();
+        assert_eq!(
+            serde_json::to_string(&a.ast).unwrap(),
+            serde_json::to_string(&b.ast).unwrap(),
+            "AST"
+        );
+        assert!(a.module == b.module, "HIR");
+        assert_eq!(
+            serde_json::to_string(&a.graph).unwrap(),
+            serde_json::to_string(&b.graph).unwrap(),
+            "SPG"
+        );
+        assert_eq!(
+            serde_json::to_string(&a.mir).unwrap(),
+            serde_json::to_string(&b.mir).unwrap(),
+            "MIR"
+        );
+        let diags = |d: &ontixa_diagnostics::Diagnostics| {
+            d.iter()
+                .map(|x| (x.code, x.message.clone(), x.primary, x.labels.len()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(diags(&a.diags), diags(&b.diags), "diagnostics");
+    }
+
+    /// An edit followed by a revert to byte-identical text re-runs
+    /// exactly the edited body's chain — the memo holds the edited
+    /// state, so the revert is a genuine change, but a bounded one.
+    /// And the result must equal a from-scratch compile: incremental
+    /// recomputation can never produce different artifacts than a
+    /// clean build would.
+    #[test]
+    fn revert_produces_from_scratch_artifacts() {
+        let mut db = Db::new();
+        let f = db.add_source(DIVERSE);
+        let original = serde_json::to_string(&db.compile(f).graph).unwrap();
+        db.set_source(f, DIVERSE.replace("x + p.y", "x * p.y"));
+        assert!(db.compile(f).is_valid());
+        db.set_source(f, DIVERSE);
+        assert!(db.compile(f).is_valid());
+        // Bounded invalidation: only the edited def's chain re-ran.
+        assert_eq!(evald_defs(&db, hir_key), ["read"]);
+        assert_eq!(evald_defs(&db, mir_key), ["read"]);
+        // And the reverted graph is byte-identical to the original's.
+        assert_eq!(
+            serde_json::to_string(&db.compile(f).graph).unwrap(),
+            original
+        );
+    }
+
+    /// Diagnostic order is part of the deterministic contract:
+    /// repeated compiles of the same invalid source emit the same
+    /// sequence, and `--json` consumers get a stable `code` stream.
+    #[test]
+    fn diagnostics_order_is_deterministic() {
+        let src = "\
+fn main() -> i32 { let x = 1; x = 2; return nope; let q = y; }";
+        let mut db = Db::new();
+        let f = db.add_source(src);
+        let first: Vec<_> = db
+            .compile(f)
+            .diags
+            .iter()
+            .map(|d| (d.code, d.message.clone()))
+            .collect();
+        assert!(!first.is_empty());
+        let mut db2 = Db::new();
+        let f2 = db2.add_source(src);
+        let second: Vec<_> = db2
+            .compile(f2)
+            .diags
+            .iter()
+            .map(|d| (d.code, d.message.clone()))
+            .collect();
+        assert_eq!(first, second);
     }
 
     use ontixa_source::{DefKey, FileId};

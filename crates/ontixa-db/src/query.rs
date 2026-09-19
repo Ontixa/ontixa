@@ -120,8 +120,9 @@ pub(crate) enum Value {
     /// `Parse`: lossless syntax tree (rowan nodes are internally
     /// `Arc`'d — cheap to clone).
     Tree(SyntaxNode),
-    /// `Ast`: canonical AST.
-    Ast(AstModule),
+    /// `Ast`: canonical AST — `Arc`'d because every `AstItem` demand
+    /// reads it; an owned value would copy the whole module per def.
+    Ast(Arc<AstModule>),
     /// `Scope`: module scope.
     Scope(Arc<ModuleScope>),
     /// `AstItem`: `None` when no item has that name.
@@ -152,7 +153,7 @@ pub(crate) enum Value {
 pub(crate) fn same_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Text(x), Value::Text(y)) => x == y,
-        (Value::Ast(x), Value::Ast(y)) => x == y,
+        (Value::Ast(x), Value::Ast(y)) => **x == **y,
         (Value::Scope(x), Value::Scope(y)) => **x == **y,
         (Value::Item(x), Value::Item(y)) => x == y,
         (Value::Hir(x), Value::Hir(y)) => x == y,

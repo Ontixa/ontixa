@@ -12,3 +12,9 @@ Thumbs.db
 # Snapshot test regeneration artifacts
 *.snap.new
 *.expected.new
+
+# AI assistant artifacts
+.devin/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+NUL

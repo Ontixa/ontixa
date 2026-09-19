@@ -73,6 +73,13 @@ pub enum EdgeKind {
     Binds,
     /// Assign statement → written local/param symbol.
     Writes,
+    /// Call argument expression → callee parameter symbol. Carries
+    /// `position` and `behavior` — the inferred contract under which
+    /// the argument's place passes to the callee. This is the
+    /// ownership/memory edge: `borrow`/`borrow_mut` mean the callee
+    /// shares the caller's storage for the call's extent;
+    /// `move`/`escape` mean ownership transfers.
+    Passes,
 }
 
 /// One node in the semantic graph.

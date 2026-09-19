@@ -26,3 +26,12 @@ The `benchmarks/` directory is where evidence lives.
 `--timings` stage costs on the `examples/` corpus — sub-millisecond
 for all stages at this scale. Claims about C/Rust-class native
 performance are *targets* (see constitution + roadmap), not results.
+
+## Milestone-2 state
+
+`benchmarks/` now holds a real harness:
+`crates/ontixa-db/tests/bench_incremental.rs` measures cold vs no-op
+vs single-body-edit compiles with query-eval counts, on the
+`benchmarks/corpus/` seeds. Results and their honest interpretation
+(including where we lose — file-granular stages dominate edit
+latency) live in `benchmarks/README.md`.

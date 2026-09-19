@@ -93,4 +93,26 @@ mod tests {
             .expect("call");
         assert_eq!(call[0], ontixa_memory::ParamBehavior::Borrow);
     }
+
+    #[test]
+    fn locals_carry_source_mutability() {
+        let (mir, m, mut interner) = mir(
+            "fn f(mut a: i32, b: i32) -> i32 { let mut x = a; let y = b; x = x + y; return x; }",
+        );
+        let f = m.scope.fns[&interner.intern("f")];
+        let body = mir.body(f).expect("body");
+        // Params come first: `mut a` writable, `b` not.
+        assert!(body.locals[0].mutable);
+        assert!(!body.locals[1].mutable);
+        // Bindings follow in declaration order: `mut x`, then `y`.
+        assert!(body.locals[2].mutable, "let mut x");
+        assert!(!body.locals[3].mutable, "let y");
+        // Compiler temporaries are always writable internally.
+        assert!(
+            body.locals
+                .iter()
+                .filter(|l| l.sym.is_none())
+                .all(|l| l.mutable)
+        );
+    }
 }

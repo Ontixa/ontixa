@@ -82,6 +82,85 @@ mod tests {
     }
 
     #[test]
+    fn call_args_carry_passes_edges() {
+        // The memory edge: `read(q)` passes `q`'s place to `read`'s
+        // param under the inferred `borrow` contract.
+        let (g, _, _, _, _, diags) = graph_src(
+            "data P { x: i32; } fn read(p: P) -> i32 { return p.x; } fn main() -> i32 { let q = P { x: 1 }; return read(q); }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let passes: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Passes)
+            .collect();
+        assert_eq!(passes.len(), 1);
+        let e = passes[0];
+        assert_eq!(
+            e.attrs.get("behavior").and_then(|v| v.as_str()),
+            Some("borrow")
+        );
+        assert_eq!(e.attrs.get("position").and_then(|v| v.as_u64()), Some(0));
+        // Target is the callee's param node, carrying the same contract.
+        let p = &g.nodes[e.to as usize];
+        assert_eq!(p.kind, NodeKind::Param);
+        assert_eq!(p.label, "p");
+        assert_eq!(
+            p.attrs.get("behavior").and_then(|v| v.as_str()),
+            Some("borrow")
+        );
+        // Source is an expression node inside `main`.
+        assert_eq!(g.nodes[e.from as usize].kind, NodeKind::Expr);
+    }
+
+    #[test]
+    fn passes_edge_reflects_inferred_contract() {
+        // A mutating callee produces a `borrow_mut` edge; an escaping
+        // callee produces `escape` — the SPG exposes the distinction.
+        let (g, _, _, _, _, diags) = graph_src(
+            "data P { x: i32; }
+             fn bump(mut p: P) { p.x = p.x + 1; }
+             fn keep(p: P) -> P { return p; }
+             fn main() -> i32 { let mut q = P { x: 1 }; bump(q); let r = keep(q); return r.x; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let behaviors: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Passes)
+            .map(|e| e.attrs["behavior"].as_str().unwrap())
+            .collect();
+        assert_eq!(behaviors, ["borrow_mut", "escape"]);
+    }
+
+    #[test]
+    fn param_node_carries_escape_summary_and_evidence() {
+        let (g, _, _, _, _, diags) = graph_src(
+            "data P { x: i32; } fn keep(p: P) -> P { return p; } fn main() -> i32 { let q = P { x: 1 }; let r = keep(q); return r.x; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let p = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Param && n.label == "p")
+            .expect("param node");
+        let escapes: Vec<_> = p.attrs["escapes"]
+            .as_array()
+            .expect("escapes attr")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(escapes, ["return"]);
+        // Evidence records the use site that proved the escape.
+        let evidence = p.attrs["evidence"].as_array().expect("evidence attr");
+        assert!(
+            evidence
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("escaped"))
+        );
+    }
+
+    #[test]
     fn type_nodes_are_deduplicated() {
         let (g, _, _, _, _, diags) = graph_src(
             "fn f(a: i32, b: i32) -> i32 { return a + b; } fn main() -> i32 { return f(1, 2); }",

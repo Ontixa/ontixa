@@ -107,7 +107,20 @@ which future region/arena allocation will use for placement.
 
 ## What the runtime does
 
-The interpreter executes contracts literally: `borrow`/`borrow_mut`
-arguments pass the caller's storage *cell* (writes land in place);
-consuming positions receive fresh cells. Ownership bugs are rejected
-at compile time, so execution never checks them again.
+The interpreter executes contracts literally — and *validates* them
+rather than trusting them (ADR-0005, milestone-2 hardening):
+
+- `borrow` args share the caller's cell; the value is snapshotted
+  (deep-cloned) before the call and structurally compared after — a
+  callee write through a shared borrow traps.
+- `borrow_mut` args share the cell unchecked — writes are the point.
+- `move`/`escape`/`unknown` args receive a fresh cell; the caller's
+  cell is poisoned with `Hole` after the call returns, so any later
+  read or re-consume traps as use-after-move.
+- If the call itself traps, poisoning is skipped — the program is
+  already dead; the trap propagates.
+
+These checks are defense-in-depth: valid source can never reach them
+(the static pass rejects the violations first). They exist so a
+*wrong* contract — a compiler bug or hand-built MIR — fails loudly
+instead of silently corrupting memory.

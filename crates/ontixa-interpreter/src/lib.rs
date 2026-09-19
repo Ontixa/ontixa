@@ -155,4 +155,114 @@ mod tests {
             other => panic!("expected trap, got {other:?}"),
         }
     }
+
+    // ---- contract oracle --------------------------------------------
+    //
+    // The oracle's traps are unreachable through valid source — the
+    // static pass rejects violations first. They exist so a *wrong*
+    // contract (compiler bug, hand-built MIR) fails loudly at runtime
+    // instead of silently corrupting memory. Tests therefore forge the
+    // bad contract in MIR directly, or run rejected source.
+
+    /// Rewrites every `Call` contract in `def`'s body with `f`.
+    fn tamper_contracts(
+        mir: &mut ontixa_mir::MirModule,
+        def: ontixa_source::DefId,
+        f: impl Fn(&mut Vec<ontixa_memory::ParamBehavior>),
+    ) {
+        use ontixa_mir::{MirStmt, Rvalue};
+        let body = mir.fns[def.index()].as_mut().expect("body");
+        for b in &mut body.blocks {
+            for s in &mut b.stmts {
+                let rv = match s {
+                    MirStmt::Assign { val, .. } | MirStmt::Eval { val } => val,
+                };
+                if let Rvalue::Call { contract, .. } = rv {
+                    f(contract);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_traps_write_through_shared_borrow() {
+        // `bump` writes through `p` — inference says `borrow_mut`.
+        // Lie about it (`borrow`) and the callee's write must trap.
+        let src = "data P { x: i32; }
+                   fn bump(mut p: P) { p.x = p.x + 1; }
+                   fn main() -> i32 { let mut q = P { x: 1 }; bump(q); return q.x; }";
+        let (mut mir, module, _t, _o, interner, diags) = ontixa_mir::mir_src(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        let main = module.scope.fns[&interner.get("main").unwrap()];
+        tamper_contracts(&mut mir, main, |c| {
+            c[0] = ontixa_memory::ParamBehavior::Borrow
+        });
+        let err = Interp::new(&mir, &module, &interner)
+            .run("main")
+            .unwrap_err();
+        match err {
+            RuntimeError::Trap(m) => assert!(m.contains("borrow contract"), "{m}"),
+            other => panic!("expected trap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oracle_detects_borrow_write_into_nested_field() {
+        // The oracle's structural equality must see writes nested
+        // inside struct fields, not just whole-cell swaps.
+        let src = "data P { x: i32; }
+                   data Q { p: P; }
+                   fn bump(mut q: Q) { q.p.x = q.p.x + 1; }
+                   fn main() -> i32 { let mut q = Q { p: P { x: 1 } }; bump(q); return q.p.x; }";
+        let (mut mir, module, _t, _o, interner, diags) = ontixa_mir::mir_src(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        let main = module.scope.fns[&interner.get("main").unwrap()];
+        tamper_contracts(&mut mir, main, |c| {
+            c[0] = ontixa_memory::ParamBehavior::Borrow
+        });
+        let err = Interp::new(&mir, &module, &interner)
+            .run("main")
+            .unwrap_err();
+        match err {
+            RuntimeError::Trap(m) => assert!(m.contains("borrow contract"), "{m}"),
+            other => panic!("expected trap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oracle_traps_second_move_from_consumed_local() {
+        // `keep` escapes `p` (returns it) — the second call on `q` is
+        // E_USE_AFTER_MOVE statically. The runtime agrees: the cell is
+        // poisoned after the first call and the second traps.
+        let src = "data P { x: i32; }
+                   fn keep(p: P) -> P { return p; }
+                   fn main() -> i32 { let q = P { x: 1 }; let a = keep(q); let b = keep(q); return a.x + b.x; }";
+        let (mir, module, _t, _o, interner, diags) = ontixa_mir::mir_src(src);
+        assert!(!diags.is_empty(), "expected use-after-move diagnostic");
+        let err = Interp::new(&mir, &module, &interner)
+            .run("main")
+            .unwrap_err();
+        match err {
+            RuntimeError::Trap(m) => assert!(m.contains("already-consumed"), "{m}"),
+            other => panic!("expected trap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oracle_traps_read_of_moved_local() {
+        // After a consuming call, *any* later read of the caller's
+        // cell — not just another call — must trap on the hole.
+        let src = "data P { x: i32; }
+                   fn keep(p: P) -> P { return p; }
+                   fn main() -> i32 { let q = P { x: 1 }; let a = keep(q); return a.x + q.x; }";
+        let (mir, module, _t, _o, interner, diags) = ontixa_mir::mir_src(src);
+        assert!(!diags.is_empty(), "expected use-after-move diagnostic");
+        let err = Interp::new(&mir, &module, &interner)
+            .run("main")
+            .unwrap_err();
+        match err {
+            RuntimeError::Trap(m) => assert!(m.contains("moved-out"), "{m}"),
+            other => panic!("expected trap, got {other:?}"),
+        }
+    }
 }

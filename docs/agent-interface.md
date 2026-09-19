@@ -61,6 +61,13 @@ Parameter contracts now carry `evidence` — the `(kind, span)` sites
 that produced each flag — and `escapes` (`return`, `call \`f\``), so
 an agent sees *why* `p` is `borrow_mut`, not just that it is.
 
+The SPG exposes ownership transfer structurally: every call argument
+has a `passes` edge from the argument expression to the callee's
+parameter node, carrying `position` and `behavior`. `borrow`/
+`borrow_mut` edges mean shared storage for the call's extent;
+`move`/`escape` mean ownership transfers. Ownership flow is a graph
+query, not an inference task.
+
 ## Planned (roadmap)
 
 - Semantic patches: `apply` an AST-level edit, serialized as spans +

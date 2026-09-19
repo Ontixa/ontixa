@@ -33,3 +33,14 @@ fresh cells.
 - Milestone-1 limits: no stack-depth management, `&&`/`||` are eager
   (no side effects exist to observe it), `i128` arithmetic superset
   instead of width-exact ops.
+
+## Milestone-2 hardening
+
+The interpreter no longer merely *executes* contracts — it validates
+them. `borrow` args are deep-snapshotted and compared post-call (a
+callee write traps); `move`/`escape`/`unknown` args get fresh cells
+while the caller's cell is poisoned with `Hole` on return (later
+reads or re-moves trap). These traps are unreachable through valid
+source — the static pass rejects violations first — so they exist as
+a loud failure mode for a wrong contract (compiler bug or hand-built
+MIR), verified by contract-tampering tests.

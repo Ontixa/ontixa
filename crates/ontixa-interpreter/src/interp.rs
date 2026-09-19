@@ -150,6 +150,11 @@ impl<'a> Interp<'a> {
             .ok_or_else(|| RuntimeError::Trap(format!("bad local {}", place.local.0)))?;
         for f in &place.proj {
             let next = match &*c.borrow() {
+                Value::Hole => {
+                    return Err(RuntimeError::Trap(
+                        "projection into a moved-out or uninitialized local".into(),
+                    ));
+                }
                 Value::Struct(_, fields) => fields.get(*f as usize).cloned(),
                 v => {
                     return Err(RuntimeError::Trap(format!(
@@ -176,7 +181,9 @@ impl<'a> Interp<'a> {
                 let c = self.cell(locals, p)?;
                 let v = c.borrow().clone();
                 match v {
-                    Value::Hole => Err(RuntimeError::Trap("read of uninitialized local".into())),
+                    Value::Hole => Err(RuntimeError::Trap(
+                        "read of moved-out or uninitialized local".into(),
+                    )),
                     v => Ok(v),
                 }
             }
@@ -223,21 +230,63 @@ impl<'a> Interp<'a> {
                 args,
                 contract,
             } => {
-                // Contract-aware argument passing: borrowed positions
-                // share the caller's cell; everything else gets a
-                // fresh cell holding the evaluated value.
+                // Contract-aware argument passing — and the oracle:
+                // execution *validates* the inferred contract, it does
+                // not merely trust it.
+                //
+                // - `borrow` args share the caller cell; the callee
+                //   must not write through it. The cell's value is
+                //   snapshotted before the call and compared after —
+                //   a write under a shared contract traps.
+                // - `borrow_mut` args share the cell, no check (writes
+                //   are the point).
+                // - `move`/`escape`/`unknown` args get a fresh cell —
+                //   and the *caller's* cell is poisoned with `Hole`
+                //   after the call, so a later read traps as a
+                //   use-after-move the static pass should have caught.
                 let mut cells = Vec::with_capacity(args.len());
+                let mut shared: Vec<(Cell, Value)> = Vec::new();
+                let mut consumed: Vec<Cell> = Vec::new();
                 for (i, arg) in args.iter().enumerate() {
                     let b = contract.get(i).copied().unwrap_or(ParamBehavior::Unknown);
-                    let c = match (b, arg) {
-                        (ParamBehavior::Borrow | ParamBehavior::BorrowMut, Operand::Place(p)) => {
-                            self.cell(locals, p)?
+                    match (b, arg) {
+                        (ParamBehavior::Borrow, Operand::Place(p)) => {
+                            let c = self.cell(locals, p)?;
+                            shared.push((c.clone(), c.borrow().deep_clone()));
+                            cells.push(c);
                         }
-                        _ => Rc::new(RefCell::new(self.operand(locals, arg)?)),
-                    };
-                    cells.push(c);
+                        (ParamBehavior::BorrowMut, Operand::Place(p)) => {
+                            cells.push(self.cell(locals, p)?);
+                        }
+                        (
+                            ParamBehavior::Move | ParamBehavior::Escape | ParamBehavior::Unknown,
+                            Operand::Place(p),
+                        ) => {
+                            let c = self.cell(locals, p)?;
+                            if matches!(*c.borrow(), Value::Hole) {
+                                return Err(RuntimeError::Trap(
+                                    "argument moved from an already-consumed local".into(),
+                                ));
+                            }
+                            let v = c.borrow().clone();
+                            cells.push(Rc::new(RefCell::new(v)));
+                            consumed.push(c);
+                        }
+                        _ => cells.push(Rc::new(RefCell::new(self.operand(locals, arg)?))),
+                    }
                 }
-                self.call(*def, cells)
+                let v = self.call(*def, cells)?;
+                for c in consumed {
+                    *c.borrow_mut() = Value::Hole;
+                }
+                for (c, before) in shared {
+                    if !deep_eq(&c.borrow(), &before) {
+                        return Err(RuntimeError::Trap(
+                            "borrow contract violated: callee wrote through a shared borrow".into(),
+                        ));
+                    }
+                }
+                Ok(v)
             }
         }
     }
@@ -287,6 +336,21 @@ fn binary(op: BinOp, l: Value, r: Value) -> Result<Value, RuntimeError> {
             )));
         }
     })
+}
+
+/// Structural equality for the borrow oracle — follows field cells.
+fn deep_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Struct(da, fa), Value::Struct(db, fb)) => {
+            da == db
+                && fa.len() == fb.len()
+                && fa
+                    .iter()
+                    .zip(fb.iter())
+                    .all(|(x, y)| deep_eq(&x.borrow(), &y.borrow()))
+        }
+        _ => values_eq(a, b),
+    }
 }
 
 fn values_eq(a: &Value, b: &Value) -> bool {

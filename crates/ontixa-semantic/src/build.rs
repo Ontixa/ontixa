@@ -123,6 +123,11 @@ impl Builder<'_> {
                 SymbolKind::Local => NodeKind::Local,
                 _ => continue,
             };
+            // A `Passes` edge from an earlier-def call may already
+            // have materialized this param node — don't duplicate it.
+            if self.symbol_nodes.contains_key(&(def, sym.id)) {
+                continue;
+            }
             let n = self
                 .g
                 .add_node(kind, self.sym_name(Some(body), sym.id), Some(sym.span));
@@ -181,11 +186,58 @@ impl Builder<'_> {
             );
             self.g.set_attr(pnode, "behavior", json!(behavior.as_str()));
             self.g.set_attr(pnode, "position", json!(i));
+            if let Some(sum) = self.ownership.summary(def).get(i) {
+                if !sum.escapes.is_empty() {
+                    self.g.set_attr(
+                        pnode,
+                        "escapes",
+                        json!(
+                            sum.escapes
+                                .iter()
+                                .map(|e| e.as_str(&self.module.scope, self.interner))
+                                .collect::<Vec<_>>()
+                        ),
+                    );
+                }
+                if !sum.evidence.is_empty() {
+                    self.g.set_attr(
+                        pnode,
+                        "evidence",
+                        json!(sum
+                            .evidence
+                            .iter()
+                            .map(|e| json!({"kind": e.kind.as_str(), "start": e.at.start, "end": e.at.end}))
+                            .collect::<Vec<_>>()),
+                    );
+                }
+            }
             let _ = body;
             let ty = Ty::from_ref(p.ty);
             let tnode = self.type_node(ty);
             self.g.add_edge(pnode, tnode, EdgeKind::TypedAs);
         }
+    }
+
+    /// The callee's i-th param's node — get-or-create, since a call
+    /// may target a def whose body hasn't been walked yet.
+    fn param_node(&mut self, def: DefId, sym: SymbolId) -> NodeId {
+        if let Some(n) = self.symbol_nodes.get(&(def, sym)) {
+            return *n;
+        }
+        let sig = self.module.scope.fn_sig(def).expect("param of non-fn");
+        let p = sig
+            .params
+            .iter()
+            .find(|p| p.symbol == sym)
+            .expect("param sym in sig");
+        let n = self.g.add_node(
+            NodeKind::Param,
+            self.interner.resolve(p.name).to_string(),
+            Some(p.span),
+        );
+        self.symbol_nodes.insert((def, sym), n);
+        self.g.set_attr(n, "symbol", json!(sym.index()));
+        n
     }
 
     // ---------- node helpers ----------
@@ -265,10 +317,28 @@ impl Builder<'_> {
             HirExprKind::Call { def, args } => {
                 let callee = self.symbol_nodes[&(def, self.module.scope.def(def).name)];
                 self.g.add_edge(n, callee, EdgeKind::Calls);
+                let contract = self.ownership.contract(def).to_vec();
                 for (i, a) in args.iter().enumerate() {
                     let an = self.expr_node(body, tables, *a);
                     self.g
                         .add_edge_attr(n, an, EdgeKind::Contains, "position", json!(i));
+                    // The memory edge: arg expr → callee param, under
+                    // the inferred contract. Requires the callee's
+                    // param node — created lazily when the callee
+                    // hasn't been walked yet.
+                    if let Some(psym) = callee_param_sym(&self.module.scope, def, i) {
+                        let pnode = self.param_node(def, psym);
+                        let behavior = contract.get(i).copied().unwrap_or(ParamBehavior::Unknown);
+                        self.g.edges.push(crate::graph::SpgEdge {
+                            from: an,
+                            to: pnode,
+                            kind: EdgeKind::Passes,
+                            attrs: serde_json::Map::from_iter([
+                                ("position".into(), json!(i)),
+                                ("behavior".into(), json!(behavior.as_str())),
+                            ]),
+                        });
+                    }
                 }
             }
             HirExprKind::Field { base, name, .. } => {
@@ -391,4 +461,9 @@ impl Builder<'_> {
         }
         n
     }
+}
+
+/// The i-th param's symbol in `def`'s signature, when it has one.
+fn callee_param_sym(scope: &ontixa_hir::ModuleScope, def: DefId, i: usize) -> Option<SymbolId> {
+    scope.fn_sig(def)?.params.get(i).map(|p| p.symbol)
 }

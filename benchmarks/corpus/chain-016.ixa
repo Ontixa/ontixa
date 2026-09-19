@@ -1,0 +1,18 @@
+data P { x: i32; }
+fn f0(p: i32) -> i32 { return f1(p) + 1; }
+fn f1(p: i32) -> i32 { return f2(p) + 1; }
+fn f2(p: i32) -> i32 { return f3(p) + 1; }
+fn f3(p: i32) -> i32 { return f4(p) + 1; }
+fn f4(p: i32) -> i32 { return f5(p) + 1; }
+fn f5(p: i32) -> i32 { return f6(p) + 1; }
+fn f6(p: i32) -> i32 { return f7(p) + 1; }
+fn f7(p: i32) -> i32 { return f8(p) + 1; }
+fn f8(p: i32) -> i32 { return f9(p) + 1; }
+fn f9(p: i32) -> i32 { return f10(p) + 1; }
+fn f10(p: i32) -> i32 { return f11(p) + 1; }
+fn f11(p: i32) -> i32 { return f12(p) + 1; }
+fn f12(p: i32) -> i32 { return f13(p) + 1; }
+fn f13(p: i32) -> i32 { return f14(p) + 1; }
+fn f14(p: i32) -> i32 { return f15(p) + 1; }
+fn f15(p: i32) -> i32 { return p + 1; }
+fn main() -> i32 { return f0(0); }
