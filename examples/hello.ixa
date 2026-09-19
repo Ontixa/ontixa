@@ -1,0 +1,4 @@
+// The smallest Ontixa program: pure computation, no ownership at play.
+fn main() -> i32 {
+    return 42;
+}

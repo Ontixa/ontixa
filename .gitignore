@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Snapshot test regeneration artifacts
+*.snap.new
+*.expected.new

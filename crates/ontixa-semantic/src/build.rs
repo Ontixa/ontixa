@@ -1,0 +1,351 @@
+//! Builds the [`SemanticGraph`] from the typed, analyzed module.
+
+use crate::graph::{EdgeKind, NodeId, NodeKind, SemanticGraph};
+use ontixa_hir::{DefKind, HirExprKind, HirModule, HirStmt, SymbolKind};
+use ontixa_memory::{OwnershipTables, ParamBehavior};
+use ontixa_source::{ExprId, Interner, SymbolId};
+use ontixa_types::{Ty, TypeTables};
+use rustc_hash::FxHashMap;
+use serde_json::json;
+
+/// Builds the semantic program graph for a fully analyzed module.
+pub fn build_graph(
+    module: &HirModule,
+    types: &TypeTables,
+    ownership: &OwnershipTables,
+    interner: &Interner,
+) -> SemanticGraph {
+    let mut b = Builder {
+        module,
+        types,
+        ownership,
+        interner,
+        g: SemanticGraph::new(),
+        symbol_nodes: FxHashMap::default(),
+        expr_nodes: FxHashMap::default(),
+        type_nodes: FxHashMap::default(),
+    };
+    b.build()
+}
+
+struct Builder<'a> {
+    module: &'a HirModule,
+    types: &'a TypeTables,
+    ownership: &'a OwnershipTables,
+    interner: &'a Interner,
+    g: SemanticGraph,
+    symbol_nodes: FxHashMap<SymbolId, NodeId>,
+    expr_nodes: FxHashMap<ExprId, NodeId>,
+    type_nodes: FxHashMap<Ty, NodeId>,
+}
+
+impl Builder<'_> {
+    fn build(&mut self) -> SemanticGraph {
+        let module_node = self.g.add_node(NodeKind::Module, "module", None);
+        self.g.set_attr(
+            module_node,
+            "module",
+            json!(self.module.scope.module.index()),
+        );
+
+        // Pass 1: def + symbol nodes, so cross-references resolve.
+        for def in &self.module.scope.defs {
+            let (kind, label) = match def.kind {
+                DefKind::Function(_) => (NodeKind::Function, self.sym_name(def.name)),
+                DefKind::Data(_) => (NodeKind::Data, self.sym_name(def.name)),
+            };
+            let n = self.g.add_node(kind, label, Some(def.span));
+            self.symbol_nodes.insert(def.name, n);
+            self.g.add_edge(module_node, n, EdgeKind::Declares);
+            self.g.set_attr(n, "def", json!(def.id.index()));
+        }
+        for sym in self.module.scope.symbols.iter() {
+            if matches!(sym.kind, SymbolKind::Function | SymbolKind::Data) {
+                continue; // already added as def nodes
+            }
+            let kind = match sym.kind {
+                SymbolKind::Param => NodeKind::Param,
+                SymbolKind::Field => NodeKind::Field,
+                SymbolKind::Local => NodeKind::Local,
+                _ => unreachable!(),
+            };
+            let n = self
+                .g
+                .add_node(kind, self.sym_name_of(sym.id), Some(sym.span));
+            self.symbol_nodes.insert(sym.id, n);
+            self.g.set_attr(n, "symbol", json!(sym.id.index()));
+        }
+
+        // Pass 2: per-def structure.
+        for def in &self.module.scope.defs.clone() {
+            match &def.kind {
+                DefKind::Function(sig) => self.function_body_graph(def.id, sig.clone()),
+                DefKind::Data(shape) => {
+                    let dnode = self.symbol_nodes[&def.name];
+                    for f in &shape.fields {
+                        let fnode = self.symbol_nodes[&f.symbol];
+                        self.g.add_edge_attr(
+                            dnode,
+                            fnode,
+                            EdgeKind::HasField,
+                            "position",
+                            json!(f.index),
+                        );
+                        let ty = Ty::from_ref(f.ty);
+                        let tnode = self.type_node(ty);
+                        self.g.add_edge(fnode, tnode, EdgeKind::TypedAs);
+                    }
+                }
+            }
+        }
+        std::mem::take(&mut self.g)
+    }
+
+    fn function_body_graph(&mut self, def: ontixa_source::DefId, sig: ontixa_hir::FnSig) {
+        let fnode = self.symbol_nodes[&self.module.scope.def(def).name];
+        let ret_ty = Ty::from_ref(sig.ret);
+        let ret_node = self.type_node(ret_ty);
+        self.g.add_edge(fnode, ret_node, EdgeKind::Returns);
+
+        // Parameter contract edges — the inferred ownership behaviors.
+        let contract = self.ownership.contract(def);
+        for (i, p) in sig.params.iter().enumerate() {
+            let pnode = self.symbol_nodes[&p.symbol];
+            let behavior = contract.get(i).copied().unwrap_or(ParamBehavior::Unknown);
+            self.g.add_edge_attr(
+                fnode,
+                pnode,
+                EdgeKind::HasParam,
+                "behavior",
+                json!(behavior.as_str()),
+            );
+            self.g.set_attr(pnode, "behavior", json!(behavior.as_str()));
+            self.g.set_attr(pnode, "position", json!(i));
+            let ty = Ty::from_ref(p.ty);
+            let tnode = self.type_node(ty);
+            self.g.add_edge(pnode, tnode, EdgeKind::TypedAs);
+        }
+
+        let Some(body) = self.module.body(def) else {
+            return;
+        };
+        for &local in &body.locals {
+            let lnode = self.symbol_nodes[&local];
+            self.g.add_edge(fnode, lnode, EdgeKind::HasLocal);
+            if let Some(ty) = self.types.local_types.get(&local) {
+                let tnode = self.type_node(*ty);
+                self.g.add_edge(lnode, tnode, EdgeKind::TypedAs);
+            }
+        }
+        let root = self.expr_node(body.root);
+        self.g.add_edge(fnode, root, EdgeKind::Contains);
+    }
+
+    // ---------- node helpers ----------
+
+    fn sym_name(&self, sym: SymbolId) -> String {
+        self.sym_name_of(sym)
+    }
+
+    fn sym_name_of(&self, sym: SymbolId) -> String {
+        self.interner
+            .resolve(self.module.scope.symbols.get(sym).name)
+            .to_string()
+    }
+
+    fn type_node(&mut self, ty: Ty) -> NodeId {
+        if let Some(n) = self.type_nodes.get(&ty) {
+            return *n;
+        }
+        let label = match ty {
+            Ty::Bool => "bool".into(),
+            Ty::I32 => "i32".into(),
+            Ty::I64 => "i64".into(),
+            Ty::U32 => "u32".into(),
+            Ty::U64 => "u64".into(),
+            Ty::F32 => "f32".into(),
+            Ty::F64 => "f64".into(),
+            Ty::Str => "str".into(),
+            Ty::Unit => "unit".into(),
+            Ty::Struct(d) => self.sym_name(self.module.scope.def(d).name),
+            Ty::Poison => "<error>".into(),
+        };
+        let n = self.g.add_node(NodeKind::Type, label, None);
+        self.g.set_attr(n, "ty", json!(format!("{ty:?}")));
+        self.type_nodes.insert(ty, n);
+        n
+    }
+
+    // ---------- expression & statement walk ----------
+
+    fn expr_node(&mut self, id: ExprId) -> NodeId {
+        if let Some(n) = self.expr_nodes.get(&id) {
+            return *n;
+        }
+        let e = self.module.expr(id);
+        let kind_name = match &e.kind {
+            HirExprKind::Literal(_) => "literal",
+            HirExprKind::Var(_) => "var",
+            HirExprKind::Call { .. } => "call",
+            HirExprKind::Field { .. } => "field",
+            HirExprKind::Binary { .. } => "binary",
+            HirExprKind::Unary { .. } => "unary",
+            HirExprKind::If { .. } => "if",
+            HirExprKind::Block { .. } => "block",
+            HirExprKind::StructLit { .. } => "struct_lit",
+            HirExprKind::Poison => "poison",
+        };
+        let n = self
+            .g
+            .add_node(NodeKind::Expr, kind_name.to_string(), Some(e.span));
+        self.expr_nodes.insert(id, n);
+        self.g.set_attr(n, "expr", json!(id.index()));
+        self.g.set_attr(n, "expr_kind", json!(kind_name));
+        let ty = self.types.ty_of(id);
+        let tnode = self.type_node(ty);
+        self.g.add_edge(n, tnode, EdgeKind::TypedAs);
+
+        match e.kind.clone() {
+            HirExprKind::Var(sym) => {
+                if let Some(s) = self.symbol_nodes.get(&sym) {
+                    let s = *s;
+                    self.g.add_edge(n, s, EdgeKind::Reads);
+                }
+            }
+            HirExprKind::Call { def, args } => {
+                let callee = self.symbol_nodes[&self.module.scope.def(def).name];
+                self.g.add_edge(n, callee, EdgeKind::Calls);
+                for (i, a) in args.iter().enumerate() {
+                    let an = self.expr_node(*a);
+                    self.g
+                        .add_edge_attr(n, an, EdgeKind::Contains, "position", json!(i));
+                }
+            }
+            HirExprKind::Field { base, name, .. } => {
+                let bn = self.expr_node(base);
+                self.g.add_edge(n, bn, EdgeKind::Contains);
+                // Accessed field symbol, if resolvable.
+                if let Ty::Struct(def) = self.types.ty_of(base) {
+                    if let Some(shape) = self.module.scope.data_shape(def) {
+                        if let Some(idx) = shape.field_index.get(&name.id) {
+                            let fsym = shape.fields[*idx as usize].symbol;
+                            if let Some(fnid) = self.symbol_nodes.get(&fsym) {
+                                let fnid = *fnid;
+                                self.g.add_edge(n, fnid, EdgeKind::AccessesField);
+                            }
+                        }
+                    }
+                }
+            }
+            HirExprKind::Binary { op, lhs, rhs } => {
+                self.g.set_attr(n, "op", json!(format!("{op:?}")));
+                let l = self.expr_node(lhs);
+                let r = self.expr_node(rhs);
+                self.g
+                    .add_edge_attr(n, l, EdgeKind::Contains, "position", json!(0));
+                self.g
+                    .add_edge_attr(n, r, EdgeKind::Contains, "position", json!(1));
+            }
+            HirExprKind::Unary { op, expr } => {
+                self.g.set_attr(n, "op", json!(format!("{op:?}")));
+                let c = self.expr_node(expr);
+                self.g.add_edge(n, c, EdgeKind::Contains);
+            }
+            HirExprKind::If { cond, then, else_ } => {
+                let c = self.expr_node(cond);
+                self.g
+                    .add_edge_attr(n, c, EdgeKind::Contains, "role", json!("cond"));
+                let t = self.expr_node(then);
+                self.g
+                    .add_edge_attr(n, t, EdgeKind::Contains, "role", json!("then"));
+                if let Some(e) = else_ {
+                    let en = self.expr_node(e);
+                    self.g
+                        .add_edge_attr(n, en, EdgeKind::Contains, "role", json!("else"));
+                }
+            }
+            HirExprKind::Block { stmts, tail } => {
+                for (i, s) in stmts.iter().enumerate() {
+                    let sn = self.stmt_node(s);
+                    self.g
+                        .add_edge_attr(n, sn, EdgeKind::Contains, "position", json!(i));
+                }
+                if let Some(t) = tail {
+                    let tn = self.expr_node(t);
+                    self.g
+                        .add_edge_attr(n, tn, EdgeKind::Contains, "role", json!("tail"));
+                }
+            }
+            HirExprKind::StructLit { def, fields } => {
+                let dnode = self.symbol_nodes[&self.module.scope.def(def).name];
+                self.g.add_edge(n, dnode, EdgeKind::Constructs);
+                for (name, v) in &fields {
+                    let vn = self.expr_node(*v);
+                    self.g.add_edge_attr(
+                        n,
+                        vn,
+                        EdgeKind::Contains,
+                        "field",
+                        json!(self.interner.resolve(name.id)),
+                    );
+                }
+            }
+            HirExprKind::Literal(_) | HirExprKind::Poison => {}
+        }
+        n
+    }
+
+    fn stmt_node(&mut self, stmt: &HirStmt) -> NodeId {
+        let (kind_name, span) = match stmt {
+            HirStmt::Let { span, .. } => ("let", *span),
+            HirStmt::Assign { span, .. } => ("assign", *span),
+            HirStmt::Expr { .. } => ("expr_stmt", self.module.expr(stmt_expr(stmt)).span),
+            HirStmt::Return { span, .. } => ("return", *span),
+        };
+        let n = self
+            .g
+            .add_node(NodeKind::Stmt, kind_name.to_string(), Some(span));
+        self.g.set_attr(n, "stmt_kind", json!(kind_name));
+        match stmt {
+            HirStmt::Let { symbol, init, .. } => {
+                if let Some(s) = self.symbol_nodes.get(symbol) {
+                    let s = *s;
+                    self.g.add_edge(n, s, EdgeKind::Binds);
+                }
+                if let Some(i) = init {
+                    let in_ = self.expr_node(*i);
+                    self.g
+                        .add_edge_attr(n, in_, EdgeKind::Contains, "role", json!("init"));
+                }
+            }
+            HirStmt::Assign { target, value, .. } => {
+                if let Some(s) = self.symbol_nodes.get(&target.base) {
+                    let s = *s;
+                    self.g.add_edge(n, s, EdgeKind::Writes);
+                }
+                let v = self.expr_node(*value);
+                self.g
+                    .add_edge_attr(n, v, EdgeKind::Contains, "role", json!("value"));
+            }
+            HirStmt::Expr { expr, .. } => {
+                let e = self.expr_node(*expr);
+                self.g.add_edge(n, e, EdgeKind::Contains);
+            }
+            HirStmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    let vn = self.expr_node(*v);
+                    self.g
+                        .add_edge_attr(n, vn, EdgeKind::Contains, "role", json!("value"));
+                }
+            }
+        }
+        n
+    }
+}
+
+fn stmt_expr(stmt: &HirStmt) -> ExprId {
+    match stmt {
+        HirStmt::Expr { expr, .. } => *expr,
+        _ => unreachable!(),
+    }
+}

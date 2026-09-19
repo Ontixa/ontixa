@@ -1,0 +1,17 @@
+[package]
+name = "ontixa-ast"
+description = "Canonical owned AST lowered from the lossless syntax tree."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ontixa-source.workspace = true
+ontixa-diagnostics.workspace = true
+ontixa-syntax.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Build (locked)
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --locked -- -D warnings
+
+  cli-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI
+        run: cargo build -p ontixa-cli --locked
+
+      - name: run hello.ixa
+        run: test "$(./target/debug/ontixa run examples/hello.ixa)" = "42"
+
+      - name: run structs.ixa
+        run: test "$(./target/debug/ontixa run examples/structs.ixa)" = "25"
+
+      - name: run borrow-inference.ixa
+        run: test "$(./target/debug/ontixa run examples/borrow-inference.ixa)" = "14"
+
+      - name: move-error.ixa is rejected
+        run: |
+          if ./target/debug/ontixa check examples/move-error.ixa; then
+            echo "expected failure"; exit 1
+          fi
+
+      - name: move-error.ixa reports E_USE_AFTER_MOVE
+        run: |
+          ./target/debug/ontixa check examples/move-error.ixa --json \
+            | grep -q '"E_USE_AFTER_MOVE"'
+
+      - name: graph exposes inferred behaviors
+        run: |
+          g=$(./target/debug/ontixa graph examples/borrow-inference.ixa)
+          for b in borrow borrow_mut move escape copy; do
+            echo "$g" | grep -q "\"$b\"" || { echo "missing $b"; exit 1; }
+          done

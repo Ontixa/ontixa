@@ -1,0 +1,14 @@
+[package]
+name = "ontixa-syntax"
+description = "Lexer and lossless concrete syntax tree (green tree) parser for the Ontixa language."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ontixa-source.workspace = true
+ontixa-diagnostics.workspace = true
+rowan.workspace = true
+serde.workspace = true

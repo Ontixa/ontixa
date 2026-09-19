@@ -1,0 +1,13 @@
+[package]
+name = "ontixa-source"
+description = "Source file representation, source spans, interner, and stable compiler ID types for the Ontixa compiler."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustc-hash.workspace = true
+serde.workspace = true
+rowan.workspace = true

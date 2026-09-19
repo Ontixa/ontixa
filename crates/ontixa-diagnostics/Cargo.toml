@@ -1,0 +1,13 @@
+[package]
+name = "ontixa-diagnostics"
+description = "Structured compiler diagnostics with deterministic human and JSON rendering for Ontixa."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ontixa-source.workspace = true
+serde.workspace = true
+serde_json.workspace = true

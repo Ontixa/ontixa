@@ -1,0 +1,15 @@
+[package]
+name = "ontixa-hir"
+description = "High-level IR: resolved names, symbols, and definition tables for Ontixa."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ontixa-source.workspace = true
+ontixa-diagnostics.workspace = true
+ontixa-ast.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true

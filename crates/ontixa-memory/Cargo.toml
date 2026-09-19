@@ -1,0 +1,16 @@
+[package]
+name = "ontixa-memory"
+description = "Ownership, borrow, and move inference plus use-after-move checking for Ontixa."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ontixa-source.workspace = true
+ontixa-diagnostics.workspace = true
+ontixa-hir.workspace = true
+ontixa-types.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true

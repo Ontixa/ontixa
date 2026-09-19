@@ -1,0 +1,18 @@
+// A rejected program: `eat` takes ownership of its argument, so the
+// second `eat(q)` reads a moved value.
+// `ontixa check examples/move-error.ixa` reports E_USE_AFTER_MOVE.
+
+data Point {
+    x: i32;
+}
+
+fn eat(p: Point) -> i32 {
+    return 0;
+}
+
+fn main() -> i32 {
+    let q = Point { x: 1 };
+    let a = eat(q);
+    let b = eat(q); // error: use after move
+    return a + b;
+}

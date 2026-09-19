@@ -1,0 +1,47 @@
+// Ownership inference: no annotations anywhere — the compiler infers
+// what each function does with its parameters.
+//
+//   `read`  -> borrow      (reads p.x, never mutates or consumes)
+//   `bump`  -> borrow_mut  (writes through p.x)
+//   `eat`   -> move        (drops p without using it)
+//   `keep`  -> escape      (p flows into the return value)
+//   `add`   -> copy        (i32 is a Copy type)
+//
+// `ontixa explain examples/borrow-inference.ixa` prints the contracts.
+
+data Point {
+    x: i32;
+    y: i32;
+}
+
+fn read(p: Point) -> i32 {
+    return p.x;
+}
+
+fn bump(p: Point) {
+    p.x = p.x + 1;
+}
+
+fn eat(p: Point) -> i32 {
+    return 0;
+}
+
+fn keep(p: Point) -> Point {
+    return p;
+}
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    let p = Point { x: 1, y: 2 };
+    let a = read(p);      // borrow: p still owned here
+    bump(p);              // borrow_mut: writes through, p still owned
+    let b = read(p);      // still fine: p was only borrowed
+    let dead = Point { x: 9, y: 9 };
+    let _z = eat(dead);   // move: `dead` is consumed
+    let moved = Point { x: 7, y: 7 };
+    let r = keep(moved);  // escape: `moved` flows into `r`
+    return add(a + b + p.x + p.y, r.x);
+}

@@ -1,0 +1,16 @@
+[package]
+name = "ontixa-interpreter"
+description = "Reference interpreter executing typed Ontixa MIR."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ontixa-source.workspace = true
+ontixa-diagnostics.workspace = true
+ontixa-hir.workspace = true
+ontixa-types.workspace = true
+ontixa-memory.workspace = true
+ontixa-mir.workspace = true

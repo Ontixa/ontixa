@@ -1,0 +1,14 @@
+// Data definitions and field access.
+data Point {
+    x: i32;
+    y: i32;
+}
+
+fn distance2(p: Point) -> i32 {
+    return p.x * p.x + p.y * p.y;
+}
+
+fn main() -> i32 {
+    let p = Point { x: 3, y: 4 };
+    return distance2(p);
+}

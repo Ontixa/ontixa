@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1-dev"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ontixa/ontixa"
+
+[workspace.dependencies]
+ontixa-source = { path = "crates/ontixa-source" }
+ontixa-diagnostics = { path = "crates/ontixa-diagnostics" }
+ontixa-syntax = { path = "crates/ontixa-syntax" }
+ontixa-ast = { path = "crates/ontixa-ast" }
+ontixa-hir = { path = "crates/ontixa-hir" }
+ontixa-types = { path = "crates/ontixa-types" }
+ontixa-memory = { path = "crates/ontixa-memory" }
+ontixa-semantic = { path = "crates/ontixa-semantic" }
+ontixa-mir = { path = "crates/ontixa-mir" }
+ontixa-db = { path = "crates/ontixa-db" }
+ontixa-interpreter = { path = "crates/ontixa-interpreter" }
+ontixa-cli = { path = "crates/ontixa-cli" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rowan = "0.15"
+clap = { version = "4", features = ["derive"] }
+rustc-hash = "2"
+
+[profile.dev]
+opt-level = 0
