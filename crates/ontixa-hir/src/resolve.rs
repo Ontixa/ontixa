@@ -72,6 +72,7 @@ impl Resolver<'_> {
                 id: SymbolId::new(0),
                 name: interned,
                 kind,
+                mutable: false,
                 owner: None,
                 span: name_ident.span,
             });
@@ -138,6 +139,7 @@ impl Resolver<'_> {
                             id: SymbolId::new(0),
                             name: fname,
                             kind: SymbolKind::Field,
+                            mutable: false,
                             owner: Some(def_id),
                             span: f.name.span,
                         });
@@ -179,6 +181,7 @@ impl Resolver<'_> {
                             id: SymbolId::new(0),
                             name: pname,
                             kind: SymbolKind::Param,
+                            mutable: p.mutable,
                             owner: Some(def_id),
                             span: p.name.span,
                         });

@@ -528,6 +528,28 @@ impl Enforcer<'_> {
                             if let Some(sym) = self.root_var(*arg) {
                                 let span = self.expr(*arg).span;
                                 self.use_var(sym, span, Ctx::Read);
+                                // A mutable borrow requires mutable
+                                // authority over the place.
+                                if !self.module.scope.symbols.get(sym).mutable {
+                                    let name = self.name(sym).to_string();
+                                    self.diags.push(
+                                        Diagnostic::error(
+                                            Code::MutableBorrowOfImmutable,
+                                            format!(
+                                                "`{name}` is passed to a parameter that mutates it, but `{name}` is not declared `mut`"
+                                            ),
+                                        )
+                                        .primary(span)
+                                        .label(
+                                            self.module.scope.symbols.get(sym).span,
+                                            format!("`{name}` declared here without `mut`"),
+                                        )
+                                        .help(format!(
+                                            "declare it with `mut`: `let mut {name} = ...`"
+                                        ))
+                                        .subject(name),
+                                    );
+                                }
                             }
                         }
                         _ => self.eval(*arg, Ctx::Move),
@@ -602,6 +624,33 @@ impl Enforcer<'_> {
     }
 
     fn assign_place(&mut self, place: &HirPlace) {
+        let sym = self.module.scope.symbols.get(place.base);
+        let state = self
+            .state
+            .get(&place.base)
+            .copied()
+            .unwrap_or(BindingState {
+                init: Init::Never,
+                moved: Moved::No,
+            });
+        // Deferred first initialization (`let x; x = v;`) is allowed
+        // without `mut` — it is a write-once initialization, not a
+        // mutation. Every other write requires a `mut` binding.
+        let first_init =
+            place.fields.is_empty() && state.init == Init::Never && state.moved == Moved::No;
+        if !sym.mutable && !first_init {
+            let name = self.name(place.base).to_string();
+            self.diags.push(
+                Diagnostic::error(
+                    Code::ImmutableAssignment,
+                    format!("cannot assign to `{name}`: it is not declared `mut`"),
+                )
+                .primary(place.span)
+                .label(sym.span, format!("`{name}` declared here without `mut`"))
+                .help(format!("declare it with `mut`: `let mut {name} = ...`"))
+                .subject(name),
+            );
+        }
         if place.fields.is_empty() {
             // A whole-binding assignment is legal in any state — it
             // initializes or reinitializes the binding outright.

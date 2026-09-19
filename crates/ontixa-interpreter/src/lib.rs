@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn field_assign_writes_through() {
         let src = "data P { x: i32; }
-                   fn main() -> i32 { let p = P { x: 1 }; p.x = 9; return p.x; }";
+                   fn main() -> i32 { let mut p = P { x: 1 }; p.x = 9; return p.x; }";
         assert_eq!(eval_int(src), 9);
     }
 
@@ -108,8 +108,8 @@ mod tests {
         // must classify `p` as `borrow_mut`, and the interpreter must
         // share the caller's cell so the write is visible.
         let src = "data P { x: i32; }
-                   fn bump(p: P) { p.x = p.x + 1; }
-                   fn main() -> i32 { let q = P { x: 41 }; bump(q); return q.x; }";
+                   fn bump(mut p: P) { p.x = p.x + 1; }
+                   fn main() -> i32 { let mut q = P { x: 41 }; bump(q); return q.x; }";
         let (v, _m, _h, _i, diags) = run_src(src, "main").expect("run");
         assert!(diags.is_empty(), "{diags:?}");
         match v {

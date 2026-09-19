@@ -46,6 +46,11 @@ pub enum Code {
     UseAfterMove,
     /// A binding was read before any value was stored in it.
     Uninitialized,
+    /// An assignment or mutation targets a place without `mut`
+    /// authority.
+    ImmutableAssignment,
+    /// A `borrow_mut`-behavior parameter received an immutable place.
+    MutableBorrowOfImmutable,
     /// A non-unit function can complete without returning a value.
     MissingReturn,
     /// An integer literal does not fit its required type.
@@ -79,6 +84,8 @@ impl Code {
             Code::CannotInfer => "E_CANNOT_INFER",
             Code::UseAfterMove => "E_USE_AFTER_MOVE",
             Code::Uninitialized => "E_UNINITIALIZED",
+            Code::ImmutableAssignment => "E_IMMUTABLE_ASSIGNMENT",
+            Code::MutableBorrowOfImmutable => "E_MUTABLE_BORROW_OF_IMMUTABLE",
             Code::MissingReturn => "E_MISSING_RETURN",
             Code::LiteralOverflow => "E_LITERAL_OVERFLOW",
             Code::UnsupportedOperation => "E_UNSUPPORTED_OP",

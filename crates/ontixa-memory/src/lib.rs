@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn infers_mutable_borrow() {
         let b = behavior(
-            "data P { x: i32; } fn bump(p: P) -> i32 { p.x = p.x + 1; return p.x; } fn main() -> i32 { return 0; }",
+            "data P { x: i32; } fn bump(mut p: P) -> i32 { p.x = p.x + 1; return p.x; } fn main() -> i32 { return 0; }",
             "bump",
             0,
         );
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn moved_local_reinitializes_on_assign() {
         let c = codes(
-            "data P { x: i32; } fn main() -> i32 { let q = P { x: 1 }; let r = q; q = P { x: 2 }; return q.x + r.x; }",
+            "data P { x: i32; } fn main() -> i32 { let mut q = P { x: 1 }; let r = q; q = P { x: 2 }; return q.x + r.x; }",
         );
         assert!(c.is_empty(), "{c:?}");
     }
@@ -220,7 +220,111 @@ mod tests {
     #[test]
     fn borrow_mut_arg_stays_usable() {
         let c = codes(
-            "data P { x: i32; } fn bump(p: P) -> i32 { p.x = p.x + 1; return p.x; } fn main() -> i32 { let q = P { x: 1 }; let a = bump(q); return a + q.x; }",
+            "data P { x: i32; } fn bump(mut p: P) -> i32 { p.x = p.x + 1; return p.x; } fn main() -> i32 { let mut q = P { x: 1 }; let a = bump(q); return a + q.x; }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    // ---------- immutability by default ----------
+
+    #[test]
+    fn immutable_local_reassignment_is_rejected() {
+        let c = codes(
+            "data P { x: i32; } fn main() -> i32 { let q = P { x: 1 }; q = P { x: 2 }; return q.x; }",
+        );
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::ImmutableAssignment),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn mutable_local_reassignment_is_allowed() {
+        let c = codes(
+            "data P { x: i32; } fn main() -> i32 { let mut q = P { x: 1 }; q = P { x: 2 }; return q.x; }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn immutable_field_mutation_is_rejected() {
+        let c = codes(
+            "data P { x: i32; } fn main() -> i32 { let p = P { x: 1 }; p.x = 2; return p.x; }",
+        );
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::ImmutableAssignment),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn mutable_field_mutation_is_allowed() {
+        let c = codes(
+            "data P { x: i32; } fn main() -> i32 { let mut p = P { x: 1 }; p.x = 2; return p.x; }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn immutable_param_mutation_is_rejected() {
+        let c = codes(
+            "data P { x: i32; } fn bump(p: P) -> i32 { p.x = 2; return p.x; } fn main() -> i32 { return 0; }",
+        );
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::ImmutableAssignment),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn mutable_param_mutation_is_allowed() {
+        let c = codes(
+            "data P { x: i32; } fn bump(mut p: P) -> i32 { p.x = 2; return p.x; } fn main() -> i32 { return 0; }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn borrow_mut_of_immutable_binding_is_rejected() {
+        let c = codes(
+            "data P { x: i32; } fn bump(mut p: P) -> i32 { p.x = 2; return p.x; } fn main() -> i32 { let q = P { x: 1 }; return bump(q); }",
+        );
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::MutableBorrowOfImmutable),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_mut_of_mutable_binding_is_allowed() {
+        let c = codes(
+            "data P { x: i32; } fn bump(mut p: P) -> i32 { p.x = 2; return p.x; } fn main() -> i32 { let mut q = P { x: 1 }; return bump(q); }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn deferred_init_of_immutable_binding_is_allowed() {
+        // `let x: T; x = v;` writes once — initialization, not mutation.
+        let c = codes("fn main() -> i32 { let x: i32; x = 7; return x; }");
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn second_assign_to_immutable_binding_is_rejected() {
+        let c = codes("fn main() -> i32 { let x: i32; x = 7; x = 8; return x; }");
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::ImmutableAssignment),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_mut_of_temporary_is_allowed() {
+        // A fresh value passed to a mutating callee is contained —
+        // no caller authority needed.
+        let c = codes(
+            "data P { x: i32; } fn bump(mut p: P) -> i32 { p.x = 2; return p.x; } fn main() -> i32 { return bump(P { x: 1 }); }",
         );
         assert!(c.is_empty(), "{c:?}");
     }

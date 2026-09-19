@@ -139,6 +139,7 @@ impl Lowerer<'_> {
         let ty = self.type_ref(node)?;
         Some(Param {
             name,
+            mutable: has_token(node, SyntaxKind::MUT_KW),
             ty,
             span: node.text_range().into(),
         })
@@ -205,6 +206,7 @@ impl Lowerer<'_> {
             .find(|n| n.kind() == SyntaxKind::NAME)
             .map(|n| self.name(&n))?;
         let ty = self.type_ref(node);
+        let mutable = has_token(node, SyntaxKind::MUT_KW);
         // The initializer is the expression after the `=` token.
         let has_eq = node
             .children_with_tokens()
@@ -219,6 +221,7 @@ impl Lowerer<'_> {
         };
         Some(Stmt::Let {
             name,
+            mutable,
             ty,
             init,
             span: node.text_range().into(),
@@ -546,6 +549,13 @@ fn split_field_expr(node: &SyntaxNode) -> Option<(SyntaxNode, SyntaxNode)> {
 /// expression in value position (a variable reference).
 fn is_value_node(kind: SyntaxKind) -> bool {
     is_expr_kind(kind) || kind == SyntaxKind::NAME_REF
+}
+
+/// Whether a node has a direct child token of `kind` (e.g. `mut`).
+fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
+    node.children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .any(|t| t.kind() == kind)
 }
 
 fn is_expr_kind(kind: SyntaxKind) -> bool {

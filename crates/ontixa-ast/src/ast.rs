@@ -89,6 +89,8 @@ pub struct FnDecl {
 pub struct Param {
     /// Parameter name.
     pub name: Ident,
+    /// Whether the binding was declared `mut`.
+    pub mutable: bool,
     /// Declared type.
     pub ty: TypeExpr,
     /// Span of the parameter.
@@ -127,10 +129,12 @@ pub struct Place {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum Stmt {
-    /// `let name (: ty)? (= expr)? ;`
+    /// `let (mut)? name (: ty)? (= expr)? ;`
     Let {
         /// Binding name.
         name: Ident,
+        /// Whether the binding was declared `mut`.
+        mutable: bool,
         /// Optional type annotation.
         ty: Option<TypeExpr>,
         /// Optional initializer.

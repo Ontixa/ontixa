@@ -47,6 +47,27 @@ across `if` branches:
 - `move`/`escape`/`unknown` calls consume it
 - assignment to a `moved` binding is a legal re-initialization
 
+## Mutability (immutable by default)
+
+Bindings are **immutable unless declared `mut`**:
+
+```ixa
+let p = Point { x: 1, y: 2 };   // immutable
+let mut q = Point { x: 0, y: 0 }; // mutable local
+fn bump(mut p: Point) { ... }    // mutable parameter
+```
+
+- Assignment to a non-`mut` binding → `E_IMMUTABLE_ASSIGNMENT`
+  (declaration site labeled, `let mut` suggested).
+- **Deferred init** — `let x: T; x = v;` — is allowed once on an
+  immutable binding (write-once initialization). Re-assignment, or a
+  write after a move, requires `mut`.
+- Field writes `p.x = v` require `mut` on the root binding.
+- A `borrow_mut` argument must be a **mutable place**: `bump(q)` with
+  immutable `q` → `E_MUTABLE_BORROW_OF_IMMUTABLE`. A fresh temporary
+  (`bump(P { x: 1 })`) needs no authority — the mutation is contained.
+- The compiler never silently upgrades a binding to `mut`.
+
 ## Field-carrier precision
 
 `return p.x` where `x: i32` only *reads* `p` — a `Copy` field carries

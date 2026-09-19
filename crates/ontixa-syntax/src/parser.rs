@@ -338,7 +338,7 @@ impl Parser<'_> {
         self.bump(); // (
         while !self.at_end() && !self.at(SyntaxKind::R_PAREN) {
             match self.current() {
-                SyntaxKind::IDENT => {
+                SyntaxKind::IDENT | SyntaxKind::MUT_KW => {
                     self.param();
                     if !self.eat(SyntaxKind::COMMA) {
                         break;
@@ -361,6 +361,7 @@ impl Parser<'_> {
 
     fn param(&mut self) {
         self.start(SyntaxKind::PARAM);
+        self.eat(SyntaxKind::MUT_KW); // `mut p: T` — mutable binding
         self.name();
         self.expect(SyntaxKind::COLON, "after parameter name");
         self.type_ref();
@@ -433,6 +434,7 @@ impl Parser<'_> {
     fn let_stmt(&mut self) {
         self.start(SyntaxKind::LET_STMT);
         self.bump(); // let
+        self.eat(SyntaxKind::MUT_KW); // `let mut x` — mutable binding
         self.name();
         if self.at(SyntaxKind::COLON) {
             self.bump();

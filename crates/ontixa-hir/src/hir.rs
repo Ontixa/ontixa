@@ -74,6 +74,9 @@ pub struct Symbol {
     pub name: InternId,
     /// What kind of entity this is.
     pub kind: SymbolKind,
+    /// Whether the binding was declared `mut` (locals/params only —
+    /// `false` for defs and fields).
+    pub mutable: bool,
     /// Owning definition for params, locals, and fields.
     pub owner: Option<DefId>,
     /// Declaration site.

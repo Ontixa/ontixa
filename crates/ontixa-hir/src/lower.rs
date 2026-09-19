@@ -111,12 +111,13 @@ impl BodyLowerer<'_> {
         None
     }
 
-    fn declare_local(&mut self, ident: &Ident) -> SymbolId {
+    fn declare_local(&mut self, ident: &Ident, mutable: bool) -> SymbolId {
         let interned = self.interner.intern(&ident.name);
         let sym = Symbol {
             id: SymbolId::new(0),
             name: interned,
             kind: SymbolKind::Local,
+            mutable,
             owner: Some(self.def),
             span: ident.span,
         };
@@ -147,6 +148,7 @@ impl BodyLowerer<'_> {
         Some(match stmt {
             Stmt::Let {
                 name,
+                mutable,
                 ty,
                 init,
                 span,
@@ -155,7 +157,7 @@ impl BodyLowerer<'_> {
                 // (`let x = x` cannot self-reference).
                 let init = init.as_ref().and_then(|e| self.expr(e));
                 let ty = ty.as_ref().map(|t| self.resolve_type(t));
-                let symbol = self.declare_local(name);
+                let symbol = self.declare_local(name, *mutable);
                 HirStmt::Let {
                     symbol,
                     ty,
