@@ -8,22 +8,32 @@ Done: lossless parsing, canonical AST, HIR + resolution, total type
 checking, ownership inference, SPG, typed MIR, interpreter, CLI,
 structured diagnostics, memoized DB.
 
-## M2 — language breadth
+## M2 — incremental semantic core (done)
 
-- `let mut`-free mutation rules finalized (field-write vs rebind)
+- immutable bindings by default; `let mut` / `mut` params (ADR-0009)
+- one schema-1 JSON envelope per `--json` command; `explain <symbol>`
+  with contract evidence and escape summaries
+- formal ownership domain; reverse-worklist fixpoint (ADR-0010)
+- places, loans, borrow conflicts, call-extent regions (ADR-0011)
+- per-definition incremental query engine: `DefKey` identity,
+  per-body arenas, early cutoff, persistent oracle (ADR-0008)
+- `ontixad` persistent daemon (NDJSON over stdio — ADR-0012)
+- byte-deterministic artifacts; SPG `passes` memory edges; MIR
+  mutability; interpreter contract oracle
+- evidence: `docs/milestones/m2-report.md`, `benchmarks/README.md`
+
+## M3 — language breadth + modules
+
 - arrays/slices + `for` loops
 - `match`-like selection over `data` variants (enum data)
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - string ops + `str` slices
 - more primitives (`u*`, `f32`, `char`)
-
-## M3 — real compiler infrastructure
-
-- `ontixad`: persistent compile daemon over `Db`
-- fine-grained incrementality (salsa-style early cutoff — ADR-0004)
 - multi-file modules + `use`
 - `ontixa fmt` over the lossless CST
 - semantic patches (structured apply)
+- finer-grained file-level queries (per-item parse, incremental
+  graph) — M2's honest weakness; see benchmarks/README.md
 
 ## M4 — execution
 

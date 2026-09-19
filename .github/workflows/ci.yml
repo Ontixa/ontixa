@@ -5,9 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -25,10 +33,14 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Clippy
-        run: cargo clippy --workspace --locked -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
   cli-gates:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -63,3 +75,17 @@ jobs:
           for b in borrow borrow_mut move escape copy; do
             echo "$g" | grep -q "\"$b\"" || { echo "missing $b"; exit 1; }
           done
+
+      - name: graph exposes passes edges
+        run: |
+          ./target/debug/ontixa graph examples/borrow-inference.ixa \
+            | grep -q '"passes"'
+
+      - name: artifacts are byte-deterministic
+        run: |
+          a=$(./target/debug/ontixa graph examples/borrow-inference.ixa --json)
+          b=$(./target/debug/ontixa graph examples/borrow-inference.ixa --json)
+          test "$a" = "$b" || { echo "graph --json not byte-stable"; exit 1; }
+          a=$(./target/debug/ontixa mir examples/borrow-inference.ixa --json)
+          b=$(./target/debug/ontixa mir examples/borrow-inference.ixa --json)
+          test "$a" = "$b" || { echo "mir --json not byte-stable"; exit 1; }

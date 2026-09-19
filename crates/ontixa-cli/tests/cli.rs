@@ -160,6 +160,42 @@ fn io_error_is_an_envelope() {
 }
 
 #[test]
+fn borrow_conflict_is_a_structured_diagnostic() {
+    // `both(q, q)`: arg 0 creates a mutable loan on q, arg 1 a shared
+    // one — overlapping places under a mut loan must conflict.
+    let src = "data P { x: i32; }\n\
+               fn both(mut a: P, b: P) -> i32 { a.x = a.x + 1; return b.x; }\n\
+               fn main() -> i32 { let mut q = P { x: 1 }; return both(q, q); }";
+    let f = src_file("borrowconflict", src);
+    let out = ontixa(&["check", f.to_str().unwrap(), "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], false);
+    let codes: Vec<&str> = d["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"E_BORROW_CONFLICT"),
+        "expected E_BORROW_CONFLICT in {codes:?}"
+    );
+}
+
+#[test]
+fn json_output_is_byte_deterministic() {
+    // Same input → same bytes: an agent can diff artifacts
+    // meaningfully. (`--timings` excluded — nanos are wall-clock.)
+    let f = src_file("determinism", SRC);
+    let p = f.to_str().unwrap();
+    for cmd in ["check", "graph", "ast", "mir"] {
+        let a = ontixa(&[cmd, p, "--json"]);
+        let b = ontixa(&[cmd, p, "--json"]);
+        assert_eq!(a.stdout, b.stdout, "{cmd} --json not byte-stable");
+    }
+}
+
+#[test]
 fn human_check_has_no_json_on_stdout() {
     let f = src_file("human", SRC);
     let out = ontixa(&["check", f.to_str().unwrap()]);
