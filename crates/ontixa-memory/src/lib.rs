@@ -15,9 +15,13 @@
 
 mod analyze;
 mod behavior;
+pub mod place;
 
-pub use analyze::{FactStamps, OwnershipOracle, OwnershipTables, ParamFacts, infer_ownership};
+pub use analyze::{
+    EscapeExit, FactStamps, OwnershipOracle, OwnershipTables, ParamFacts, infer_ownership,
+};
 pub use behavior::ParamBehavior;
+pub use place::{Loan, LoanKind, Place, Region, place_of};
 
 /// Full pipeline convenience: parse → HIR → type check → ownership
 /// inference. Returns everything downstream passes need.
@@ -433,5 +437,155 @@ mod tests {
         let b1 = behavior(&src, "f0", 0);
         assert_eq!(b0, b1);
         assert_eq!(b0, ParamBehavior::Escape);
+    }
+
+    // ---------- loans: regions + conflicts ----------
+
+    /// A fn taking `(shared, shared)` and one taking `(shared, move)`.
+    const TWO: &str = "data P { x: i32; } \
+         fn two(a: P, b: P) -> i32 { return a.x + b.x; } \
+         fn take(a: P, b: P) -> i32 { let r = b; return a.x + r.x; } \
+         fn mix(a: P, mut b: P) -> i32 { b.x = a.x; return b.x; } \
+         fn mix3(mut a: P, b: P) -> i32 { a.x = b.x; return a.x; } \
+         fn mix2(mut a: P, mut b: P) -> i32 { a.x = 1; b.x = 2; return 0; }";
+
+    #[test]
+    fn shared_shared_borrows_do_not_conflict() {
+        let c = codes(&format!(
+            "{TWO} fn main() -> i32 {{ let q = P {{ x: 1 }}; return two(q, q); }}"
+        ));
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn shared_then_mut_conflicts() {
+        let c = codes(&format!(
+            "{TWO} fn main() -> i32 {{ let mut q = P {{ x: 1 }}; return mix(q, q); }}"
+        ));
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::BorrowConflict),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn mut_then_shared_conflicts() {
+        let c = codes(&format!(
+            "{TWO} fn main() -> i32 {{ let mut q = P {{ x: 1 }}; return mix3(q, q); }}"
+        ));
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::BorrowConflict),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn mut_mut_conflicts() {
+        let c = codes(&format!(
+            "{TWO} fn main() -> i32 {{ let mut q = P {{ x: 1 }}; return mix2(q, q); }}"
+        ));
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::BorrowConflict),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn disjoint_field_places_do_not_conflict() {
+        let c = codes(
+            "data I { v: i32; } data P { a: I; b: I; } \
+             fn m(mut a: I, mut b: I) -> i32 { a.v = 1; b.v = 2; return a.v + b.v; } \
+             fn main() -> i32 { let mut q = P { a: I { v: 0 }, b: I { v: 0 } }; return m(q.a, q.b); }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn overlapping_field_places_conflict() {
+        // `q.a` and `q` overlap — the whole prefixes the projection.
+        let c = codes(
+            "data I { v: i32; } data P { a: I; b: I; } \
+             fn m(mut a: I, mut b: P) -> i32 { a.v = 1; b.a = I { v: 0 }; return a.v; } \
+             fn main() -> i32 { let mut q = P { a: I { v: 0 }, b: I { v: 0 } }; return m(q.a, q); }",
+        );
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::BorrowConflict),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn move_while_shared_borrow_is_live() {
+        // `take` borrows `a` and moves `b`: `take(q, q)` moves q
+        // while the shared loan on it is live.
+        let c = codes(&format!(
+            "{TWO} fn main() -> i32 {{ let q = P {{ x: 1 }}; return take(q, q); }}"
+        ));
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::MoveWhileBorrowed),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn loan_dies_when_call_returns() {
+        // `read`'s loan on q ends with the call — moving q into
+        // `eat` in the next statement is fine.
+        let c = codes(
+            "data P { x: i32; } fn read(p: P) -> i32 { return p.x; } fn eat(p: P) -> i32 { return 0; } \
+             fn main() -> i32 { let q = P { x: 1 }; let a = read(q); let b = eat(q); return a + b; }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    #[test]
+    fn move_while_borrowed_via_nested_call() {
+        // f borrows a; its second arg moves q through `take`.
+        let c = codes(&format!(
+            "{TWO} fn main() -> i32 {{ let q = P {{ x: 1 }}; return two(q, take(q, q)); }}"
+        ));
+        // Inner take(q,q) itself: arg1 moves q while arg0's shared
+        // loan lives → MoveWhileBorrowed.
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::MoveWhileBorrowed),
+            "{c:?}"
+        );
+    }
+
+    // ---------- escape summaries ----------
+
+    #[test]
+    fn escape_summary_records_return() {
+        let (m, _, own, mut interner, diags) = analyze_src(
+            "data P { x: i32; } fn id(p: P) -> P { return p; } fn main() -> i32 { return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let id: DefId = m.scope.fns[&interner.intern("id")];
+        let esc = &own.escapes[&id][0];
+        assert_eq!(esc, &[EscapeExit::Return]);
+    }
+
+    #[test]
+    fn escape_summary_records_via_call() {
+        let (m, _, own, mut interner, diags) = analyze_src(
+            "data P { x: i32; } fn id(p: P) -> P { return p; } \
+             fn relay(p: P) -> P { return id(p); } fn main() -> i32 { return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let id: DefId = m.scope.fns[&interner.intern("id")];
+        let relay: DefId = m.scope.fns[&interner.intern("relay")];
+        let esc = &own.escapes[&relay][0];
+        assert!(esc.contains(&EscapeExit::ViaCall(id)), "{esc:?}");
+        assert!(esc.contains(&EscapeExit::Return), "{esc:?}");
+    }
+
+    #[test]
+    fn escape_summary_empty_for_borrowed_param() {
+        let (m, _, own, mut interner, diags) = analyze_src(
+            "data P { x: i32; } fn read(p: P) -> i32 { return p.x; } fn main() -> i32 { return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let read: DefId = m.scope.fns[&interner.intern("read")];
+        assert!(own.escapes[&read][0].is_empty());
     }
 }

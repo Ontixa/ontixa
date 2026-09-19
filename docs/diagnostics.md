@@ -43,6 +43,8 @@ Codes are a public contract. Never reuse; retire instead.
 | `E_UNINITIALIZED`      | ownership | read before any store            |
 | `E_IMMUTABLE_ASSIGNMENT` | ownership | write to a non-`mut` binding   |
 | `E_MUTABLE_BORROW_OF_IMMUTABLE` | ownership | `borrow_mut` arg lacks `mut` authority |
+| `E_BORROW_CONFLICT`    | ownership | overlapping loans, at least one mutable |
+| `E_MOVE_WHILE_BORROWED` | ownership | move of a place under a live loan |
 | `E_AMBIGUOUS_SYMBOL`   | explain   | symbol query matched >1 symbol   |
 | `E_MISSING_RETURN`     | types     | non-unit fn can fall through     |
 | `E_LITERAL_OVERFLOW`   | types     | literal exceeds its type         |

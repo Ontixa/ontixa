@@ -225,12 +225,23 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
                     // `p.name`/`p.mutable` are on the ParamDef itself —
                     // `p.symbol` is a body-local id only meaningful
                     // inside the fn's own arena.
-                    json!({
+                    let mut param = json!({
                         "name": a.interner.resolve(p.name),
                         "type": ty_name(m, &a.interner, Ty::from_ref(p.ty)),
                         "mutable": p.mutable,
                         "behavior": contract.get(i).map(|b| b.as_str()).unwrap_or("unknown"),
-                    })
+                    });
+                    if let Some(exits) = a.ownership.escapes.get(&def).and_then(|e| e.get(i)) {
+                        if !exits.is_empty() {
+                            param["escapes"] = json!(
+                                exits
+                                    .iter()
+                                    .map(|e| e.as_str(&m.scope, &a.interner))
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                    }
+                    param
                 })
                 .collect();
             json!({
@@ -282,6 +293,16 @@ fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
     if let Some(sig) = m.scope.fn_sig(owner) {
         if let Some(i) = sig.params.iter().position(|p| p.symbol == sym) {
             obj["behavior"] = json!(a.ownership.contract(owner)[i].as_str());
+            if let Some(exits) = a.ownership.escapes.get(&owner).and_then(|e| e.get(i)) {
+                if !exits.is_empty() {
+                    obj["escapes"] = json!(
+                        exits
+                            .iter()
+                            .map(|e| e.as_str(&m.scope, &a.interner))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
             if ty.is_none() {
                 obj["type"] = json!(ty_name(m, &a.interner, Ty::from_ref(sig.params[i].ty)));
             }
@@ -383,5 +404,11 @@ fn print_symbol(s: &Json) {
     }
     if let Some(b) = s["behavior"].as_str() {
         println!("  behavior: {b}");
+    }
+    if let Some(es) = s["escapes"].as_array() {
+        let list: Vec<&str> = es.iter().filter_map(|e| e.as_str()).collect();
+        if !list.is_empty() {
+            println!("  escapes: {}", list.join(", "));
+        }
     }
 }

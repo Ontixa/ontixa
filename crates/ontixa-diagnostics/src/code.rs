@@ -51,6 +51,11 @@ pub enum Code {
     ImmutableAssignment,
     /// A `borrow_mut`-behavior parameter received an immutable place.
     MutableBorrowOfImmutable,
+    /// Two overlapping borrows of one place conflict at a call site
+    /// (a mutable loan colliding with any live loan).
+    BorrowConflict,
+    /// A place was moved while an in-progress call holds a loan on it.
+    MoveWhileBorrowed,
     /// A name lookup (e.g. `explain <symbol>`) matched more than one
     /// semantic symbol.
     AmbiguousSymbol,
@@ -89,6 +94,8 @@ impl Code {
             Code::Uninitialized => "E_UNINITIALIZED",
             Code::ImmutableAssignment => "E_IMMUTABLE_ASSIGNMENT",
             Code::MutableBorrowOfImmutable => "E_MUTABLE_BORROW_OF_IMMUTABLE",
+            Code::BorrowConflict => "E_BORROW_CONFLICT",
+            Code::MoveWhileBorrowed => "E_MOVE_WHILE_BORROWED",
             Code::AmbiguousSymbol => "E_AMBIGUOUS_SYMBOL",
             Code::MissingReturn => "E_MISSING_RETURN",
             Code::LiteralOverflow => "E_LITERAL_OVERFLOW",

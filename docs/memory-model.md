@@ -75,6 +75,29 @@ no ownership, so `p` stays `borrow`. When the field type is not
 `Copy`, `p` is the carrier and taints accordingly. Struct literals
 propagate the same way field-by-field.
 
+## Places, loans, and regions
+
+A **place** is a path to storage: a binding plus field projections
+(`x`, `x.f.g`). A `borrow`/`borrow_mut` argument creates a **loan** on
+that place for the call's extent — the **region** `Region::Call(id)`
+(the NLL foundation: when `&` expressions arrive, regions become
+point ranges and the rest is unchanged).
+
+Live loans are a stack; each nested call pushes its own. Conflict
+rules (see ADR-0011):
+
+- shared + shared on overlapping places: fine.
+- any loan overlapping a live mutable loan, or a mutable loan over a
+  live shared one → `E_BORROW_CONFLICT` (`mix(q, q)`).
+- moving a place under any live loan → `E_MOVE_WHILE_BORROWED`
+  (`take(q, q)` where `take` borrows `a`, moves `b`).
+- disjoint projections never conflict: `m(q.a, q.b)` is fine even
+  with two `borrow_mut` params.
+
+**Escape summaries** (`OwnershipTables::escapes`) record where each
+parameter's value may exit — `Return` or `ViaCall(def)` — and surface
+through `ontixa explain` as `params[].escapes`.
+
 ## Escape dominance
 
 `escape` dominates `move`: a value returned to the caller is "more

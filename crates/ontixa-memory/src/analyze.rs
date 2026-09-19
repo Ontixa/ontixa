@@ -34,6 +34,7 @@
 //!   always `Copy`.
 
 use crate::behavior::ParamBehavior;
+use crate::place::{Loan, LoanKind, Place, Region, place_of};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_hir::{HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope};
 use ontixa_source::{DefId, ExprId, InternId, Interner, Span, SymbolId};
@@ -46,6 +47,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub struct OwnershipTables {
     /// `param_behaviors[f][i]` — inferred behavior of `f`'s i-th param.
     pub param_behaviors: FxHashMap<DefId, Vec<ParamBehavior>>,
+    /// `escapes[f][i]` — where `f`'s i-th param's value may exit.
+    pub escapes: FxHashMap<DefId, Vec<Vec<EscapeExit>>>,
 }
 
 impl OwnershipTables {
@@ -60,6 +63,29 @@ impl OwnershipTables {
 
 /// Contract vectors keyed by def.
 pub type ContractTable = FxHashMap<DefId, Vec<ParamBehavior>>;
+
+/// One way a parameter's value may leave its function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscapeExit {
+    /// Flows into the function's return value.
+    Return,
+    /// Flows into a call whose callee may return it (the value exits
+    /// through that callee's own contract).
+    ViaCall(DefId),
+}
+
+impl EscapeExit {
+    /// Stable string for JSON output.
+    pub fn as_str(&self, scope: &ModuleScope, interner: &Interner) -> String {
+        match self {
+            EscapeExit::Return => "return".to_string(),
+            EscapeExit::ViaCall(d) => {
+                let sym = scope.def(*d).name;
+                format!("call `{}`", interner.resolve(scope.symbols.get(sym).name))
+            }
+        }
+    }
+}
 
 /// Per-module incremental state for ownership inference — the
 /// memoized surface of the fixpoint across compilation sessions.
@@ -95,6 +121,8 @@ struct FactsEntry {
     stamps: FactStamps,
     /// Collected facts per parameter.
     facts: Vec<ParamFacts>,
+    /// Escape exits per parameter.
+    escapes: Vec<Vec<EscapeExit>>,
     /// `(callee name, contract vector)` — every callee contract the
     /// collection consumed, at the values it observed through the
     /// view. Valid only while those views hold.
@@ -116,6 +144,7 @@ pub struct FactStamps {
 /// The facts a collection produced plus the contract values it read.
 struct CollectedFacts {
     facts: Vec<ParamFacts>,
+    escapes: Vec<Vec<EscapeExit>>,
     consumed: Vec<(InternId, Vec<ParamBehavior>)>,
 }
 
@@ -139,13 +168,14 @@ pub fn infer_ownership(
     oracle.last_rounds = 0;
     let mut hypothesis = std::mem::take(&mut oracle.prev_contracts);
 
-    let contracts = loop {
+    let (contracts, escapes) = loop {
         oracle.last_rounds += 1;
-        let (contracts, drifted) = fixpoint_round(module, types, stamps, &hypothesis, oracle);
+        let (contracts, escapes, drifted) =
+            fixpoint_round(module, types, stamps, &hypothesis, oracle);
         if drifted.is_empty() {
             // Every memoized collection ran under contracts that
             // match the finals — the result is the true fixpoint.
-            break contracts;
+            break (contracts, escapes);
         }
         // Hypothesis was wrong somewhere: drop the drifted entries
         // and rerun under this round's finals.
@@ -185,6 +215,7 @@ pub fn infer_ownership(
             interner,
             diags,
             state: FxHashMap::default(),
+            loans: Vec::new(),
         };
         for p in &sig.params {
             e.state.insert(
@@ -200,6 +231,7 @@ pub fn infer_ownership(
 
     OwnershipTables {
         param_behaviors: contracts,
+        escapes,
     }
 }
 
@@ -220,7 +252,11 @@ fn fixpoint_round(
     stamps: Option<&[FactStamps]>,
     hypothesis: &FxHashMap<InternId, Vec<ParamBehavior>>,
     oracle: &mut OwnershipOracle,
-) -> (ContractTable, FxHashSet<InternId>) {
+) -> (
+    ContractTable,
+    FxHashMap<DefId, Vec<Vec<EscapeExit>>>,
+    FxHashSet<InternId>,
+) {
     let mut contracts: ContractTable = module
         .scope
         .defs
@@ -280,6 +316,7 @@ fn fixpoint_round(
         .map(|d| d.id)
         .collect();
     let mut queued: FxHashSet<DefId> = work.iter().copied().collect();
+    let mut escapes: FxHashMap<DefId, Vec<Vec<EscapeExit>>> = FxHashMap::default();
     let mut head = 0;
     while head < work.len() {
         let f = work[head];
@@ -288,12 +325,12 @@ fn fixpoint_round(
         let sig = module.scope.fn_sig(f).unwrap();
         let body = module.body(f).unwrap();
         let fname = def_name(&module.scope, f);
-        let facts = match memo_take(&module.scope, oracle, stamps, f, fname, |g| {
+        let (facts, esc) = match memo_take(&module.scope, oracle, stamps, f, fname, |g| {
             view(&contracts, g)
         }) {
-            Some(facts) => {
+            Some(pair) => {
                 oracle.last_reused += 1;
-                facts
+                pair
             }
             None => {
                 oracle.last_collected += 1;
@@ -310,13 +347,15 @@ fn fixpoint_round(
                         FactsEntry {
                             stamps: stamps[f.index()],
                             facts: collected.facts.clone(),
+                            escapes: collected.escapes.clone(),
                             consumed: collected.consumed,
                         },
                     );
                 }
-                collected.facts
+                (collected.facts, collected.escapes)
             }
         };
+        escapes.insert(f, esc);
         let mut next = Vec::with_capacity(sig.params.len());
         for (i, p) in sig.params.iter().enumerate() {
             next.push(classify(Ty::from_ref(p.ty), &facts[i]));
@@ -350,7 +389,7 @@ fn fixpoint_round(
             }
         }
     }
-    (contracts, drifted)
+    (contracts, escapes, drifted)
 }
 
 /// Reuses memoized facts for `def` when its input stamps match and
@@ -362,7 +401,7 @@ fn memo_take(
     def: DefId,
     name: InternId,
     view: impl Fn(DefId) -> Vec<ParamBehavior>,
-) -> Option<Vec<ParamFacts>> {
+) -> Option<(Vec<ParamFacts>, Vec<Vec<EscapeExit>>)> {
     let stamps = stamps?;
     let entry = oracle.facts.get(&name)?;
     if entry.stamps != stamps[def.index()] {
@@ -374,7 +413,7 @@ fn memo_take(
             return None;
         }
     }
-    Some(entry.facts.clone())
+    Some((entry.facts.clone(), entry.escapes.clone()))
 }
 
 /// Shared empty tables for bodies that lack them (error paths).
@@ -508,15 +547,18 @@ fn collect_facts(
             .map(|(i, p)| (p.symbol, i as u32))
             .collect(),
         facts: vec![ParamFacts::default(); sig.params.len()],
+        escapes: vec![Vec::new(); sig.params.len()],
         carriers: FxHashMap::default(),
         consumed: Vec::new(),
     };
     let root_carriers = c.eval(body.root, Ctx::Move);
     for i in root_carriers {
         c.facts[i as usize].escaped = true;
+        c.mark_escape(i, EscapeExit::Return);
     }
     CollectedFacts {
         facts: c.facts,
+        escapes: c.escapes,
         consumed: c.consumed,
     }
 }
@@ -530,6 +572,8 @@ struct FactCollector<'a, 'v> {
     /// Param symbol → parameter position.
     param_index: FxHashMap<SymbolId, u32>,
     facts: Vec<ParamFacts>,
+    /// Param index → exits its value may take (`Return`, `ViaCall`).
+    escapes: Vec<Vec<EscapeExit>>,
     /// Local → param indices whose value the local may carry.
     carriers: FxHashMap<SymbolId, Carriers>,
     /// `(callee name, contract)` read during this walk, in order.
@@ -567,6 +611,14 @@ impl FactCollector<'_, '_> {
     fn flag_mutated(&mut self, sym: SymbolId) {
         if let Some(i) = self.param_index.get(&sym) {
             self.facts[*i as usize].mutated = true;
+        }
+    }
+
+    /// Records an escape exit for a param index (deduplicated).
+    fn mark_escape(&mut self, i: u32, exit: EscapeExit) {
+        let e = &mut self.escapes[i as usize];
+        if !e.contains(&exit) {
+            e.push(exit);
         }
     }
 
@@ -617,6 +669,9 @@ impl FactCollector<'_, '_> {
                             let c = self.eval(*arg, Ctx::Move);
                             // The callee may return this argument's
                             // value — so it flows onward through us.
+                            for &i in &c {
+                                self.mark_escape(i, EscapeExit::ViaCall(def));
+                            }
                             out.extend(c);
                         }
                     }
@@ -682,6 +737,7 @@ impl FactCollector<'_, '_> {
                         let c = self.eval(*v, Ctx::Move);
                         for i in c {
                             self.facts[i as usize].escaped = true;
+                            self.mark_escape(i, EscapeExit::Return);
                         }
                     }
                 }
@@ -733,6 +789,8 @@ struct Enforcer<'a> {
     interner: &'a Interner,
     diags: &'a mut Diagnostics,
     state: FxHashMap<SymbolId, BindingState>,
+    /// Loans live inside the innermost call's extent.
+    loans: Vec<Loan>,
 }
 
 impl Enforcer<'_> {
@@ -811,6 +869,13 @@ impl Enforcer<'_> {
     }
 
     fn eval(&mut self, id: ExprId, ctx: Ctx) {
+        // A move out of a place that is currently borrowed is a
+        // dedicated error — checked before any state update.
+        if ctx == Ctx::Move && !self.tables.ty_of(id).is_copy() {
+            if let Some(p) = place_of(self.body, id) {
+                self.check_move_loans(&p);
+            }
+        }
         match self.expr(id).kind.clone() {
             HirExprKind::Literal(_) | HirExprKind::Poison => {}
             HirExprKind::Var(sym) => {
@@ -826,21 +891,27 @@ impl Enforcer<'_> {
             }
             HirExprKind::Call { def, args } => {
                 let contract = self.contracts.get(&def).cloned().unwrap_or_default();
+                // Loans created for this call's arguments live until
+                // the call returns — the region is the call itself.
+                let mark = self.loans.len();
                 for (i, arg) in args.iter().enumerate() {
                     let b = contract.get(i).copied().unwrap_or(ParamBehavior::Move);
                     match b {
-                        ParamBehavior::Borrow | ParamBehavior::Copy => {
+                        ParamBehavior::Borrow => {
                             self.eval(*arg, Ctx::Read);
+                            if let Some(p) = place_of(self.body, *arg) {
+                                self.add_loan(p, LoanKind::Shared, Region::Call(id));
+                            }
                         }
+                        ParamBehavior::Copy => self.eval(*arg, Ctx::Read),
                         ParamBehavior::BorrowMut => {
                             self.eval(*arg, Ctx::Read);
-                            if let Some(sym) = self.root_var(*arg) {
-                                let span = self.expr(*arg).span;
-                                self.use_var(sym, span, Ctx::Read);
+                            if let Some(p) = place_of(self.body, *arg) {
                                 // A mutable borrow requires mutable
                                 // authority over the place.
+                                let sym = p.base;
                                 if !self.body.symbol(self.scope, sym).mutable {
-                                    let name = self.name(sym).to_string();
+                                    let name = self.place_name(&p);
                                     self.diags.push(
                                         Diagnostic::error(
                                             Code::MutableBorrowOfImmutable,
@@ -848,7 +919,7 @@ impl Enforcer<'_> {
                                                 "`{name}` is passed to a parameter that mutates it, but `{name}` is not declared `mut`"
                                             ),
                                         )
-                                        .primary(span)
+                                        .primary(p.span)
                                         .label(
                                             self.body.symbol(self.scope, sym).span,
                                             format!("`{name}` declared here without `mut`"),
@@ -859,11 +930,13 @@ impl Enforcer<'_> {
                                         .subject(name),
                                     );
                                 }
+                                self.add_loan(p, LoanKind::Mut, Region::Call(id));
                             }
                         }
                         _ => self.eval(*arg, Ctx::Move),
                     }
                 }
+                self.loans.truncate(mark);
             }
             HirExprKind::Binary { lhs, rhs, .. } => {
                 self.eval(lhs, Ctx::Read);
@@ -980,12 +1053,71 @@ impl Enforcer<'_> {
         }
     }
 
-    fn root_var(&self, id: ExprId) -> Option<SymbolId> {
-        match &self.expr(id).kind {
-            HirExprKind::Var(sym) => Some(*sym),
-            HirExprKind::Field { base, .. } => self.root_var(*base),
-            _ => None,
+    /// `x.f.g` rendered with the caller's binding name for messages.
+    fn place_name(&self, p: &Place) -> String {
+        format!("{}{}", self.name(p.base), p.describe(self.interner))
+    }
+
+    /// Pushes a loan, checking it against every overlapping live loan:
+    /// shared+shared coexist; anything touching a mutable loan, and a
+    /// mutable loan over an already-shared place, is a conflict.
+    fn add_loan(&mut self, place: Place, kind: LoanKind, region: Region) {
+        if let Some(live) = self.loans.iter().find(|l| {
+            l.place.overlaps(&place) && (l.kind == LoanKind::Mut || kind == LoanKind::Mut)
+        }) {
+            let name = self.place_name(&place);
+            let (new_k, live_k) = (kind_str(kind), kind_str(live.kind));
+            self.diags.push(
+                Diagnostic::error(
+                    Code::BorrowConflict,
+                    format!("cannot {new_k} `{name}`: it is already {live_k} borrowed"),
+                )
+                .primary(place.span)
+                .label(
+                    live.at,
+                    format!(
+                        "`{}` {} borrowed here",
+                        self.place_name(&live.place),
+                        live_k
+                    ),
+                )
+                .subject(name),
+            );
+            return;
         }
+        self.loans.push(Loan {
+            at: place.span,
+            place,
+            kind,
+            region,
+        });
+    }
+
+    /// Moving a place while a live loan overlaps it is forbidden —
+    /// the loan's region covers this program point.
+    fn check_move_loans(&mut self, p: &Place) {
+        if let Some(live) = self.loans.iter().find(|l| l.place.overlaps(p)) {
+            let name = self.place_name(p);
+            let at = live.at;
+            let loaned = self.place_name(&live.place);
+            let k = kind_str(live.kind);
+            self.diags.push(
+                Diagnostic::error(
+                    Code::MoveWhileBorrowed,
+                    format!("cannot move `{name}`: it is {k} borrowed"),
+                )
+                .primary(p.span)
+                .label(at, format!("`{loaned}` {k} borrowed here"))
+                .subject(name),
+            );
+        }
+    }
+}
+
+fn kind_str(k: LoanKind) -> &'static str {
+    match k {
+        LoanKind::Shared => "shared",
+        LoanKind::Mut => "mutably",
     }
 }
 
