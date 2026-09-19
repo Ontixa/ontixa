@@ -1,27 +1,41 @@
-//! The compiler database.
+//! The incremental compiler database.
 //!
-//! [`Db`] owns source text and memoized compilation artifacts per
-//! file. Recompilation is *query-shaped* — each pipeline stage runs in
-//! order and reports a timing — but invalidation is deliberately
-//! coarse in milestone 1: any edit rebuilds the file's whole artifact
-//! bundle. ADR-0004 records the salsa migration path for fine-grained
-//! early-cutoff incrementality.
+//! [`Db`] is a small memoized query engine (ADR-0008): every pipeline
+//! stage is a [`QueryKey`], every result is a memoized [`Entry`]
+//! carrying the dependencies it read and the revision at which its
+//! value last changed. `set_source` bumps a global revision and
+//! rewrites the `Source` input entry; the next demand verifies each
+//! cached entry by walking its dependencies and re-evaluates only
+//! those whose inputs drifted. When a recomputed value compares equal
+//! to the memoized one, `computed_at` is preserved — the change
+//! "cuts off" and dependents stay fresh.
+//!
+//! Per-definition queries (`HirBody`, `BodyTypes`, `MirBody`) are
+//! keyed by the stable [`DefKey`], so editing one function can never
+//! renumber or invalidate another function's cached work.
+
+use std::sync::Arc;
+use std::time::Instant;
 
 use ontixa_ast::AstModule;
-use ontixa_diagnostics::Diagnostics;
-use ontixa_hir::HirModule;
-use ontixa_memory::OwnershipTables;
-use ontixa_mir::MirModule;
+use ontixa_diagnostics::{Diagnostic, Diagnostics};
+use ontixa_hir::{HirBody, HirModule, ModuleScope};
+use ontixa_memory::{OwnershipOracle, OwnershipTables};
+use ontixa_mir::{MirBody, MirModule};
 use ontixa_semantic::SemanticGraph;
-use ontixa_source::Interner;
-use ontixa_types::TypeTables;
-use std::time::Instant;
+use ontixa_source::{DefKey, FileId, Interner};
+use ontixa_types::{ModuleTypes, TypeTables};
+use rustc_hash::FxHashMap;
+
+use crate::eval;
+use crate::query::{Entry, QueryKey, QueryStats, Value, same_value};
 
 /// One pipeline stage's measured cost.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StageTiming {
-    /// Stage name (`lex+parse`, `ast`, `hir`, `types`, `ownership`,
-    /// `graph`, `mir`).
+    /// Stage name (`lex+parse`, `ast`, `resolve`, `hir`, `types`,
+    /// `ownership`, `graph`, `mir`, ...). Per-definition query evals
+    /// are aggregated under their stage name.
     pub stage: &'static str,
     /// Wall-clock nanoseconds for the last build.
     pub nanos: u64,
@@ -29,7 +43,7 @@ pub struct StageTiming {
 
 /// Everything a compiled file produced — the artifacts downstream
 /// tools (CLI, daemon, agents) consume.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Artifacts {
     /// Source revision these artifacts were built from.
     pub built_revision: u64,
@@ -39,8 +53,8 @@ pub struct Artifacts {
     pub module: HirModule,
     /// Interner that `InternId`s in the module resolve against.
     pub interner: Interner,
-    /// Per-expression and per-local types.
-    pub types: TypeTables,
+    /// Per-body type tables (`types[def]` is `Some` for functions).
+    pub types: ModuleTypes,
     /// Inferred ownership contracts.
     pub ownership: OwnershipTables,
     /// Semantic program graph.
@@ -60,17 +74,33 @@ impl Artifacts {
     }
 }
 
-struct FileEntry {
-    text: String,
-    /// Content generation — bumped on every `set_source`.
-    revision: u64,
-    cached: Option<Artifacts>,
+/// One file's input state. The text is duplicated into the `Source`
+/// memo entry — the file slot is only a fallback for out-of-band
+/// evaluation.
+struct FileSlot {
+    text: Arc<str>,
 }
 
-/// Query-oriented compiler state. One `Db` is one workspace session.
+/// Query-oriented compiler state. One `Db` is one workspace session:
+/// the memo table, the persistent [`Interner`], and the persistent
+/// [`OwnershipOracle`] all survive across `set_source` edits.
 #[derive(Default)]
 pub struct Db {
-    files: Vec<FileEntry>,
+    files: Vec<FileSlot>,
+    /// Session-persistent interner — `InternId`s never change meaning
+    /// across revisions, which is what makes `DefKey` stable.
+    pub(crate) interner: Interner,
+    /// Global input revision; bumped by `add_source`/`set_source`.
+    pub(crate) revision: u64,
+    /// The memo table.
+    pub(crate) memo: FxHashMap<QueryKey, Entry>,
+    /// Cross-revision ownership-fact cache (see `ontixa-memory`).
+    pub(crate) oracle: OwnershipOracle,
+    /// Dependency-recording stack; one frame per in-flight eval.
+    pub(crate) frames: Vec<Vec<QueryKey>>,
+    /// `(key, nanos)` of each eval during the current top-level demand.
+    pub(crate) last_run: Vec<(QueryKey, u64)>,
+    stats: QueryStats,
 }
 
 impl Db {
@@ -81,20 +111,45 @@ impl Db {
 
     /// Registers a source file; returns its index.
     pub fn add_source(&mut self, text: impl Into<String>) -> usize {
-        self.files.push(FileEntry {
-            text: text.into(),
-            revision: 0,
-            cached: None,
-        });
+        self.revision += 1;
+        let text: Arc<str> = text.into().into();
+        self.files.push(FileSlot { text: text.clone() });
+        let key = QueryKey::Source(FileId::new(self.files.len() as u32 - 1));
+        self.memo.insert(
+            key,
+            Entry {
+                value: Value::Text(text),
+                deps: Vec::new(),
+                diags: Vec::new(),
+                computed_at: self.revision,
+                verified_at: self.revision,
+            },
+        );
         self.files.len() - 1
     }
 
-    /// Replaces a file's text, invalidating its artifacts.
+    /// Replaces a file's text. If the text is unchanged, the `Source`
+    /// entry keeps its `computed_at` — dependents stay fresh and the
+    /// next `compile` is a pure verification pass.
     pub fn set_source(&mut self, file: usize, text: impl Into<String>) {
-        let f = &mut self.files[file];
-        f.text = text.into();
-        f.revision += 1;
-        f.cached = None;
+        self.revision += 1;
+        let text: Arc<str> = text.into().into();
+        self.files[file].text = text.clone();
+        let key = QueryKey::Source(FileId::new(file as u32));
+        let computed_at = match self.memo.get(&key) {
+            Some(old) if same_value(&old.value, &Value::Text(text.clone())) => old.computed_at,
+            _ => self.revision,
+        };
+        self.memo.insert(
+            key,
+            Entry {
+                value: Value::Text(text),
+                deps: Vec::new(),
+                diags: Vec::new(),
+                computed_at,
+                verified_at: self.revision,
+            },
+        );
     }
 
     /// The current source text of a file.
@@ -102,79 +157,218 @@ impl Db {
         &self.files[file].text
     }
 
+    /// The session interner (for resolving `InternId`s in artifacts).
+    pub fn interner(&self) -> &Interner {
+        &self.interner
+    }
+
+    /// Cumulative query statistics since the `Db` was created.
+    pub fn stats(&self) -> &QueryStats {
+        &self.stats
+    }
+
+    /// Query keys evaluated during the most recent top-level demand —
+    /// the observable unit of incremental work. Empty when the last
+    /// demand verified everything fresh.
+    pub fn last_evaluated(&self) -> Vec<QueryKey> {
+        self.last_run.iter().map(|(k, _)| *k).collect()
+    }
+
+    /// The persistent ownership oracle — per-body fact memoization
+    /// across revisions (`last_collected`/`last_reused` counters).
+    pub fn oracle(&self) -> &OwnershipOracle {
+        &self.oracle
+    }
+
     /// Compiles (or returns the memoized) artifacts for `file`.
     pub fn compile(&mut self, file: usize) -> &Artifacts {
-        let f = &self.files[file];
-        let fresh = f
-            .cached
-            .as_ref()
-            .is_some_and(|a| a.built_revision == f.revision);
-        if !fresh {
-            let revision = f.revision;
-            let artifacts = build(&f.text, revision);
-            self.files[file].cached = Some(artifacts);
+        let key = QueryKey::Compile(FileId::new(file as u32));
+        self.top_demand(key);
+        match &self.memo.get(&key).expect("compile evaluated").value {
+            Value::Compile(a) => a,
+            _ => unreachable!("Compile produced wrong value"),
         }
-        self.files[file].cached.as_ref().unwrap()
     }
 
-    /// Compiles `file` and returns the artifacts by value, emptying
-    /// the cache. For one-shot consumers (the CLI); session consumers
-    /// (the daemon) should use [`Db::compile`].
+    /// Compiles `file` and returns the artifacts by value. For
+    /// one-shot consumers (the CLI); session consumers should use
+    /// [`Db::compile`].
     pub fn compile_owned(&mut self, file: usize) -> Artifacts {
-        let _ = self.compile(file);
-        self.files[file].cached.take().unwrap()
+        self.compile(file).clone()
     }
-}
 
-/// Runs the full pipeline, timing each stage.
-fn build(src: &str, revision: u64) -> Artifacts {
-    let mut timings = Vec::new();
-    let mut stage = |name: &'static str, t0: Instant| {
-        timings.push(StageTiming {
-            stage: name,
-            nanos: t0.elapsed().as_nanos() as u64,
-        });
-    };
+    /// A function's lowered body, by name. `None` for `data` defs and
+    /// unknown names.
+    pub fn hir_body(&mut self, file: usize, name: &str) -> Option<&HirBody> {
+        let key = self.def_key(file, name, QueryKey::HirBody);
+        self.top_demand(key);
+        match &self.memo.get(&key)?.value {
+            Value::Hir(b) => b.as_ref(),
+            _ => unreachable!("HirBody produced wrong value"),
+        }
+    }
 
-    let t = Instant::now();
-    let (root, mut diags) = ontixa_syntax::parse_file(src);
-    stage("lex+parse", t);
+    /// A function's type tables, by name.
+    pub fn body_types(&mut self, file: usize, name: &str) -> Option<&TypeTables> {
+        let key = self.def_key(file, name, QueryKey::BodyTypes);
+        self.top_demand(key);
+        match &self.memo.get(&key)?.value {
+            Value::Checked(c) => c.as_ref().map(|c| &c.tables),
+            _ => unreachable!("BodyTypes produced wrong value"),
+        }
+    }
 
-    let t = Instant::now();
-    let ast = ontixa_ast::lower_module(&root, &mut diags);
-    stage("ast", t);
+    /// A function's MIR body, by name.
+    pub fn mir_body(&mut self, file: usize, name: &str) -> Option<&MirBody> {
+        let key = self.def_key(file, name, QueryKey::MirBody);
+        self.top_demand(key);
+        match &self.memo.get(&key)?.value {
+            Value::Mir(m) => m.as_ref(),
+            _ => unreachable!("MirBody produced wrong value"),
+        }
+    }
 
-    let mut interner = Interner::new();
-    let t = Instant::now();
-    let mut module = ontixa_hir::lower_hir(&ast, &mut interner, &mut diags);
-    stage("hir", t);
+    /// The file's ownership contracts.
+    pub fn ownership(&mut self, file: usize) -> Arc<OwnershipTables> {
+        let key = QueryKey::Ownership(FileId::new(file as u32));
+        match self.top_demand(key) {
+            Value::Ownership(o) => o,
+            _ => unreachable!("Ownership produced wrong value"),
+        }
+    }
 
-    let t = Instant::now();
-    let types = ontixa_types::check_module(&mut module, &interner, &mut diags);
-    stage("types", t);
+    /// The file's resolved module scope.
+    pub fn scope(&mut self, file: usize) -> Arc<ModuleScope> {
+        let key = QueryKey::Scope(FileId::new(file as u32));
+        match self.top_demand(key) {
+            Value::Scope(s) => s,
+            _ => unreachable!("Scope produced wrong value"),
+        }
+    }
 
-    let t = Instant::now();
-    let ownership = ontixa_memory::infer_ownership(&module, &types, &interner, &mut diags);
-    stage("ownership", t);
+    fn def_key(&mut self, file: usize, name: &str, ctor: fn(DefKey) -> QueryKey) -> QueryKey {
+        let name = self.interner.intern(name);
+        ctor(DefKey::new(FileId::new(file as u32), name))
+    }
 
-    let t = Instant::now();
-    let graph = ontixa_semantic::build_graph(&module, &types, &ownership, &interner);
-    stage("graph", t);
+    // ---- engine internals ------------------------------------------
 
-    let t = Instant::now();
-    let mir = ontixa_mir::lower_mir(&module, &types, &ownership);
-    stage("mir", t);
+    /// A top-level demand: clears the run log, then drives `key` to
+    /// freshness. Public accessors funnel through here.
+    fn top_demand(&mut self, key: QueryKey) -> Value {
+        self.last_run.clear();
+        self.demand(key)
+    }
 
-    Artifacts {
-        built_revision: revision,
-        ast,
-        module,
-        interner,
-        types,
-        ownership,
-        graph,
-        mir,
-        diags,
-        timings,
+    /// Records `key` as a dependency of the in-flight eval (if any),
+    /// brings it fresh, and returns its value.
+    pub(crate) fn demand(&mut self, key: QueryKey) -> Value {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.push(key);
+        }
+        self.ensure_fresh(key);
+        self.memo.get(&key).expect("evaluated entry").value.clone()
+    }
+
+    /// Brings `key` to the current revision: verifies each
+    /// dependency's `computed_at` against the entry's own, and
+    /// re-evaluates only when a dependency actually changed value.
+    fn ensure_fresh(&mut self, key: QueryKey) {
+        let Some(entry) = self.memo.get(&key) else {
+            self.run_eval(key);
+            return;
+        };
+        if entry.verified_at == self.revision {
+            QueryStats::bump(&mut self.stats.reused, key);
+            return;
+        }
+        let computed_at = entry.computed_at;
+        let deps = entry.deps.clone();
+        let mut dirty = false;
+        for dep in deps {
+            self.ensure_fresh(dep);
+            let changed = self
+                .memo
+                .get(&dep)
+                .is_none_or(|d| d.computed_at > computed_at);
+            if changed {
+                dirty = true;
+                break;
+            }
+        }
+        if dirty {
+            self.run_eval(key);
+        } else {
+            self.memo.get_mut(&key).expect("verified entry").verified_at = self.revision;
+            QueryStats::bump(&mut self.stats.reused, key);
+        }
+    }
+
+    /// Runs `key`'s evaluator and installs the result, preserving
+    /// `computed_at` when the value is unchanged (early cutoff).
+    fn run_eval(&mut self, key: QueryKey) {
+        self.frames.push(Vec::new());
+        let t0 = Instant::now();
+        let (value, mut diags) = eval::eval(self, key);
+        let nanos = t0.elapsed().as_nanos() as u64;
+        let deps = self.frames.pop().unwrap_or_default();
+        // Entries record their *transitive* diagnostics — dependencies'
+        // first (demand order), then this eval's own — so a consumer
+        // asking for "the diagnostics of X" never needs to walk the
+        // dep graph itself.
+        let mut all: Vec<Diagnostic> = Vec::new();
+        for dep in &deps {
+            all.extend(self.entry_diags(*dep).iter().cloned());
+        }
+        all.append(&mut diags);
+        let diags = all;
+        let computed_at = match self.memo.get(&key) {
+            Some(old) if same_value(&old.value, &value) => old.computed_at,
+            _ => self.revision,
+        };
+        self.memo.insert(
+            key,
+            Entry {
+                value,
+                deps,
+                diags,
+                computed_at,
+                verified_at: self.revision,
+            },
+        );
+        self.last_run.push((key, nanos));
+        QueryStats::bump(&mut self.stats.executed, key);
+        *self
+            .stats
+            .eval_nanos
+            .entry(key.name().to_string())
+            .or_insert(0) += nanos;
+    }
+
+    /// The revision a query's value last changed at (`0` = never).
+    pub(crate) fn stamp(&self, key: QueryKey) -> u64 {
+        self.memo.get(&key).map_or(0, |e| e.computed_at)
+    }
+
+    /// Diagnostics recorded on a query's entry.
+    pub(crate) fn entry_diags(&self, key: QueryKey) -> &[Diagnostic] {
+        self.memo.get(&key).map_or(&[], |e| e.diags.as_slice())
+    }
+
+    /// Dependencies demanded so far by the in-flight eval.
+    pub(crate) fn deps_so_far(&self) -> &[QueryKey] {
+        self.frames.last().map_or(&[], |f| f.as_slice())
+    }
+
+    /// The per-query eval timings of the current demand (cloned —
+    /// the log stays intact so `last_evaluated` still reports every
+    /// eval that ran).
+    pub(crate) fn take_last_run(&mut self) -> Vec<(QueryKey, u64)> {
+        self.last_run.clone()
+    }
+
+    /// A file's text (fallback for the `Source` eval arm).
+    pub(crate) fn file_text(&self, f: FileId) -> Arc<str> {
+        self.files[f.index()].text.clone()
     }
 }

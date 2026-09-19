@@ -17,5 +17,6 @@ ontixa-types.workspace = true
 ontixa-memory.workspace = true
 ontixa-semantic.workspace = true
 ontixa-mir.workspace = true
+rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true

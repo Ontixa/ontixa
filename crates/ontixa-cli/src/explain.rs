@@ -34,7 +34,7 @@ pub fn run(
         }),
         Some(name) => match resolve_symbol(&a, name) {
             Resolved::Def(def) => json!({"symbol": def_json(&a, def)}),
-            Resolved::Sym(sym) => json!({"symbol": sym_json(&a, sym)}),
+            Resolved::Sym(owner, sym) => json!({"symbol": sym_json(&a, owner, sym)}),
             Resolved::Ambiguous(cands) => {
                 extra = Some(ambiguous(&a, name, &cands));
                 Json::Null
@@ -84,9 +84,20 @@ pub fn run(
 
 enum Resolved {
     Def(DefId),
-    Sym(SymbolId),
-    Ambiguous(Vec<SymbolId>),
+    /// Owning def + symbol id. The id may be body-local (param/local)
+    /// or module-level (field); `sym_of` resolves it in context.
+    Sym(DefId, SymbolId),
+    Ambiguous(Vec<(DefId, SymbolId)>),
     Unknown,
+}
+
+/// Fetches the `Symbol` for `(owner, sym)` — through the owner's body
+/// for local ids, or the module table for fields.
+fn sym_of(m: &HirModule, owner: DefId, sym: SymbolId) -> &ontixa_hir::Symbol {
+    match m.body(owner) {
+        Some(b) => b.symbol(&m.scope, sym),
+        None => m.scope.symbols.get(sym),
+    }
 }
 
 /// Resolves a query name to a semantic symbol. Top-level def names
@@ -104,38 +115,48 @@ fn resolve_symbol(a: &Artifacts, name: &str) -> Resolved {
             return Resolved::Def(*def);
         }
     }
-    let cands: Vec<SymbolId> = a
-        .module
-        .scope
-        .symbols
-        .iter()
-        .filter(|s| a.interner.resolve(s.name) == name)
-        .map(|s| s.id)
-        .collect();
+    let mut cands: Vec<(DefId, SymbolId)> = Vec::new();
+    // Module-level symbols: `data` fields (defs already returned).
+    for s in a.module.scope.symbols.iter() {
+        if s.kind == SymbolKind::Field && a.interner.resolve(s.name) == name {
+            if let Some(owner) = s.owner {
+                cands.push((owner, s.id));
+            }
+        }
+    }
+    // Body-local symbols: params and `let` bindings live in their
+    // own body's arena.
+    for body in a.module.bodies.iter().flatten() {
+        for s in &body.local_symbols {
+            if a.interner.resolve(s.name) == name {
+                cands.push((body.def, s.id));
+            }
+        }
+    }
     match cands.len() {
         0 => Resolved::Unknown,
-        1 => Resolved::Sym(cands[0]),
+        1 => Resolved::Sym(cands[0].0, cands[0].1),
         _ => Resolved::Ambiguous(cands),
     }
 }
 
 /// Builds the ambiguity diagnostic: one label per candidate so both
 /// humans and machines see every match.
-fn ambiguous(a: &Artifacts, name: &str, cands: &[SymbolId]) -> Diagnostic {
+fn ambiguous(a: &Artifacts, name: &str, cands: &[(DefId, SymbolId)]) -> Diagnostic {
     let mut d = Diagnostic::error(
         Code::AmbiguousSymbol,
         format!("`{name}` is ambiguous: {} candidates", cands.len()),
     )
     .subject(name.to_string());
     let mut cand_json = Vec::new();
-    for &sym in cands {
-        let s = a.module.scope.symbols.get(sym);
-        let owner = s.owner.map(|o| def_name(&a.module, &a.interner, o));
+    for &(owner, sym) in cands {
+        let s = sym_of(&a.module, owner, sym);
+        let owner_name = def_name(&a.module, &a.interner, owner);
         let desc = describe_symbol(&a.module, &a.interner, s);
         d = d.label(s.span, desc.clone());
         cand_json.push(json!({
             "kind": kind_str(s.kind),
-            "owner": owner,
+            "owner": owner_name,
             "span": {"start": s.span.start, "end": s.span.end},
             "description": desc,
         }));
@@ -201,11 +222,13 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
-                    let s = m.scope.symbols.get(p.symbol);
+                    // `p.name`/`p.mutable` are on the ParamDef itself —
+                    // `p.symbol` is a body-local id only meaningful
+                    // inside the fn's own arena.
                     json!({
-                        "name": a.interner.resolve(s.name),
+                        "name": a.interner.resolve(p.name),
                         "type": ty_name(m, &a.interner, Ty::from_ref(p.ty)),
-                        "mutable": s.mutable,
+                        "mutable": p.mutable,
                         "behavior": contract.get(i).map(|b| b.as_str()).unwrap_or("unknown"),
                     })
                 })
@@ -234,30 +257,39 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
 }
 
 /// A non-def symbol (param / local / field) as an explanation record.
-fn sym_json(a: &Artifacts, sym: SymbolId) -> Json {
+/// `owner` is the def the symbol belongs to — required because
+/// body-local ids are only meaningful within their owning body.
+fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
     let m = &a.module;
-    let s = m.scope.symbols.get(sym);
+    let s = sym_of(m, owner, sym);
     let name = a.interner.resolve(s.name);
-    let ty = a.types.local_types.get(&sym).copied();
+    let ty = a
+        .types
+        .get(owner.index())
+        .and_then(|t| t.as_ref())
+        .and_then(|t| t.local_types.get(&sym))
+        .copied();
     let mut obj = json!({
         "kind": kind_str(s.kind),
         "name": name,
         "mutable": s.mutable,
-        "owner": s.owner.map(|o| def_name(m, &a.interner, o)),
+        "owner": def_name(m, &a.interner, owner),
         "span": {"start": s.span.start, "end": s.span.end},
     });
     if let Some(t) = ty {
         obj["type"] = json!(ty_name(m, &a.interner, t));
-    } else if let Some(owner) = s.owner {
-        // Params record their TypeRef in the signature, not local_types.
-        if let Some(sig) = m.scope.fn_sig(owner) {
-            if let Some(i) = sig.params.iter().position(|p| p.symbol == sym) {
+    }
+    if let Some(sig) = m.scope.fn_sig(owner) {
+        if let Some(i) = sig.params.iter().position(|p| p.symbol == sym) {
+            obj["behavior"] = json!(a.ownership.contract(owner)[i].as_str());
+            if ty.is_none() {
                 obj["type"] = json!(ty_name(m, &a.interner, Ty::from_ref(sig.params[i].ty)));
-                obj["behavior"] = json!(a.ownership.contract(owner)[i].as_str());
             }
         }
-        if let Some(shape) = m.scope.data_shape(owner) {
-            if let Some(f) = shape.fields.iter().find(|f| f.symbol == sym) {
+    }
+    if let Some(shape) = m.scope.data_shape(owner) {
+        if let Some(f) = shape.fields.iter().find(|f| f.symbol == sym) {
+            if ty.is_none() {
                 obj["type"] = json!(ty_name(m, &a.interner, Ty::from_ref(f.ty)));
             }
         }

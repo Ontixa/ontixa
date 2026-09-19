@@ -1,9 +1,20 @@
 //! HIR data structures.
 //!
 //! HIR is the first *semantic* representation: names are resolved to
-//! [`SymbolId`]s, definitions to [`DefId`]s, and every expression lives in
-//! a module-wide arena indexed by [`ExprId`]. It is deliberately free of
-//! runtime concerns — no evaluation state, no codegen details.
+//! [`SymbolId`]s, definitions to [`DefId`]s, and every expression
+//! lives in its owning [`HirBody`]'s arena indexed by [`ExprId`].
+//! It is deliberately free of runtime concerns — no evaluation
+//! state, no codegen details.
+//!
+//! # Arena ownership (milestone 2)
+//!
+//! Expression nodes and binding symbols are **body-local**: editing
+//! one function can never renumber another function's `ExprId`s or
+//! `SymbolId`s, which is what makes per-definition incremental
+//! caching (`hir_body(DefKey)`) meaningful. Local symbol ids carry
+//! [`SymbolId::LOCAL_BIT`]; resolve them through [`HirBody::symbol`],
+//! which dispatches between the body arena and the module
+//! `SymbolTable`.
 
 use ontixa_source::{DefId, ExprId, InternId, ModuleId, Span, SymbolId};
 use rustc_hash::FxHashMap;
@@ -49,7 +60,7 @@ pub enum TypeRef {
     Poison,
 }
 
-/// The kind of a symbol in the module symbol table.
+/// The kind of a symbol in the module symbol table or a body arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
@@ -65,10 +76,11 @@ pub enum SymbolKind {
     Local,
 }
 
-/// One entry in the module symbol table.
-#[derive(Debug, Clone, Serialize)]
+/// One entry in a symbol table (module-level or body-local).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Symbol {
-    /// This symbol's own ID (redundant with its table index).
+    /// This symbol's own ID (redundant with its table index; carries
+    /// [`SymbolId::LOCAL_BIT`] inside a body arena).
     pub id: SymbolId,
     /// Interned name.
     pub name: InternId,
@@ -83,8 +95,10 @@ pub struct Symbol {
     pub span: Span,
 }
 
-/// The module-wide symbol table, indexed by [`SymbolId`].
-#[derive(Debug, Default)]
+/// The module-wide symbol table, indexed by [`SymbolId`]. Holds only
+/// *module-level* symbols: defs and `data` fields. Params and locals
+/// live in their owning [`HirBody`].
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct SymbolTable {
     symbols: Vec<Symbol>,
 }
@@ -98,7 +112,8 @@ impl SymbolTable {
         id
     }
 
-    /// Looks up a symbol by ID.
+    /// Looks up a module-level symbol by ID. Panics on body-local
+    /// ids — use [`HirBody::symbol`] for those.
     pub fn get(&self, id: SymbolId) -> &Symbol {
         &self.symbols[id.index()]
     }
@@ -120,7 +135,7 @@ impl SymbolTable {
 }
 
 /// A top-level definition (function or data).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Def {
     /// This def's ID.
     pub id: DefId,
@@ -133,7 +148,7 @@ pub struct Def {
 }
 
 /// Definition payload.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DefKind {
     /// A function with signature and (post-lowering) body.
     Function(FnSig),
@@ -142,19 +157,27 @@ pub enum DefKind {
 }
 
 /// A function signature: parameter symbols and resolved types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FnSig {
-    /// Parameter symbols in order (each is `SymbolKind::Param`).
+    /// Parameter symbols in order. `params[i].symbol` is the
+    /// body-local id `SymbolId::local(i)` — the param's `Symbol`
+    /// record lives in `body.local_symbols[i]` once the body is
+    /// lowered.
     pub params: Vec<ParamDef>,
     /// Resolved return type (`Unit` when no `->` was written).
     pub ret: TypeRef,
 }
 
 /// A parameter: symbol plus resolved type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParamDef {
-    /// The parameter's symbol.
+    /// The parameter's body-local symbol id (`SymbolId::local(i)`).
     pub symbol: SymbolId,
+    /// Interned parameter name (kept here so signatures — and tools
+    /// explaining them — don't need the body to be lowered).
+    pub name: InternId,
+    /// Whether the parameter was declared `mut`.
+    pub mutable: bool,
     /// Resolved parameter type.
     pub ty: TypeRef,
     /// Source span of the parameter.
@@ -162,7 +185,7 @@ pub struct ParamDef {
 }
 
 /// A `data` definition's shape.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DataShape {
     /// Fields in declaration order (index = field position).
     pub fields: Vec<FieldDef>,
@@ -171,9 +194,9 @@ pub struct DataShape {
 }
 
 /// A field of a `data` definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FieldDef {
-    /// The field's symbol.
+    /// The field's symbol (module-level).
     pub symbol: SymbolId,
     /// Resolved field type.
     pub ty: TypeRef,
@@ -183,14 +206,14 @@ pub struct FieldDef {
 
 /// The module scope produced by name resolution: everything knowable
 /// without looking inside function bodies.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModuleScope {
     /// Module identity.
     pub module: ModuleId,
     /// Top-level definitions, indexed by `DefId`.
     pub defs: Vec<Def>,
-    /// Module-wide symbol table (defs, fields, params so far; body
-    /// lowering appends locals).
+    /// Module-level symbol table (defs and `data` fields only;
+    /// params and locals are body-local).
     pub symbols: SymbolTable,
     /// Function name → `DefId`.
     pub fns: FxHashMap<InternId, DefId>,
@@ -221,19 +244,50 @@ impl ModuleScope {
     }
 }
 
-/// A lowered function body.
-#[derive(Debug, Clone)]
+/// A lowered function body — its own expression arena and its own
+/// symbol arena (params followed by `let` bindings).
+#[derive(Debug, Clone, PartialEq)]
 pub struct HirBody {
     /// The function this body belongs to.
     pub def: DefId,
     /// Root expression — always a `Block`.
     pub root: ExprId,
-    /// Local binding symbols (params are in the signature instead).
-    pub locals: Vec<SymbolId>,
+    /// Body-local expression arena, indexed by `ExprId`.
+    pub exprs: Vec<HirExpr>,
+    /// Body-local symbol arena: `local_symbols[i]` has id
+    /// `SymbolId::local(i)`. Params occupy `0..n_params`, in the same
+    /// order as the signature; `let` bindings follow in source order.
+    pub local_symbols: Vec<Symbol>,
 }
 
-/// An expression node in the module arena.
-#[derive(Debug, Clone)]
+impl HirBody {
+    /// Looks up an expression in this body's arena.
+    pub fn expr(&self, id: ExprId) -> &HirExpr {
+        &self.exprs[id.index()]
+    }
+
+    /// Resolves any [`SymbolId`] reachable from this body: body-local
+    /// ids (params, `let` bindings) index [`Self::local_symbols`];
+    /// module-level ids index `scope.symbols`.
+    pub fn symbol<'a>(&'a self, scope: &'a ModuleScope, id: SymbolId) -> &'a Symbol {
+        if id.is_local() {
+            &self.local_symbols[id.local_index()]
+        } else {
+            scope.symbols.get(id)
+        }
+    }
+
+    /// Iterates the ids of `let` bindings (skips params).
+    pub fn local_ids(&self) -> impl Iterator<Item = SymbolId> + '_ {
+        self.local_symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Local)
+            .map(|s| s.id)
+    }
+}
+
+/// An expression node in a body arena.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HirExpr {
     /// This expression's arena ID.
     pub id: ExprId,
@@ -244,7 +298,7 @@ pub struct HirExpr {
 }
 
 /// Expression payload.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HirExprKind {
     /// A literal.
     Literal(LitValue),
@@ -313,11 +367,11 @@ pub enum HirExprKind {
 pub type LitValue = ontixa_ast::Literal;
 
 /// A statement inside a `Block`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HirStmt {
     /// `let x (: T)? (= init)? ;`
     Let {
-        /// The new binding's symbol.
+        /// The new binding's body-local symbol.
         symbol: SymbolId,
         /// Resolved annotation, when written.
         ty: Option<TypeRef>,
@@ -352,9 +406,9 @@ pub enum HirStmt {
 }
 
 /// An assignment target: binding plus field projections.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HirPlace {
-    /// Root binding symbol.
+    /// Root binding symbol (may be body-local).
     pub base: SymbolId,
     /// Field projections in order.
     pub fields: Vec<Name>,
@@ -362,24 +416,17 @@ pub struct HirPlace {
     pub span: Span,
 }
 
-/// The lowered module: resolved scope plus bodies and the expression
-/// arena.
-#[derive(Debug)]
+/// The lowered module: resolved scope plus per-def bodies.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HirModule {
     /// Resolved module scope (defs, symbols, name indices).
     pub scope: ModuleScope,
-    /// Module-wide expression arena, indexed by `ExprId`.
-    pub exprs: Vec<HirExpr>,
-    /// Function bodies by `DefId` (`None` for data defs).
+    /// Function bodies by `DefId` (`None` for data defs). Each body
+    /// owns its expression and local-symbol arenas.
     pub bodies: Vec<Option<HirBody>>,
 }
 
 impl HirModule {
-    /// Looks up an expression by ID.
-    pub fn expr(&self, id: ExprId) -> &HirExpr {
-        &self.exprs[id.index()]
-    }
-
     /// The body of a function def, when present.
     pub fn body(&self, def: DefId) -> Option<&HirBody> {
         self.bodies.get(def.index()).and_then(|b| b.as_ref())

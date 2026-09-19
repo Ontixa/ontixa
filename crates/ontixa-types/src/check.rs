@@ -28,13 +28,18 @@ use ontixa_hir::{
 use ontixa_source::{DefId, ExprId, InternId, Interner, Span, SymbolId};
 use rustc_hash::FxHashMap;
 
-/// The product of type checking: one type per expression, the type of
-/// every local binding, and resolved field layouts for struct literals.
-#[derive(Debug)]
+/// The product of type checking **one body**: one type per
+/// expression in `body.exprs`, the type of every parameter and `let`
+/// binding, and resolved field layouts for struct literals.
+///
+/// Tables are per-body (like the arenas they index) so a body edit
+/// can never invalidate another body's types.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct TypeTables {
-    /// `expr_types[id]` is the checked type of `module.exprs[id]`.
+    /// `expr_types[id]` is the checked type of `body.exprs[id]`.
     pub expr_types: Vec<Ty>,
-    /// Type of each parameter and `let` binding symbol.
+    /// Type of each parameter and `let` binding symbol (body-local
+    /// `SymbolId`s for params and locals).
     pub local_types: FxHashMap<SymbolId, Ty>,
     /// For each `StructLit` expression, the declared field index of
     /// each written field (same order as the written fields).
@@ -42,20 +47,44 @@ pub struct TypeTables {
 }
 
 impl TypeTables {
-    /// The type of an expression node.
+    /// The type of an expression node in the owning body.
     pub fn ty_of(&self, id: ExprId) -> Ty {
         self.expr_types[id.index()]
     }
 }
 
-/// Type-checks a resolved [`HirModule`], filling `Field.field` indices
-/// in place and appending diagnostics.
+/// Per-def type tables for a whole module — `tables[def]` is `Some`
+/// for functions, `None` for `data` defs.
+pub type ModuleTypes = Vec<Option<TypeTables>>;
+
+/// Type-checks every body in a resolved [`HirModule`], filling
+/// `Field.field` indices in place and appending diagnostics.
+/// Convenience composition of [`check_body`] for whole-module
+/// consumers (tests, one-shot compilation).
 pub fn check_module(
     module: &mut HirModule,
     interner: &Interner,
     diags: &mut Diagnostics,
+) -> ModuleTypes {
+    module
+        .bodies
+        .iter_mut()
+        .map(|b| {
+            b.as_mut()
+                .map(|b| check_body(&module.scope, b, interner, diags))
+        })
+        .collect()
+}
+
+/// Type-checks one function body, filling its `Field.field` indices
+/// in place and appending diagnostics.
+pub fn check_body(
+    scope: &ModuleScope,
+    body: &mut HirBody,
+    interner: &Interner,
+    diags: &mut Diagnostics,
 ) -> TypeTables {
-    let mut exprs = std::mem::take(&mut module.exprs);
+    let mut exprs = std::mem::take(&mut body.exprs);
     let mut tables = TypeTables {
         expr_types: vec![Ty::Poison; exprs.len()],
         local_types: FxHashMap::default(),
@@ -63,7 +92,8 @@ pub fn check_module(
     };
     {
         let mut ck = Checker {
-            scope: &module.scope,
+            scope,
+            body,
             exprs: &mut exprs,
             interner,
             diags,
@@ -71,16 +101,17 @@ pub fn check_module(
             locals: FxHashMap::default(),
             ret: Ty::Unit,
         };
-        for body in module.bodies.iter().flatten() {
-            ck.check_body(body);
-        }
+        ck.run_body(body);
     }
-    module.exprs = exprs;
+    body.exprs = exprs;
     tables
 }
 
 struct Checker<'a> {
     scope: &'a ModuleScope,
+    /// The body being checked — `exprs` holds its taken-out arena;
+    /// `body` itself is needed for `local_symbols` and `root`/`def`.
+    body: &'a HirBody,
     exprs: &'a mut Vec<HirExpr>,
     interner: &'a Interner,
     diags: &'a mut Diagnostics,
@@ -150,7 +181,7 @@ impl Checker<'_> {
 
     // ---------- bodies ----------
 
-    fn check_body(&mut self, body: &HirBody) {
+    fn run_body(&mut self, body: &HirBody) {
         self.locals.clear();
         let sig = self
             .scope
@@ -238,7 +269,7 @@ impl Checker<'_> {
                     (Some(a), None) => a,
                     (None, Some(i)) => i,
                     (None, None) => {
-                        let name = self.scope.symbols.get(*symbol).name;
+                        let name = self.body.symbol(self.scope, *symbol).name;
                         self.diags.push(
                             Diagnostic::error(
                                 Code::CannotInfer,
@@ -294,7 +325,7 @@ impl Checker<'_> {
         let mut ty = match self.locals.get(&place.base) {
             Some(t) => *t,
             None => {
-                let sym = self.scope.symbols.get(place.base);
+                let sym = self.body.symbol(self.scope, place.base);
                 let name = self.interner.resolve(sym.name).to_string();
                 self.diags.push(
                     Diagnostic::error(
@@ -364,7 +395,7 @@ impl Checker<'_> {
             HirExprKind::Var(sym) => match self.locals.get(&sym) {
                 Some(t) => *t,
                 None => {
-                    let sym = self.scope.symbols.get(sym);
+                    let sym = self.body.symbol(self.scope, sym);
                     let name = self.interner.resolve(sym.name).to_string();
                     self.diags.push(
                         Diagnostic::error(

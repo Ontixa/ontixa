@@ -13,76 +13,88 @@
 
 use crate::hir::{
     HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope, Name, Symbol,
-    SymbolKind, SymbolTable, TypeRef,
+    SymbolKind, TypeRef,
 };
-use ontixa_ast::{AstModule, Block, Expr, Ident, Item, Place, Stmt, TypeExpr};
+use ontixa_ast::{AstModule, Block, Expr, FnDecl, Ident, Item, Place, Stmt, TypeExpr};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_source::{DefId, ExprId, InternId, Interner, Span, SymbolId};
 use rustc_hash::FxHashMap;
 
 /// Lowers all function bodies in `ast` against the resolved `scope`,
 /// producing the complete [`HirModule`].
+///
+/// Each body is lowered independently by [`lower_body`] into its own
+/// expression and local-symbol arenas — an edit to one function can
+/// never renumber another's ids.
 pub fn lower_bodies(
     ast: &AstModule,
-    mut scope: ModuleScope,
+    scope: ModuleScope,
     interner: &mut Interner,
     diags: &mut Diagnostics,
 ) -> HirModule {
-    let mut exprs: Vec<HirExpr> = Vec::new();
     let mut bodies: Vec<Option<HirBody>> = (0..scope.defs.len()).map(|_| None).collect();
-
-    // Local symbols are appended to the module table during lowering.
-    // The table is moved out so each body lowerer can hold `&mut` to it
-    // while keeping an immutable view of the rest of the scope.
-    let mut symbol_table = std::mem::take(&mut scope.symbols);
-
     for (idx, item) in ast.items.iter().enumerate() {
         let Item::Fn(f) = item else { continue };
         let def = DefId::new(idx as u32);
-        let mut b = BodyLowerer {
-            def,
-            scope: &scope,
-            symbols: &mut symbol_table,
-            interner,
-            diags,
-            exprs: &mut exprs,
-            locals: Vec::new(),
-            scopes: vec![FxHashMap::default()],
-        };
-        // Bind parameters into the outermost scope. `sig.params[i]`
-        // corresponds to `f.params[i]` by construction.
-        if let Some(sig) = scope.fn_sig(def) {
-            for (i, p) in f.params.iter().enumerate() {
-                let interned = b.interner.intern(&p.name.name);
-                if let Some(param) = sig.params.get(i) {
-                    b.scopes[0].insert(interned, param.symbol);
-                }
-            }
-        }
-        let root = b.block(&f.body);
-        bodies[idx] = Some(HirBody {
-            def,
-            root,
-            locals: b.locals,
-        });
+        bodies[idx] = Some(lower_body(f, def, &scope, interner, diags));
     }
+    HirModule { scope, bodies }
+}
 
-    scope.symbols = symbol_table;
-    HirModule {
+/// Lowers one function body against the resolved module `scope`.
+///
+/// The scope is borrowed immutably: everything the body declares —
+/// its params and its `let` bindings — lives in the returned
+/// [`HirBody`]'s own arenas, never in the module table.
+pub fn lower_body(
+    f: &FnDecl,
+    def: DefId,
+    scope: &ModuleScope,
+    interner: &mut Interner,
+    diags: &mut Diagnostics,
+) -> HirBody {
+    let mut b = BodyLowerer {
+        def,
         scope,
-        exprs,
-        bodies,
+        interner,
+        diags,
+        exprs: Vec::new(),
+        local_symbols: Vec::new(),
+        scopes: vec![FxHashMap::default()],
+    };
+    // Params occupy local arena slots 0..n — matching
+    // `sig.params[i].symbol == SymbolId::local(i)`, which name
+    // resolution fixed before any body existed.
+    for p in &f.params {
+        let interned = b.interner.intern(&p.name.name);
+        let id = b.declare_sym(Symbol {
+            id: SymbolId::new(0),
+            name: interned,
+            kind: SymbolKind::Param,
+            mutable: p.mutable,
+            owner: Some(def),
+            span: p.name.span,
+        });
+        b.scopes[0].insert(interned, id);
+    }
+    let root = b.block(&f.body);
+    HirBody {
+        def,
+        root,
+        exprs: b.exprs,
+        local_symbols: b.local_symbols,
     }
 }
 
 struct BodyLowerer<'a> {
     def: DefId,
     scope: &'a ModuleScope,
-    symbols: &'a mut SymbolTable,
     interner: &'a mut Interner,
     diags: &'a mut Diagnostics,
-    exprs: &'a mut Vec<HirExpr>,
-    locals: Vec<SymbolId>,
+    /// This body's own expression arena.
+    exprs: Vec<HirExpr>,
+    /// This body's own symbol arena (params then `let` bindings).
+    local_symbols: Vec<Symbol>,
     scopes: Vec<FxHashMap<InternId, SymbolId>>,
 }
 
@@ -111,21 +123,27 @@ impl BodyLowerer<'_> {
         None
     }
 
+    /// Pushes a symbol into the body arena, assigning `local(i)`.
+    fn declare_sym(&mut self, mut sym: Symbol) -> SymbolId {
+        let id = SymbolId::local(self.local_symbols.len() as u32);
+        sym.id = id;
+        self.local_symbols.push(sym);
+        id
+    }
+
     fn declare_local(&mut self, ident: &Ident, mutable: bool) -> SymbolId {
         let interned = self.interner.intern(&ident.name);
-        let sym = Symbol {
+        let id = self.declare_sym(Symbol {
             id: SymbolId::new(0),
             name: interned,
             kind: SymbolKind::Local,
             mutable,
             owner: Some(self.def),
             span: ident.span,
-        };
-        let id = self.symbols.push(sym);
+        });
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(interned, id);
         }
-        self.locals.push(id);
         id
     }
 

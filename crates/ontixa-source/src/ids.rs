@@ -93,3 +93,56 @@ define_id!(
     /// Identity of an interned string.
     InternId
 );
+
+impl SymbolId {
+    /// High bit marking a *body-local* symbol. Parameter and `let`
+    /// binding ids index their owning [`HirBody`](hir)'s symbol
+    /// arena — not the module `SymbolTable` — so inserting or editing
+    /// one function can never renumber another function's bindings.
+    /// (Stable symbol identity is what makes early-cutoff
+    /// incrementality meaningful; see `docs/semantic-identity.md`.)
+    pub const LOCAL_BIT: u32 = 1 << 31;
+
+    /// The body-local id for arena index `raw`.
+    pub const fn local(raw: u32) -> Self {
+        Self(Self::LOCAL_BIT | raw)
+    }
+
+    /// Whether this id is body-local (param or `let` binding).
+    pub const fn is_local(self) -> bool {
+        self.0 & Self::LOCAL_BIT != 0
+    }
+
+    /// Index into the owning body's local symbol arena. Only valid
+    /// when [`Self::is_local`].
+    pub const fn local_index(self) -> usize {
+        (self.0 & !Self::LOCAL_BIT) as usize
+    }
+}
+
+/// Stable identity of a top-level definition across edits and
+/// sessions: the file that declares it plus its interned name.
+///
+/// [`DefId`] is a dense per-revision index — it shifts when defs are
+/// inserted or reordered. `DefKey` is what incremental queries,
+/// cross-revision state, and future multi-file references key on.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+pub struct DefKey {
+    /// Declaring file.
+    pub file: FileId,
+    /// Definition name (interned in the `Db`-level interner).
+    pub name: InternId,
+}
+
+impl DefKey {
+    /// Creates a key for the def named `name` in `file`.
+    pub const fn new(file: FileId, name: InternId) -> Self {
+        Self { file, name }
+    }
+}
+
+impl fmt::Debug for DefKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DefKey({}:{})", self.file.0, self.name.0)
+    }
+}

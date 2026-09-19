@@ -14,60 +14,86 @@ use crate::mir::{
     BasicBlock, BlockId, Const, Local, LocalDecl, MirBody, MirModule, MirStmt, Operand, Place,
     Rvalue, Terminator,
 };
-use ontixa_hir::{HirExprKind, HirModule, HirPlace, HirStmt};
+use ontixa_hir::{HirBody, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope};
 use ontixa_memory::OwnershipTables;
 use ontixa_source::{ExprId, SymbolId};
-use ontixa_types::{Ty, TypeTables};
+use ontixa_types::{ModuleTypes, Ty, TypeTables};
 use rustc_hash::FxHashMap;
 
-/// Lowers the whole module to MIR.
-pub fn lower_mir(module: &HirModule, types: &TypeTables, ownership: &OwnershipTables) -> MirModule {
+/// Lowers the whole module to MIR — convenience composition of
+/// [`lower_fn`] for whole-module consumers.
+pub fn lower_mir(
+    module: &HirModule,
+    types: &ModuleTypes,
+    ownership: &OwnershipTables,
+) -> MirModule {
     let mut fns: Vec<Option<MirBody>> = (0..module.scope.defs.len()).map(|_| None).collect();
     for def in &module.scope.defs {
-        let (Some(sig), Some(body)) = (module.scope.fn_sig(def.id), module.body(def.id)) else {
+        let (Some(body), Some(tables)) = (
+            module.body(def.id),
+            types.get(def.id.index()).and_then(|t| t.as_ref()),
+        ) else {
             continue;
         };
-        let mut l = FnLowerer {
-            module,
-            types,
-            ownership,
-            locals: Vec::new(),
-            local_of: FxHashMap::default(),
-            blocks: Vec::new(),
-            cur: BlockId(0),
-            cur_closed: false,
-        };
-        // Params occupy locals 0..n in order.
-        for p in &sig.params {
-            let local = l.alloc_local(Some(p.symbol), Ty::from_ref(p.ty));
-            l.local_of.insert(p.symbol, local);
+        if module.scope.fn_sig(def.id).is_none() {
+            continue;
         }
-        l.cur = l.new_block(); // entry = block 0
-        let result = l.eval(body.root);
-        if l.cur_is_open() {
-            l.close(Terminator::Return(result));
-        }
-        // Any block still holding the placeholder terminator falls off
-        // the end — a unit return (only reachable in error paths).
-        for b in l.blocks.iter_mut() {
-            if matches!(b.term, Terminator::Goto(BlockId(u32::MAX))) {
-                b.term = Terminator::Return(Operand::Const(Const::Unit));
-            }
-        }
-        fns[def.id.index()] = Some(MirBody {
-            def: def.id,
-            params: sig.params.iter().map(|p| (p.symbol, p.ty.into())).collect(),
-            param_behaviors: ownership.contract(def.id).to_vec(),
-            ret: sig.ret.into(),
-            locals: l.locals,
-            blocks: l.blocks,
-        });
+        fns[def.id.index()] = Some(lower_fn(&module.scope, body, tables, ownership));
     }
     MirModule { fns }
 }
 
+/// Lowers one HIR body to a [`MirBody`]. `ownership` carries the
+/// inferred contracts of this function's params and of every callee
+/// it may call.
+pub fn lower_fn(
+    scope: &ModuleScope,
+    body: &HirBody,
+    types: &TypeTables,
+    ownership: &OwnershipTables,
+) -> MirBody {
+    let sig = scope.fn_sig(body.def).expect("a body exists only for fns");
+    let mut l = FnLowerer {
+        scope,
+        body,
+        types,
+        ownership,
+        locals: Vec::new(),
+        local_of: FxHashMap::default(),
+        blocks: Vec::new(),
+        cur: BlockId(0),
+        cur_closed: false,
+    };
+    // Params occupy locals 0..n in order.
+    for p in &sig.params {
+        let local = l.alloc_local(Some(p.symbol), Ty::from_ref(p.ty));
+        l.local_of.insert(p.symbol, local);
+    }
+    l.cur = l.new_block(); // entry = block 0
+    let result = l.eval(body.root);
+    if l.cur_is_open() {
+        l.close(Terminator::Return(result));
+    }
+    // Any block still holding the placeholder terminator falls off
+    // the end — a unit return (only reachable in error paths).
+    for b in l.blocks.iter_mut() {
+        if matches!(b.term, Terminator::Goto(BlockId(u32::MAX))) {
+            b.term = Terminator::Return(Operand::Const(Const::Unit));
+        }
+    }
+    MirBody {
+        def: body.def,
+        params: sig.params.iter().map(|p| (p.symbol, p.ty.into())).collect(),
+        param_behaviors: ownership.contract(body.def).to_vec(),
+        ret: sig.ret.into(),
+        locals: l.locals,
+        blocks: l.blocks,
+    }
+}
+
 struct FnLowerer<'a> {
-    module: &'a HirModule,
+    scope: &'a ModuleScope,
+    body: &'a HirBody,
     types: &'a TypeTables,
     ownership: &'a OwnershipTables,
     locals: Vec<LocalDecl>,
@@ -154,7 +180,7 @@ impl FnLowerer<'_> {
     /// `Field` expressions are places; anything else is evaluated into
     /// a fresh temporary.
     fn eval_place(&mut self, id: ExprId) -> Place {
-        match self.module.expr(id).kind.clone() {
+        match self.body.expr(id).kind.clone() {
             HirExprKind::Var(sym) => {
                 let ty = self.ty_of(id);
                 Place::local(self.local(sym, ty))
@@ -200,7 +226,7 @@ impl FnLowerer<'_> {
         let mut ty = base_ty;
         for f in &place.fields {
             if let Ty::Struct(def) = ty {
-                if let Some(shape) = self.module.scope.data_shape(def) {
+                if let Some(shape) = self.scope.data_shape(def) {
                     if let Some(i) = shape.field_index.get(&f.id) {
                         p.proj.push(*i);
                         ty = shape.fields[*i as usize].ty.into();
@@ -262,7 +288,7 @@ impl FnLowerer<'_> {
     /// Evaluates an expression, appending any needed statements to the
     /// current block, and returns the operand holding its value.
     fn eval(&mut self, id: ExprId) -> Operand {
-        match self.module.expr(id).kind.clone() {
+        match self.body.expr(id).kind.clone() {
             HirExprKind::Literal(lit) => Operand::Const(match lit {
                 ontixa_hir::Literal::Int(v) => Const::Int(v),
                 ontixa_hir::Literal::Float(v) => Const::Float(v),

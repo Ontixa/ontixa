@@ -199,6 +199,7 @@ dependencies = [
  "ontixa-source",
  "ontixa-syntax",
  "ontixa-types",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
 ]

@@ -108,7 +108,10 @@ impl Resolver<'_> {
                         ret: TypeRef::Unit,
                     }),
                 },
-                span,
+                // The *name* span, not the whole item: a body-only edit
+                // must leave the scope value equal so dependent query
+                // results cut off instead of re-running.
+                span: name_ident.span,
             });
         }
 
@@ -158,7 +161,7 @@ impl Resolver<'_> {
                 Item::Fn(f) => {
                     let mut params = Vec::new();
                     let mut seen: FxHashMap<InternId, Span> = FxHashMap::default();
-                    for p in &f.params {
+                    for (i, p) in f.params.iter().enumerate() {
                         let pname = self.interner.intern(&p.name.name);
                         if let Some(prev) = seen.get(&pname) {
                             self.diags.push(
@@ -177,16 +180,14 @@ impl Resolver<'_> {
                             seen.insert(pname, p.name.span);
                         }
                         let ty = self.resolve_type(&p.ty);
-                        let symbol = self.symbols.push(Symbol {
-                            id: SymbolId::new(0),
-                            name: pname,
-                            kind: SymbolKind::Param,
-                            mutable: p.mutable,
-                            owner: Some(def_id),
-                            span: p.name.span,
-                        });
+                        // Params are body-local: their `Symbol` record
+                        // is allocated by body lowering into
+                        // `local_symbols[i]`. Resolution only fixes
+                        // the identity (`local(i)`) and the type.
                         params.push(ParamDef {
-                            symbol,
+                            symbol: SymbolId::local(i as u32),
+                            name: pname,
+                            mutable: p.mutable,
                             ty,
                             span: p.span,
                         });

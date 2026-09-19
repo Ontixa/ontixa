@@ -76,7 +76,7 @@ pub enum EdgeKind {
 }
 
 /// One node in the semantic graph.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SpgNode {
     /// Node identifier.
     pub id: NodeId,
@@ -92,7 +92,7 @@ pub struct SpgNode {
 }
 
 /// One typed edge between nodes.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SpgEdge {
     /// Source node.
     pub from: NodeId,
@@ -106,7 +106,7 @@ pub struct SpgEdge {
 }
 
 /// The semantic program graph for one module.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct SemanticGraph {
     /// Schema version for machine consumers.
     pub schema: u32,

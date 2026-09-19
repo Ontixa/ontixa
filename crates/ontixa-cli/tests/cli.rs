@@ -49,7 +49,15 @@ fn check_json_is_one_document() {
     assert_eq!(d["command"], "check");
     assert_eq!(d["success"], true);
     assert!(d["diagnostics"].is_array());
-    assert_eq!(d["timings"].as_array().unwrap().len(), 7);
+    let stages: Vec<&str> = d["timings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["stage"].as_str())
+        .collect();
+    for stage in ["lex+parse", "ast", "hir", "types", "ownership", "mir"] {
+        assert!(stages.contains(&stage), "missing stage {stage}");
+    }
     assert!(out.status.success());
 }
 

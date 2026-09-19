@@ -15,7 +15,7 @@
 mod lower;
 mod mir;
 
-pub use lower::lower_mir;
+pub use lower::{lower_fn, lower_mir};
 pub use mir::{
     BasicBlock, BlockId, Const, Local, LocalDecl, MirBody, MirModule, MirStmt, Operand, Place,
     Rvalue, Terminator,
@@ -27,7 +27,7 @@ pub fn mir_src(
 ) -> (
     MirModule,
     ontixa_hir::HirModule,
-    ontixa_types::TypeTables,
+    ontixa_types::ModuleTypes,
     ontixa_memory::OwnershipTables,
     ontixa_source::Interner,
     ontixa_diagnostics::Diagnostics,

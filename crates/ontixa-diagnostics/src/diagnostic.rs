@@ -29,7 +29,7 @@ pub struct Label {
 /// `details` is the escape hatch for machine consumers: stable keys with
 /// JSON values (typically span objects `{start, end}` or short strings).
 /// Only add keys whose meaning is documented in `docs/diagnostics.md`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostic {
     /// Stable code, e.g. `Code::UseAfterMove`.
     pub code: Code,
@@ -125,7 +125,7 @@ impl Diagnostic {
 }
 
 /// An ordered collection of diagnostics with convenience queries.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Diagnostics {
     items: Vec<Diagnostic>,
 }

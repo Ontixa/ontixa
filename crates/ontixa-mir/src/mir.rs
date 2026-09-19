@@ -43,7 +43,7 @@ impl Place {
 }
 
 /// A compile-time constant.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value")]
 pub enum Const {
     /// Integer (fits its [`Ty`]). Serialized as i64/u64 when it fits —
@@ -72,7 +72,7 @@ fn ser_i128<S: serde::Serializer>(v: &i128, s: S) -> Result<S::Ok, S::Error> {
 }
 
 /// An operand: either a constant or a place.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum Operand {
     /// A constant.
@@ -82,7 +82,7 @@ pub enum Operand {
 }
 
 /// A computed value (right-hand side of an assignment).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum Rvalue {
     /// Read/copy a place or use a constant.
@@ -122,7 +122,7 @@ pub enum Rvalue {
 }
 
 /// A statement inside a basic block.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum MirStmt {
     /// `dst = rvalue`.
@@ -140,7 +140,7 @@ pub enum MirStmt {
 }
 
 /// How a basic block ends.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum Terminator {
     /// Return a value to the caller.
@@ -159,7 +159,7 @@ pub enum Terminator {
 }
 
 /// A basic block: straight-line statements plus a terminator.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BasicBlock {
     /// Block identifier.
     pub id: BlockId,
@@ -170,7 +170,7 @@ pub struct BasicBlock {
 }
 
 /// One local slot: a user binding or a compiler temporary.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LocalDecl {
     /// The source symbol, when this slot is a user binding.
     pub sym: Option<SymbolId>,
@@ -179,7 +179,7 @@ pub struct LocalDecl {
 }
 
 /// A function's MIR body.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MirBody {
     /// The function definition this body belongs to.
     pub def: DefId,
@@ -196,7 +196,7 @@ pub struct MirBody {
 }
 
 /// The module's MIR: one optional body per definition.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct MirModule {
     /// `fns[i]` is the MIR body of `DefId(i)`, or `None` for `data`.
     pub fns: Vec<Option<MirBody>>,

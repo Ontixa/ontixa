@@ -16,7 +16,7 @@
 mod analyze;
 mod behavior;
 
-pub use analyze::{OwnershipTables, infer_ownership};
+pub use analyze::{FactStamps, OwnershipOracle, OwnershipTables, ParamFacts, infer_ownership};
 pub use behavior::ParamBehavior;
 
 /// Full pipeline convenience: parse → HIR → type check → ownership
@@ -25,13 +25,20 @@ pub fn analyze_src(
     src: &str,
 ) -> (
     ontixa_hir::HirModule,
-    ontixa_types::TypeTables,
+    ontixa_types::ModuleTypes,
     OwnershipTables,
     ontixa_source::Interner,
     ontixa_diagnostics::Diagnostics,
 ) {
     let (module, tables, interner, mut diags) = ontixa_types::check_src(src);
-    let ownership = infer_ownership(&module, &tables, &interner, &mut diags);
+    let ownership = infer_ownership(
+        &module,
+        &tables,
+        &interner,
+        &mut diags,
+        None,
+        &mut OwnershipOracle::default(),
+    );
     (module, tables, ownership, interner, diags)
 }
 

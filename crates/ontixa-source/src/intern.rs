@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use std::fmt;
 
 /// Maps distinct strings to dense [`InternId`]s.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Interner {
     map: FxHashMap<Box<str>, InternId>,
     strings: Vec<Box<str>>,

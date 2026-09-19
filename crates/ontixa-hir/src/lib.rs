@@ -32,7 +32,7 @@ pub use hir::{
     HirPlace, HirStmt, LitValue, Literal, ModuleScope, Name, ParamDef, Symbol, SymbolKind,
     SymbolTable, TypeRef, UnOp,
 };
-pub use lower::lower_bodies;
+pub use lower::{lower_bodies, lower_body};
 pub use resolve::resolve_module;
 
 /// Lowers an [`ontixa_ast::AstModule`] to a fully resolved
@@ -107,7 +107,7 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         let main = fn_def(&m, "main", &mut interner);
         let body = m.body(main).expect("body");
-        let root = m.expr(body.root);
+        let root = body.expr(body.root);
         let HirExprKind::Block { stmts, .. } = &root.kind else {
             panic!("expected block root")
         };
@@ -117,7 +117,7 @@ mod tests {
         else {
             panic!("expected let")
         };
-        let HirExprKind::Call { def, args } = &m.expr(*init).kind else {
+        let HirExprKind::Call { def, args } = &body.expr(*init).kind else {
             panic!("expected call")
         };
         assert_eq!(*def, fn_def(&m, "g", &mut interner));
@@ -131,7 +131,7 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         let main = fn_def(&m, "main", &mut interner);
         let body = m.body(main).expect("body");
-        let HirExprKind::Block { stmts, .. } = &m.expr(body.root).kind else {
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
             panic!()
         };
         let HirStmt::Let {
@@ -140,7 +140,7 @@ mod tests {
         else {
             panic!()
         };
-        let HirExprKind::StructLit { def, fields } = &m.expr(*init).kind else {
+        let HirExprKind::StructLit { def, fields } = &body.expr(*init).kind else {
             panic!("expected struct lit")
         };
         assert_eq!(*def, m.scope.datas[&interner.intern("P")]);
@@ -195,11 +195,12 @@ mod tests {
         let main = fn_def(&m, "main", &mut interner);
         let body = m.body(main).expect("body");
         // Two distinct `x` locals plus `y` and `z` → 4 locals.
-        assert_eq!(body.locals.len(), 4);
+        assert_eq!(body.local_ids().count(), 4);
         let names: Vec<_> = body
-            .locals
+            .local_symbols
             .iter()
-            .map(|s| m.scope.symbols.get(*s).name)
+            .filter(|s| s.kind == SymbolKind::Local)
+            .map(|s| s.name)
             .collect();
         let x = interner.intern("x");
         let xs: Vec<_> = names.iter().filter(|n| **n == x).collect();

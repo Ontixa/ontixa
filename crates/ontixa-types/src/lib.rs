@@ -13,18 +13,18 @@
 mod check;
 mod ty;
 
-pub use check::{TypeTables, check_module};
+pub use check::{ModuleTypes, TypeTables, check_body, check_module};
 pub use ty::Ty;
 
 /// Parses, lowers, resolves, and type-checks `src` end-to-end.
-/// Returns the HIR module (with field indices filled), the type
-/// tables, the interner, and all diagnostics. Convenience for tests
-/// and the CLI.
+/// Returns the HIR module (with field indices filled), the per-body
+/// type tables, the interner, and all diagnostics. Convenience for
+/// tests and the CLI.
 pub fn check_src(
     src: &str,
 ) -> (
     ontixa_hir::HirModule,
-    TypeTables,
+    ModuleTypes,
     ontixa_source::Interner,
     ontixa_diagnostics::Diagnostics,
 ) {
@@ -36,7 +36,7 @@ pub fn check_src(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ontixa_hir::{HirExprKind, HirStmt, SymbolKind};
+    use ontixa_hir::{HirExprKind, HirStmt};
 
     /// Finds the `let` binding named `name` in `main` and returns its
     /// inferred type.
@@ -46,15 +46,15 @@ mod tests {
         let main = m.scope.fns[&interner.intern("main")];
         let body = m.body(main).expect("body");
         let sym = body
-            .locals
-            .iter()
-            .copied()
-            .find(|s| {
-                m.scope.symbols.get(*s).name == interner.intern(name)
-                    && m.scope.symbols.get(*s).kind == SymbolKind::Local
-            })
+            .local_ids()
+            .find(|s| body.local_symbols[s.local_index()].name == interner.intern(name))
             .expect("local not found");
-        *tables.local_types.get(&sym).expect("local type")
+        *tables[main.index()]
+            .as_ref()
+            .unwrap()
+            .local_types
+            .get(&sym)
+            .expect("local type")
     }
 
     fn codes(diags: &ontixa_diagnostics::Diagnostics) -> Vec<ontixa_diagnostics::Code> {
@@ -95,17 +95,17 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         let main = m.scope.fns[&interner.intern("main")];
         let body = m.body(main).expect("body");
-        let HirExprKind::Block { stmts, .. } = &m.expr(body.root).kind else {
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
             panic!()
         };
         let HirStmt::Return { value: Some(v), .. } = &stmts[1] else {
             panic!("expected return")
         };
         // `p.y` resolved to declared field index 1.
-        let HirExprKind::Field { field: Some(1), .. } = &m.expr(*v).kind else {
-            panic!("expected resolved field, got {:?}", m.expr(*v).kind)
+        let HirExprKind::Field { field: Some(1), .. } = &body.expr(*v).kind else {
+            panic!("expected resolved field, got {:?}", body.expr(*v).kind)
         };
-        assert_eq!(tables.ty_of(*v), Ty::I32);
+        assert_eq!(tables[main.index()].as_ref().unwrap().ty_of(*v), Ty::I32);
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
         let p_def = m.scope.datas[&interner.intern("P")];
         let main = m.scope.fns[&interner.intern("main")];
         let body = m.body(main).expect("body");
-        let HirExprKind::Block { stmts, .. } = &m.expr(body.root).kind else {
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
             panic!()
         };
         let HirStmt::Let {
@@ -175,6 +175,9 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(tables.ty_of(*init), Ty::Struct(p_def));
+        assert_eq!(
+            tables[main.index()].as_ref().unwrap().ty_of(*init),
+            Ty::Struct(p_def)
+        );
     }
 }

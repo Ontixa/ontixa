@@ -23,7 +23,7 @@ pub fn graph_src(
 ) -> (
     SemanticGraph,
     ontixa_hir::HirModule,
-    ontixa_types::TypeTables,
+    ontixa_types::ModuleTypes,
     ontixa_memory::OwnershipTables,
     ontixa_source::Interner,
     ontixa_diagnostics::Diagnostics,

@@ -29,7 +29,7 @@ impl Ident {
 }
 
 /// Root of a compilation unit.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AstModule {
     /// Top-level items in source order.
     pub items: Vec<Item>,
@@ -38,7 +38,7 @@ pub struct AstModule {
 }
 
 /// A top-level item.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum Item {
     /// `data Name { ... }`.
@@ -48,7 +48,7 @@ pub enum Item {
 }
 
 /// A `data` declaration.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DataDecl {
     /// Declared name.
     pub name: Ident,
@@ -59,7 +59,7 @@ pub struct DataDecl {
 }
 
 /// One field inside a `data` declaration.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Field {
     /// Field name.
     pub name: Ident,
@@ -70,7 +70,7 @@ pub struct Field {
 }
 
 /// A function declaration.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FnDecl {
     /// Declared name.
     pub name: Ident,
@@ -85,7 +85,7 @@ pub struct FnDecl {
 }
 
 /// A function parameter.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Param {
     /// Parameter name.
     pub name: Ident,
@@ -98,7 +98,7 @@ pub struct Param {
 }
 
 /// A type position. Milestone 1 has named types only.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TypeExpr {
     /// The type name as written.
     pub name: Ident,
@@ -106,7 +106,7 @@ pub struct TypeExpr {
 
 /// A block: statements plus an optional trailing expression whose value
 /// is the block's value.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Block {
     /// Statements in order.
     pub stmts: Vec<Stmt>,
@@ -117,7 +117,7 @@ pub struct Block {
 }
 
 /// An assignment target: a binding plus field projections (`x`, `x.f`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Place {
     /// Root binding.
     pub base: Ident,
@@ -126,7 +126,7 @@ pub struct Place {
 }
 
 /// A statement.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum Stmt {
     /// `let (mut)? name (: ty)? (= expr)? ;`
@@ -170,7 +170,7 @@ pub enum Stmt {
 }
 
 /// A `name: expr` pair inside a struct literal.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FieldInit {
     /// Field name.
     pub name: Ident,
@@ -181,7 +181,7 @@ pub struct FieldInit {
 }
 
 /// An expression.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum Expr {
     /// A literal.
@@ -288,7 +288,7 @@ impl Expr {
 }
 
 /// A literal value.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value")]
 pub enum Literal {
     /// Integer literal (already validated to fit `i128`).

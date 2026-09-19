@@ -35,14 +35,14 @@
 
 use crate::behavior::ParamBehavior;
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
-use ontixa_hir::{HirExpr, HirExprKind, HirModule, HirPlace, HirStmt};
-use ontixa_source::{DefId, ExprId, Interner, Span, SymbolId};
-use ontixa_types::{Ty, TypeTables};
+use ontixa_hir::{HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope};
+use ontixa_source::{DefId, ExprId, InternId, Interner, Span, SymbolId};
+use ontixa_types::{ModuleTypes, Ty, TypeTables};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// The product of ownership inference: the inferred contract of every
 /// function parameter, by definition and parameter position.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct OwnershipTables {
     /// `param_behaviors[f][i]` — inferred behavior of `f`'s i-th param.
     pub param_behaviors: FxHashMap<DefId, Vec<ParamBehavior>>,
@@ -58,24 +58,169 @@ impl OwnershipTables {
     }
 }
 
-type ContractTable = FxHashMap<DefId, Vec<ParamBehavior>>;
+/// Contract vectors keyed by def.
+pub type ContractTable = FxHashMap<DefId, Vec<ParamBehavior>>;
+
+/// Per-module incremental state for ownership inference — the
+/// memoized surface of the fixpoint across compilation sessions.
+///
+/// The scheme is *hypothesis-verified rounds* (ADR-0008/0010):
+/// a fact walk for `f` reads callee contracts through a *view* —
+/// the previous run's final contract when one was recorded, else
+/// the current in-flight value. Each entry records exactly which
+/// `(callee → contract)` pairs it consumed. After the worklist
+/// converges, a verification sweep compares every consumed record
+/// against the new finals; drift invalidates the affected entries
+/// and triggers another round with the drifted contracts as the
+/// new hypothesis. Contracts only ascend, so the rounds terminate
+/// (at most `lattice height × #params` rounds; in practice 1 for
+/// unchanged or body-local edits).
+#[derive(Debug, Default)]
+pub struct OwnershipOracle {
+    /// Final contracts of the last completed run, by def name.
+    prev_contracts: FxHashMap<InternId, Vec<ParamBehavior>>,
+    /// Memoized per-body facts, by def name.
+    facts: FxHashMap<InternId, FactsEntry>,
+    /// Bodies actually re-walked during the last run.
+    pub last_collected: usize,
+    /// Bodies served from the fact memo during the last run.
+    pub last_reused: usize,
+    /// Outer rounds the last run needed (1 = hypothesis confirmed).
+    pub last_rounds: usize,
+}
+
+#[derive(Debug)]
+struct FactsEntry {
+    /// Input stamps the facts were collected under.
+    stamps: FactStamps,
+    /// Collected facts per parameter.
+    facts: Vec<ParamFacts>,
+    /// `(callee name, contract vector)` — every callee contract the
+    /// collection consumed, at the values it observed through the
+    /// view. Valid only while those views hold.
+    consumed: Vec<(InternId, Vec<ParamBehavior>)>,
+}
+
+/// Stamps identifying the inputs `collect_facts` for a def depends
+/// on — supplied by the caller (the database passes query
+/// `computed_at` revisions; standalone callers pass zeros, which
+/// simply never hits the memo).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FactStamps {
+    /// Stamp of `hir_body(def)`.
+    pub body: u64,
+    /// Stamp of `body_types(def)`.
+    pub types: u64,
+}
+
+/// The facts a collection produced plus the contract values it read.
+struct CollectedFacts {
+    facts: Vec<ParamFacts>,
+    consumed: Vec<(InternId, Vec<ParamBehavior>)>,
+}
 
 /// Infers ownership for the whole module and enforces
 /// use-after-move / initialization / mutability rules.
+///
+/// `types[def]` holds the per-body [`TypeTables`] produced by
+/// `check_body`. `stamps` (indexed by `DefId`) and `oracle` enable
+/// cross-run fact reuse; pass `None` and a default oracle for
+/// one-shot compilation.
 pub fn infer_ownership(
     module: &HirModule,
-    tables: &TypeTables,
+    types: &ModuleTypes,
     interner: &Interner,
     diags: &mut Diagnostics,
+    stamps: Option<&[FactStamps]>,
+    oracle: &mut OwnershipOracle,
 ) -> OwnershipTables {
-    // ---- Phase A: contract fixpoint ----
-    //
-    // Bottom values: `Copy` for copy types (fixed forever — a copy
-    // type can never need a stronger contract), `Borrow` for
-    // non-copy types (the weakest contract). Because callee contracts
-    // only strengthen and `classify` is monotone, every contract
-    // converges after at most a few strengthenings; the worklist is
-    // therefore finite by construction.
+    oracle.last_collected = 0;
+    oracle.last_reused = 0;
+    oracle.last_rounds = 0;
+    let mut hypothesis = std::mem::take(&mut oracle.prev_contracts);
+
+    let contracts = loop {
+        oracle.last_rounds += 1;
+        let (contracts, drifted) = fixpoint_round(module, types, stamps, &hypothesis, oracle);
+        if drifted.is_empty() {
+            // Every memoized collection ran under contracts that
+            // match the finals — the result is the true fixpoint.
+            break contracts;
+        }
+        // Hypothesis was wrong somewhere: drop the drifted entries
+        // and rerun under this round's finals.
+        for name in drifted {
+            oracle.facts.remove(&name);
+        }
+        hypothesis = contracts
+            .iter()
+            .map(|(d, c)| (def_name(&module.scope, *d), c.clone()))
+            .collect();
+    };
+
+    oracle.prev_contracts = contracts
+        .iter()
+        .map(|(d, c)| (def_name(&module.scope, *d), c.clone()))
+        .collect();
+    // Forget memos of defs that no longer exist.
+    oracle
+        .facts
+        .retain(|name, _| module.scope.fns.contains_key(name));
+
+    // ---- Phase B: enforcement ----
+    for def in module.scope.defs.iter() {
+        let Some(sig) = module.scope.fn_sig(def.id) else {
+            continue;
+        };
+        let Some(body) = module.body(def.id) else {
+            continue;
+        };
+        let mut e = Enforcer {
+            scope: &module.scope,
+            body,
+            tables: types[def.id.index()]
+                .as_ref()
+                .unwrap_or_else(|| empty_tables()),
+            contracts: &contracts,
+            interner,
+            diags,
+            state: FxHashMap::default(),
+        };
+        for p in &sig.params {
+            e.state.insert(
+                p.symbol,
+                BindingState {
+                    init: Init::Yes,
+                    moved: Moved::No,
+                },
+            );
+        }
+        e.eval(body.root, Ctx::Move);
+    }
+
+    OwnershipTables {
+        param_behaviors: contracts,
+    }
+}
+
+/// The interned name of a def — the cross-revision identity used by
+/// the oracle.
+fn def_name(scope: &ModuleScope, def: DefId) -> InternId {
+    scope.symbols.get(scope.def(def).name).name
+}
+
+/// One fixpoint round: contracts seeded at bottom, a
+/// reverse-dependency worklist, and per-body fact collection under
+/// the hypothesis view. Returns the round's contracts plus the set
+/// of def names whose consumed contracts no longer match the finals
+/// (hypothesis drift — a nonempty set forces another round).
+fn fixpoint_round(
+    module: &HirModule,
+    types: &ModuleTypes,
+    stamps: Option<&[FactStamps]>,
+    hypothesis: &FxHashMap<InternId, Vec<ParamBehavior>>,
+    oracle: &mut OwnershipOracle,
+) -> (ContractTable, FxHashSet<InternId>) {
     let mut contracts: ContractTable = module
         .scope
         .defs
@@ -104,17 +249,28 @@ pub fn infer_ownership(
     // enqueue order; the fixpoint result itself is order-independent).
     let mut callers: FxHashMap<DefId, Vec<DefId>> = FxHashMap::default();
     for def in &module.scope.defs {
-        if module.body(def.id).is_none() {
-            continue;
-        }
-        for callee in callees_of(module, module.body(def.id).unwrap().root) {
-            callers.entry(callee).or_default().push(def.id);
+        if let Some(body) = module.body(def.id) {
+            for callee in callees_of(body) {
+                callers.entry(callee).or_default().push(def.id);
+            }
         }
     }
     for v in callers.values_mut() {
         v.sort_unstable();
         v.dedup();
     }
+
+    // The view a collection reads through: hypothesis (previous
+    // finals) for defs seen last run, the in-flight contract for
+    // anything new. Reading through the view is what makes a
+    // confirmed hypothesis equal a full recollection.
+    let view = |contracts: &ContractTable, callee: DefId| -> Vec<ParamBehavior> {
+        let name = def_name(&module.scope, callee);
+        hypothesis
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| contracts.get(&callee).cloned().unwrap_or_default())
+    };
 
     let mut work: Vec<DefId> = module
         .scope
@@ -131,7 +287,36 @@ pub fn infer_ownership(
         queued.remove(&f);
         let sig = module.scope.fn_sig(f).unwrap();
         let body = module.body(f).unwrap();
-        let facts = collect_facts(module, tables, &contracts, body, sig);
+        let fname = def_name(&module.scope, f);
+        let facts = match memo_take(&module.scope, oracle, stamps, f, fname, |g| {
+            view(&contracts, g)
+        }) {
+            Some(facts) => {
+                oracle.last_reused += 1;
+                facts
+            }
+            None => {
+                oracle.last_collected += 1;
+                let collected = collect_facts(
+                    &module.scope,
+                    body,
+                    types[f.index()].as_ref().unwrap_or_else(|| empty_tables()),
+                    |g| view(&contracts, g),
+                    sig,
+                );
+                if let Some(stamps) = stamps {
+                    oracle.facts.insert(
+                        fname,
+                        FactsEntry {
+                            stamps: stamps[f.index()],
+                            facts: collected.facts.clone(),
+                            consumed: collected.consumed,
+                        },
+                    );
+                }
+                collected.facts
+            }
+        };
         let mut next = Vec::with_capacity(sig.params.len());
         for (i, p) in sig.params.iter().enumerate() {
             next.push(classify(Ty::from_ref(p.ty), &facts[i]));
@@ -148,48 +333,65 @@ pub fn infer_ownership(
         }
     }
 
-    // ---- Phase B: enforcement ----
-    for def in module.scope.defs.iter() {
-        let Some(sig) = module.scope.fn_sig(def.id) else {
-            continue;
-        };
-        let Some(body) = module.body(def.id) else {
-            continue;
-        };
-        let mut e = Enforcer {
-            module,
-            tables,
-            contracts: &contracts,
-            interner,
-            diags,
-            state: FxHashMap::default(),
-        };
-        for p in &sig.params {
-            e.state.insert(
-                p.symbol,
-                BindingState {
-                    init: Init::Yes,
-                    moved: Moved::No,
-                },
-            );
+    // Verification: every recorded consumed contract must equal the
+    // round's finals. Entries that checked out against the
+    // hypothesis mid-round are only sound if the hypothesis held.
+    let mut drifted = FxHashSet::default();
+    for (fname, entry) in &oracle.facts {
+        for (callee_name, recorded) in &entry.consumed {
+            let actual = module
+                .scope
+                .fns
+                .get(callee_name)
+                .and_then(|d| contracts.get(d));
+            if actual != Some(recorded) {
+                drifted.insert(*fname);
+                break;
+            }
         }
-        e.eval(body.root, Ctx::Move);
     }
+    (contracts, drifted)
+}
 
-    OwnershipTables {
-        param_behaviors: contracts,
+/// Reuses memoized facts for `def` when its input stamps match and
+/// every callee contract it consumed still equals the current view.
+fn memo_take(
+    scope: &ModuleScope,
+    oracle: &OwnershipOracle,
+    stamps: Option<&[FactStamps]>,
+    def: DefId,
+    name: InternId,
+    view: impl Fn(DefId) -> Vec<ParamBehavior>,
+) -> Option<Vec<ParamFacts>> {
+    let stamps = stamps?;
+    let entry = oracle.facts.get(&name)?;
+    if entry.stamps != stamps[def.index()] {
+        return None;
     }
+    for (callee_name, recorded) in &entry.consumed {
+        let callee = scope.fns.get(callee_name)?;
+        if view(*callee) != *recorded {
+            return None;
+        }
+    }
+    Some(entry.facts.clone())
+}
+
+/// Shared empty tables for bodies that lack them (error paths).
+fn empty_tables() -> &'static TypeTables {
+    static EMPTY: std::sync::OnceLock<TypeTables> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(TypeTables::default)
 }
 
 // ================= Phase A: usage facts =================
 
-/// The set of `fn` defs called from the expression tree at `root`.
+/// The set of `fn` defs called from `body`'s expression tree.
 /// Used to build the callee→caller worklist edges.
-fn callees_of(module: &HirModule, root: ExprId) -> FxHashSet<DefId> {
+fn callees_of(body: &HirBody) -> FxHashSet<DefId> {
     let mut out = FxHashSet::default();
-    let mut stack = vec![root];
+    let mut stack = vec![body.root];
     while let Some(id) = stack.pop() {
-        match &module.expr(id).kind {
+        match &body.expr(id).kind {
             HirExprKind::Call { def, args } => {
                 out.insert(*def);
                 stack.extend(args.iter().copied());
@@ -240,12 +442,16 @@ fn callees_of(module: &HirModule, root: ExprId) -> FxHashSet<DefId> {
 /// these facts. Flags only ever go `false → true` during one walk,
 /// and callee contracts only strengthen between walks — the two
 /// monotonicities together are what make the fixpoint finite.
-#[derive(Debug, Default, Clone)]
-struct ParamFacts {
-    read: bool,
-    mutated: bool,
-    moved: bool,
-    escaped: bool,
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ParamFacts {
+    /// The value was observed.
+    pub read: bool,
+    /// Written through a field projection (or a mutable-borrow arg).
+    pub mutated: bool,
+    /// Ownership consumed without escaping.
+    pub moved: bool,
+    /// May flow into the return value.
+    pub escaped: bool,
 }
 
 /// Evaluation context: whether the expression's value is being
@@ -279,18 +485,22 @@ fn classify(ty: Ty, f: &ParamFacts) -> ParamBehavior {
     }
 }
 
-/// Collects parameter usage facts for one body under `contracts`.
+/// Collects parameter usage facts for one body, reading callee
+/// contracts through `view` (the hypothesis or the in-flight table).
+/// Returns the facts plus the `(callee, contract)` pairs the walk
+/// consumed — the memo validity record.
 fn collect_facts(
-    module: &HirModule,
+    scope: &ModuleScope,
+    body: &HirBody,
     tables: &TypeTables,
-    contracts: &ContractTable,
-    body: &ontixa_hir::HirBody,
+    view: impl Fn(DefId) -> Vec<ParamBehavior>,
     sig: &ontixa_hir::FnSig,
-) -> Vec<ParamFacts> {
+) -> CollectedFacts {
     let mut c = FactCollector {
-        module,
+        scope,
+        body,
         tables,
-        contracts,
+        view: &view,
         param_index: sig
             .params
             .iter()
@@ -299,28 +509,48 @@ fn collect_facts(
             .collect(),
         facts: vec![ParamFacts::default(); sig.params.len()],
         carriers: FxHashMap::default(),
+        consumed: Vec::new(),
     };
     let root_carriers = c.eval(body.root, Ctx::Move);
     for i in root_carriers {
         c.facts[i as usize].escaped = true;
     }
-    c.facts
+    CollectedFacts {
+        facts: c.facts,
+        consumed: c.consumed,
+    }
 }
 
-struct FactCollector<'a> {
-    module: &'a HirModule,
+struct FactCollector<'a, 'v> {
+    scope: &'a ModuleScope,
+    body: &'a HirBody,
     tables: &'a TypeTables,
-    contracts: &'a ContractTable,
+    /// Contract lookup: hypothesis-first during incremental rounds.
+    view: &'v dyn Fn(DefId) -> Vec<ParamBehavior>,
     /// Param symbol → parameter position.
     param_index: FxHashMap<SymbolId, u32>,
     facts: Vec<ParamFacts>,
     /// Local → param indices whose value the local may carry.
     carriers: FxHashMap<SymbolId, Carriers>,
+    /// `(callee name, contract)` read during this walk, in order.
+    consumed: Vec<(InternId, Vec<ParamBehavior>)>,
 }
 
-impl FactCollector<'_> {
+impl FactCollector<'_, '_> {
     fn expr(&self, id: ExprId) -> &HirExpr {
-        self.module.expr(id)
+        self.body.expr(id)
+    }
+
+    /// The contract the callee is viewed under, recorded as consumed.
+    fn contract_of(&mut self, def: DefId) -> Vec<ParamBehavior> {
+        let c = (self.view)(def);
+        let name = self.scope.symbols.get(self.scope.def(def).name).name;
+        if let Some(e) = self.consumed.iter_mut().find(|(n, _)| *n == name) {
+            e.1 = c.clone();
+        } else {
+            self.consumed.push((name, c.clone()));
+        }
+        c
     }
 
     /// Flags a symbol as read/mutated/moved when it is a parameter.
@@ -367,7 +597,7 @@ impl FactCollector<'_> {
             }
             HirExprKind::Call { def, args } => {
                 let mut out = Carriers::default();
-                let contract = self.contracts.get(&def).cloned().unwrap_or_default();
+                let contract = self.contract_of(def);
                 for (i, arg) in args.iter().enumerate() {
                     let b = contract.get(i).copied().unwrap_or(ParamBehavior::Move);
                     match b {
@@ -496,7 +726,8 @@ struct BindingState {
 }
 
 struct Enforcer<'a> {
-    module: &'a HirModule,
+    scope: &'a ModuleScope,
+    body: &'a HirBody,
     tables: &'a TypeTables,
     contracts: &'a ContractTable,
     interner: &'a Interner,
@@ -506,12 +737,12 @@ struct Enforcer<'a> {
 
 impl Enforcer<'_> {
     fn expr(&self, id: ExprId) -> &HirExpr {
-        self.module.expr(id)
+        self.body.expr(id)
     }
 
     fn name(&self, sym: SymbolId) -> &str {
         self.interner
-            .resolve(self.module.scope.symbols.get(sym).name)
+            .resolve(self.body.symbol(self.scope, sym).name)
     }
 
     fn ty(&self, sym: SymbolId) -> Ty {
@@ -608,7 +839,7 @@ impl Enforcer<'_> {
                                 self.use_var(sym, span, Ctx::Read);
                                 // A mutable borrow requires mutable
                                 // authority over the place.
-                                if !self.module.scope.symbols.get(sym).mutable {
+                                if !self.body.symbol(self.scope, sym).mutable {
                                     let name = self.name(sym).to_string();
                                     self.diags.push(
                                         Diagnostic::error(
@@ -619,7 +850,7 @@ impl Enforcer<'_> {
                                         )
                                         .primary(span)
                                         .label(
-                                            self.module.scope.symbols.get(sym).span,
+                                            self.body.symbol(self.scope, sym).span,
                                             format!("`{name}` declared here without `mut`"),
                                         )
                                         .help(format!(
@@ -702,7 +933,7 @@ impl Enforcer<'_> {
     }
 
     fn assign_place(&mut self, place: &HirPlace) {
-        let sym = self.module.scope.symbols.get(place.base);
+        let sym = self.body.symbol(self.scope, place.base);
         let state = self
             .state
             .get(&place.base)

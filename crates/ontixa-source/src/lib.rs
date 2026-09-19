@@ -30,6 +30,8 @@ mod intern;
 mod span;
 
 pub use file::{LineCol, SourceFile};
-pub use ids::{BlockId, DefId, ExprId, FileId, InternId, LocalId, ModuleId, SymbolId, TypeId};
+pub use ids::{
+    BlockId, DefId, DefKey, ExprId, FileId, InternId, LocalId, ModuleId, SymbolId, TypeId,
+};
 pub use intern::Interner;
 pub use span::Span;
