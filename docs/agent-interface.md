@@ -36,10 +36,33 @@ gets — no privileged back door, and no LLM inside the compiler.
 4. `run` / tests → verify behavior.
 5. Diff the SPG to review semantic impact — not just the text diff.
 
+## `ontixad` (milestone 2)
+
+A persistent compile daemon over the query engine — the same
+commands without re-reading the world. NDJSON on stdio: one request
+per line, one schema-1 envelope per line.
+
+```json
+{"op":"open",    "path":"x.ixa"}                  → {"file": N}
+{"op":"set",     "path":"x.ixa", "text":"..."}    → the edit op (auto-opens)
+{"op":"check",   "path":"x.ixa"}                  → check envelope
+{"op":"explain", "path":"x.ixa", "symbol":"s"}    → explain envelope
+{"op":"stats"}                                   → counters + last_evaluated
+{"op":"close",   "path":"x.ixa"}
+{"op":"shutdown"}
+```
+
+`check`/`explain` results carry `evaluated`: the query keys that
+actually ran this demand — e.g. `HirBody(DefKey(0:3))` after a
+body-local edit, `[]` on an unmodified recheck. `stats` adds
+cumulative `QueryStats` and oracle fact-reuse counters.
+
+Parameter contracts now carry `evidence` — the `(kind, span)` sites
+that produced each flag — and `escapes` (`return`, `call \`f\``), so
+an agent sees *why* `p` is `borrow_mut`, not just that it is.
+
 ## Planned (roadmap)
 
-- `ontixad`: the same queries over a persistent session; edit/update
-  without re-reading the world.
 - Semantic patches: `apply` an AST-level edit, serialized as spans +
   nodes, preserving untouched source exactly.
 - Evidence-carrying diffs: a patch ships with the diagnostics it

@@ -97,8 +97,9 @@ impl Envelope {
         self
     }
 
-    /// Prints the envelope to stdout and returns the process exit code.
-    pub fn emit(self) -> ExitCode {
+    /// The envelope document plus its exit code — the pure form, for
+    /// callers that serialize it themselves (the daemon).
+    pub fn into_parts(self) -> (Json, u8) {
         let success = !self.has_errors && self.error.is_none();
         let mut obj = JsonMap::new();
         obj.insert("schema".into(), 1.into());
@@ -114,15 +115,19 @@ impl Envelope {
                 .map(|(_, e)| e.clone())
                 .unwrap_or(Json::Null),
         );
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Json::Object(obj)).unwrap()
-        );
-        match self.error {
-            Some((code, _)) => ExitCode::from(code),
-            None if self.has_errors => ExitCode::from(1),
-            None => ExitCode::SUCCESS,
-        }
+        let code = match self.error {
+            Some((code, _)) => code,
+            None if self.has_errors => 1,
+            None => 0,
+        };
+        (Json::Object(obj), code)
+    }
+
+    /// Prints the envelope to stdout and returns the process exit code.
+    pub fn emit(self) -> ExitCode {
+        let (doc, code) = self.into_parts();
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+        ExitCode::from(code)
     }
 }
 

@@ -18,7 +18,8 @@ mod behavior;
 pub mod place;
 
 pub use analyze::{
-    EscapeExit, FactStamps, OwnershipOracle, OwnershipTables, ParamFacts, infer_ownership,
+    EscapeExit, Evidence, EvidenceKind, FactStamps, OwnershipOracle, OwnershipTables, ParamFacts,
+    ParamSummary, infer_ownership,
 };
 pub use behavior::ParamBehavior;
 pub use place::{Loan, LoanKind, Place, Region, place_of};
@@ -561,7 +562,7 @@ mod tests {
         );
         assert!(diags.is_empty(), "{diags:?}");
         let id: DefId = m.scope.fns[&interner.intern("id")];
-        let esc = &own.escapes[&id][0];
+        let esc = &own.summary(id)[0].escapes;
         assert_eq!(esc, &[EscapeExit::Return]);
     }
 
@@ -574,7 +575,7 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         let id: DefId = m.scope.fns[&interner.intern("id")];
         let relay: DefId = m.scope.fns[&interner.intern("relay")];
-        let esc = &own.escapes[&relay][0];
+        let esc = &own.summary(relay)[0].escapes;
         assert!(esc.contains(&EscapeExit::ViaCall(id)), "{esc:?}");
         assert!(esc.contains(&EscapeExit::Return), "{esc:?}");
     }
@@ -586,6 +587,6 @@ mod tests {
         );
         assert!(diags.is_empty(), "{diags:?}");
         let read: DefId = m.scope.fns[&interner.intern("read")];
-        assert!(own.escapes[&read][0].is_empty());
+        assert!(own.summary(read)[0].escapes.is_empty());
     }
 }

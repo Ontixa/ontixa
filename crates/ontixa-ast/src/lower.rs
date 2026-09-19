@@ -19,11 +19,15 @@ use ontixa_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 /// `diags` receives structural diagnostics discovered during lowering.
 pub fn lower_module(root: &SyntaxNode, diags: &mut Diagnostics) -> AstModule {
     let mut l = Lowerer { diags };
-    let items = root.children().filter_map(|child| l.item(&child)).collect();
-    AstModule {
-        items,
-        span: root.text_range().into(),
-    }
+    let items: Vec<Item> = root.children().filter_map(|child| l.item(&child)).collect();
+    // The module span covers its items — NOT the root text range, so
+    // trailing trivia (a comment appended at EOF) doesn't widen the
+    // module and churn every downstream query.
+    let span = match (items.first(), items.last()) {
+        (Some(f), Some(l)) => Span::new(f.span().start, l.span().end),
+        _ => Span::empty(0),
+    };
+    AstModule { items, span }
 }
 
 struct Lowerer<'a> {

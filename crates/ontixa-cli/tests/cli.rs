@@ -167,3 +167,148 @@ fn human_check_has_no_json_on_stdout() {
     // Human mode: no JSON document on stdout at all.
     assert!(stdout_str(&out).trim().is_empty());
 }
+
+// ---------- ontixad: the persistent daemon ----------
+
+const DAEMON: &str = env!("CARGO_BIN_EXE_ontixad");
+
+/// Feeds `requests` (one JSON per line) to ontixad; returns one
+/// parsed envelope per line of stdout.
+fn daemon(requests: &[Value]) -> Vec<Value> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut child = Command::new(DAEMON)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn ontixad");
+    let mut input = String::new();
+    for r in requests {
+        input.push_str(&r.to_string());
+        input.push('\n');
+    }
+    input.push_str("{\"op\":\"shutdown\"}\n");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .expect("write requests");
+    let out = child.wait_with_output().expect("wait ontixad");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("each response is one JSON document"))
+        .collect()
+}
+
+#[test]
+fn daemon_recheck_evaluates_nothing() {
+    let f = src_file("daemon", SRC);
+    let p = f.to_str().unwrap();
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "check", "path": p}),
+        serde_json::json!({"op": "check", "path": p}),
+    ]);
+    assert_eq!(rs.len(), 3);
+    assert_eq!(rs[0]["success"], true);
+    // Cold check evaluates queries; the same-source recheck is pure
+    // verification — zero evals.
+    assert!(!rs[1]["result"]["evaluated"].as_array().unwrap().is_empty());
+    assert_eq!(rs[2]["result"]["evaluated"].as_array().unwrap().len(), 0);
+}
+
+/// `read` LAST so an in-body edit shifts no other def's spans
+/// (span-sensitivity is a documented limitation).
+const SRC_LAST: &str = "data P { x: i32; }\n\
+                        fn bump(mut p: P) { p.x = p.x + 1; }\n\
+                        fn main() -> i32 { let mut q = P { x: 1 }; bump(q); return read(q) + 5; }\n\
+                        fn read(p: P) -> i32 { return p.x; }";
+
+#[test]
+fn daemon_edit_reruns_only_dirty_chain() {
+    let f = src_file("daemonedit", SRC_LAST);
+    let p = f.to_str().unwrap();
+    // Edit inside `read`'s body — the last def, so nothing else shifts.
+    let edited = SRC_LAST.replace("return p.x;", "return p.x ;");
+    let rs = daemon(&[
+        serde_json::json!({"op": "set", "path": p, "text": SRC_LAST}),
+        serde_json::json!({"op": "check", "path": p}),
+        serde_json::json!({"op": "set", "path": p, "text": edited}),
+        serde_json::json!({"op": "check", "path": p}),
+    ]);
+    let ev = rs[3]["result"]["evaluated"].as_array().unwrap();
+    let evs: Vec<&str> = ev.iter().filter_map(|k| k.as_str()).collect();
+    // Exactly one body chain re-ran (read's) — bump and main are
+    // verified fresh without re-evaluating.
+    let bodies: Vec<&&str> = evs.iter().filter(|k| k.contains("HirBody")).collect();
+    assert_eq!(bodies.len(), 1, "expected one dirty body: {evs:?}");
+    assert!(evs.iter().any(|k| k.contains("Parse")), "{evs:?}");
+}
+
+#[test]
+fn daemon_trailing_comment_cuts_off_at_ast() {
+    let f = src_file("daemoncomment", SRC_LAST);
+    let p = f.to_str().unwrap();
+    let commented = format!("{SRC_LAST}\n// a note");
+    let rs = daemon(&[
+        serde_json::json!({"op": "set", "path": p, "text": SRC_LAST}),
+        serde_json::json!({"op": "check", "path": p}),
+        serde_json::json!({"op": "set", "path": p, "text": commented}),
+        serde_json::json!({"op": "check", "path": p}),
+    ]);
+    let ev = rs[3]["result"]["evaluated"].as_array().unwrap();
+    let evs: Vec<&str> = ev.iter().filter_map(|k| k.as_str()).collect();
+    // A comment-only edit re-parses but cuts off at the AST —
+    // no body's semantic chain runs.
+    for pat in ["HirBody", "BodyTypes", "MirBody", "Scope"] {
+        assert!(
+            !evs.iter().any(|k| k.contains(pat)),
+            "{pat} unexpectedly re-ran: {evs:?}"
+        );
+    }
+    assert!(evs.iter().any(|k| k.contains("Parse")), "{evs:?}");
+}
+
+#[test]
+fn daemon_explain_and_stats() {
+    let f = src_file("daemonexpl", SRC);
+    let p = f.to_str().unwrap();
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "explain", "path": p, "symbol": "read"}),
+        serde_json::json!({"op": "stats"}),
+    ]);
+    let sym = &rs[1]["result"]["symbol"];
+    assert_eq!(sym["name"], "read");
+    assert_eq!(sym["params"][0]["behavior"], "borrow");
+    // Evidence: read's param was observed at a specific span.
+    assert_eq!(sym["params"][0]["evidence"][0]["kind"], "read");
+    let q = &rs[2]["result"]["queries"];
+    assert!(q["executed"].is_object());
+    assert!(rs[2]["result"]["oracle"]["rounds"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn daemon_bad_lines_get_envelopes_not_crashes() {
+    use std::process::Stdio;
+    let mut child = Command::new(DAEMON)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn ontixad");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"not json\n{\"op\":\"bogus\"}\n{\"op\":\"shutdown\"}\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let lines: Vec<Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["error"]["kind"], "io");
+    assert_eq!(lines[1]["error"]["kind"], "io");
+}

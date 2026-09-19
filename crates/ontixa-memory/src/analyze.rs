@@ -47,8 +47,52 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub struct OwnershipTables {
     /// `param_behaviors[f][i]` — inferred behavior of `f`'s i-th param.
     pub param_behaviors: FxHashMap<DefId, Vec<ParamBehavior>>,
-    /// `escapes[f][i]` — where `f`'s i-th param's value may exit.
-    pub escapes: FxHashMap<DefId, Vec<Vec<EscapeExit>>>,
+    /// `summaries[f][i]` — escape exits + evidence for `f`'s i-th param.
+    pub summaries: FxHashMap<DefId, Vec<ParamSummary>>,
+}
+
+/// What the analyzer *saw* a parameter do — the explanation layer
+/// under the contract (escape exits plus the spans that set flags).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ParamSummary {
+    /// Exits the param's value may take (`Return`, `ViaCall`).
+    pub escapes: Vec<EscapeExit>,
+    /// Usage sites that produced the contract's flags.
+    pub evidence: Vec<Evidence>,
+}
+
+/// One observed use of a parameter — the span that set a flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Evidence {
+    /// Which fact this site produced.
+    pub kind: EvidenceKind,
+    /// Where it happened.
+    pub at: Span,
+}
+
+/// The fact an [`Evidence`] supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceKind {
+    /// The value was observed.
+    Read,
+    /// Written through a field projection or `borrow_mut` arg.
+    Mutated,
+    /// Ownership consumed without escaping.
+    Moved,
+    /// May flow into the return value.
+    Escaped,
+}
+
+impl EvidenceKind {
+    /// Stable string for JSON output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EvidenceKind::Read => "read",
+            EvidenceKind::Mutated => "mutated",
+            EvidenceKind::Moved => "moved",
+            EvidenceKind::Escaped => "escaped",
+        }
+    }
 }
 
 impl OwnershipTables {
@@ -58,6 +102,11 @@ impl OwnershipTables {
             .get(&def)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// The summaries of a function's params (empty for `data` defs).
+    pub fn summary(&self, def: DefId) -> &[ParamSummary] {
+        self.summaries.get(&def).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -121,8 +170,8 @@ struct FactsEntry {
     stamps: FactStamps,
     /// Collected facts per parameter.
     facts: Vec<ParamFacts>,
-    /// Escape exits per parameter.
-    escapes: Vec<Vec<EscapeExit>>,
+    /// Escape exits + evidence per parameter.
+    summaries: Vec<ParamSummary>,
     /// `(callee name, contract vector)` — every callee contract the
     /// collection consumed, at the values it observed through the
     /// view. Valid only while those views hold.
@@ -144,7 +193,7 @@ pub struct FactStamps {
 /// The facts a collection produced plus the contract values it read.
 struct CollectedFacts {
     facts: Vec<ParamFacts>,
-    escapes: Vec<Vec<EscapeExit>>,
+    summaries: Vec<ParamSummary>,
     consumed: Vec<(InternId, Vec<ParamBehavior>)>,
 }
 
@@ -168,14 +217,14 @@ pub fn infer_ownership(
     oracle.last_rounds = 0;
     let mut hypothesis = std::mem::take(&mut oracle.prev_contracts);
 
-    let (contracts, escapes) = loop {
+    let (contracts, summaries) = loop {
         oracle.last_rounds += 1;
-        let (contracts, escapes, drifted) =
+        let (contracts, summaries, drifted) =
             fixpoint_round(module, types, stamps, &hypothesis, oracle);
         if drifted.is_empty() {
             // Every memoized collection ran under contracts that
             // match the finals — the result is the true fixpoint.
-            break (contracts, escapes);
+            break (contracts, summaries);
         }
         // Hypothesis was wrong somewhere: drop the drifted entries
         // and rerun under this round's finals.
@@ -231,7 +280,7 @@ pub fn infer_ownership(
 
     OwnershipTables {
         param_behaviors: contracts,
-        escapes,
+        summaries,
     }
 }
 
@@ -254,7 +303,7 @@ fn fixpoint_round(
     oracle: &mut OwnershipOracle,
 ) -> (
     ContractTable,
-    FxHashMap<DefId, Vec<Vec<EscapeExit>>>,
+    FxHashMap<DefId, Vec<ParamSummary>>,
     FxHashSet<InternId>,
 ) {
     let mut contracts: ContractTable = module
@@ -316,7 +365,7 @@ fn fixpoint_round(
         .map(|d| d.id)
         .collect();
     let mut queued: FxHashSet<DefId> = work.iter().copied().collect();
-    let mut escapes: FxHashMap<DefId, Vec<Vec<EscapeExit>>> = FxHashMap::default();
+    let mut summaries: FxHashMap<DefId, Vec<ParamSummary>> = FxHashMap::default();
     let mut head = 0;
     while head < work.len() {
         let f = work[head];
@@ -325,7 +374,7 @@ fn fixpoint_round(
         let sig = module.scope.fn_sig(f).unwrap();
         let body = module.body(f).unwrap();
         let fname = def_name(&module.scope, f);
-        let (facts, esc) = match memo_take(&module.scope, oracle, stamps, f, fname, |g| {
+        let (facts, sum) = match memo_take(&module.scope, oracle, stamps, f, fname, |g| {
             view(&contracts, g)
         }) {
             Some(pair) => {
@@ -347,15 +396,15 @@ fn fixpoint_round(
                         FactsEntry {
                             stamps: stamps[f.index()],
                             facts: collected.facts.clone(),
-                            escapes: collected.escapes.clone(),
+                            summaries: collected.summaries.clone(),
                             consumed: collected.consumed,
                         },
                     );
                 }
-                (collected.facts, collected.escapes)
+                (collected.facts, collected.summaries)
             }
         };
-        escapes.insert(f, esc);
+        summaries.insert(f, sum);
         let mut next = Vec::with_capacity(sig.params.len());
         for (i, p) in sig.params.iter().enumerate() {
             next.push(classify(Ty::from_ref(p.ty), &facts[i]));
@@ -389,7 +438,7 @@ fn fixpoint_round(
             }
         }
     }
-    (contracts, escapes, drifted)
+    (contracts, summaries, drifted)
 }
 
 /// Reuses memoized facts for `def` when its input stamps match and
@@ -401,7 +450,7 @@ fn memo_take(
     def: DefId,
     name: InternId,
     view: impl Fn(DefId) -> Vec<ParamBehavior>,
-) -> Option<(Vec<ParamFacts>, Vec<Vec<EscapeExit>>)> {
+) -> Option<(Vec<ParamFacts>, Vec<ParamSummary>)> {
     let stamps = stamps?;
     let entry = oracle.facts.get(&name)?;
     if entry.stamps != stamps[def.index()] {
@@ -413,7 +462,7 @@ fn memo_take(
             return None;
         }
     }
-    Some((entry.facts.clone(), entry.escapes.clone()))
+    Some((entry.facts.clone(), entry.summaries.clone()))
 }
 
 /// Shared empty tables for bodies that lack them (error paths).
@@ -547,18 +596,19 @@ fn collect_facts(
             .map(|(i, p)| (p.symbol, i as u32))
             .collect(),
         facts: vec![ParamFacts::default(); sig.params.len()],
-        escapes: vec![Vec::new(); sig.params.len()],
+        summaries: vec![ParamSummary::default(); sig.params.len()],
         carriers: FxHashMap::default(),
         consumed: Vec::new(),
     };
     let root_carriers = c.eval(body.root, Ctx::Move);
+    let root_span = body.expr(body.root).span;
     for i in root_carriers {
         c.facts[i as usize].escaped = true;
-        c.mark_escape(i, EscapeExit::Return);
+        c.mark_escape(i, EscapeExit::Return, root_span);
     }
     CollectedFacts {
         facts: c.facts,
-        escapes: c.escapes,
+        summaries: c.summaries,
         consumed: c.consumed,
     }
 }
@@ -573,7 +623,7 @@ struct FactCollector<'a, 'v> {
     param_index: FxHashMap<SymbolId, u32>,
     facts: Vec<ParamFacts>,
     /// Param index → exits its value may take (`Return`, `ViaCall`).
-    escapes: Vec<Vec<EscapeExit>>,
+    summaries: Vec<ParamSummary>,
     /// Local → param indices whose value the local may carry.
     carriers: FxHashMap<SymbolId, Carriers>,
     /// `(callee name, contract)` read during this walk, in order.
@@ -597,28 +647,51 @@ impl FactCollector<'_, '_> {
         c
     }
 
-    /// Flags a symbol as read/mutated/moved when it is a parameter.
-    fn flag(&mut self, sym: SymbolId, ctx: Ctx) {
-        if let Some(i) = self.param_index.get(&sym) {
-            let f = &mut self.facts[*i as usize];
-            match ctx {
-                Ctx::Read => f.read = true,
-                Ctx::Move => f.moved = true,
-            }
+    /// Flags a symbol as read/moved when it is a parameter, recording
+    /// the site as evidence.
+    fn flag(&mut self, sym: SymbolId, ctx: Ctx, at: Span) {
+        if let Some(&i) = self.param_index.get(&sym) {
+            let i = i as usize;
+            let kind = match ctx {
+                Ctx::Read => {
+                    self.facts[i].read = true;
+                    EvidenceKind::Read
+                }
+                Ctx::Move => {
+                    self.facts[i].moved = true;
+                    EvidenceKind::Moved
+                }
+            };
+            Self::record(&mut self.summaries[i].evidence, kind, at);
         }
     }
 
-    fn flag_mutated(&mut self, sym: SymbolId) {
-        if let Some(i) = self.param_index.get(&sym) {
-            self.facts[*i as usize].mutated = true;
+    fn flag_mutated(&mut self, sym: SymbolId, at: Span) {
+        if let Some(&i) = self.param_index.get(&sym) {
+            self.facts[i as usize].mutated = true;
+            Self::record(
+                &mut self.summaries[i as usize].evidence,
+                EvidenceKind::Mutated,
+                at,
+            );
         }
     }
 
-    /// Records an escape exit for a param index (deduplicated).
-    fn mark_escape(&mut self, i: u32, exit: EscapeExit) {
-        let e = &mut self.escapes[i as usize];
-        if !e.contains(&exit) {
-            e.push(exit);
+    /// Records an escape exit for a param index (deduplicated) and
+    /// the evidence that produced it.
+    fn mark_escape(&mut self, i: u32, exit: EscapeExit, at: Span) {
+        let s = &mut self.summaries[i as usize];
+        if !s.escapes.contains(&exit) {
+            s.escapes.push(exit);
+        }
+        Self::record(&mut s.evidence, EvidenceKind::Escaped, at);
+    }
+
+    /// Records an evidence site (deduplicated by kind + span).
+    fn record(evidence: &mut Vec<Evidence>, kind: EvidenceKind, at: Span) {
+        let e = Evidence { kind, at };
+        if !evidence.contains(&e) {
+            evidence.push(e);
         }
     }
 
@@ -627,7 +700,8 @@ impl FactCollector<'_, '_> {
         match self.expr(id).kind.clone() {
             HirExprKind::Literal(_) | HirExprKind::Poison => Carriers::default(),
             HirExprKind::Var(sym) => {
-                self.flag(sym, ctx);
+                let at = self.expr(id).span;
+                self.flag(sym, ctx, at);
                 if let Some(i) = self.param_index.get(&sym) {
                     let mut s = Carriers::default();
                     s.insert(*i);
@@ -659,7 +733,7 @@ impl FactCollector<'_, '_> {
                         ParamBehavior::BorrowMut => {
                             self.eval(*arg, Ctx::Read);
                             if let Some(sym) = self.root_var(*arg) {
-                                self.flag_mutated(sym);
+                                self.flag_mutated(sym, self.expr(*arg).span);
                             }
                         }
                         ParamBehavior::Move | ParamBehavior::Unknown => {
@@ -670,7 +744,7 @@ impl FactCollector<'_, '_> {
                             // The callee may return this argument's
                             // value — so it flows onward through us.
                             for &i in &c {
-                                self.mark_escape(i, EscapeExit::ViaCall(def));
+                                self.mark_escape(i, EscapeExit::ViaCall(def), self.expr(id).span);
                             }
                             out.extend(c);
                         }
@@ -724,7 +798,7 @@ impl FactCollector<'_, '_> {
                 }
                 HirStmt::Assign { target, value, .. } => {
                     let c = self.eval(*value, Ctx::Move);
-                    self.flag_mutated(target.base);
+                    self.flag_mutated(target.base, target.span);
                     if !c.is_empty() {
                         self.carriers.entry(target.base).or_default().extend(c);
                     }
@@ -735,9 +809,10 @@ impl FactCollector<'_, '_> {
                 HirStmt::Return { value, .. } => {
                     if let Some(v) = value {
                         let c = self.eval(*v, Ctx::Move);
+                        let at = self.expr(*v).span;
                         for i in c {
                             self.facts[i as usize].escaped = true;
-                            self.mark_escape(i, EscapeExit::Return);
+                            self.mark_escape(i, EscapeExit::Return, at);
                         }
                     }
                 }

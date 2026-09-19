@@ -47,6 +47,16 @@ pub enum Item {
     Fn(FnDecl),
 }
 
+impl Item {
+    /// The item's whole-declaration span.
+    pub fn span(&self) -> Span {
+        match self {
+            Item::Data(d) => d.span,
+            Item::Fn(f) => f.span,
+        }
+    }
+}
+
 /// A `data` declaration.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DataDecl {

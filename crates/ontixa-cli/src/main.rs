@@ -12,11 +12,11 @@
 //! envelope document (`schema: 1`) — see `envelope.rs` and
 //! `docs/diagnostics.md`.
 
-mod envelope;
-mod explain;
-
 use clap::{Parser, Subcommand};
-use envelope::{CompileFailure, Envelope, emit_failure, emit_human_diags, print_timings};
+use ontixa_cli::envelope::{
+    CompileFailure, Envelope, emit_failure, emit_human_diags, print_timings,
+};
+use ontixa_cli::explain;
 use ontixa_db::{Artifacts, Db};
 use ontixa_diagnostics::{Code, Diagnostic, Severity};
 use ontixa_interpreter::Value;

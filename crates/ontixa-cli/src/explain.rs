@@ -25,29 +25,7 @@ pub fn run(
     timings: bool,
 ) -> ExitCode {
     a.diags.sort();
-    let mut extra: Option<Diagnostic> = None;
-
-    let result = match symbol {
-        None => json!({
-            "file": file.display().to_string(),
-            "defs": def_summaries(&a),
-        }),
-        Some(name) => match resolve_symbol(&a, name) {
-            Resolved::Def(def) => json!({"symbol": def_json(&a, def)}),
-            Resolved::Sym(owner, sym) => json!({"symbol": sym_json(&a, owner, sym)}),
-            Resolved::Ambiguous(cands) => {
-                extra = Some(ambiguous(&a, name, &cands));
-                Json::Null
-            }
-            Resolved::Unknown => {
-                extra = Some(
-                    Diagnostic::error(Code::UnknownSymbol, format!("no symbol named `{name}`"))
-                        .subject(name.to_string()),
-                );
-                Json::Null
-            }
-        },
-    };
+    let (result, extra) = explain_result(&a, symbol, &file.display().to_string());
 
     if json {
         let mut e = Envelope::new("explain")
@@ -77,6 +55,36 @@ pub fn run(
             print_timings(&a);
         }
         code
+    }
+}
+
+/// The pure query: symbol name → `(result, extra_diagnostic)`.
+/// Daemon/CLI agnostic — `run` wraps it in output modes.
+pub fn explain_result(
+    a: &Artifacts,
+    symbol: Option<&str>,
+    file_name: &str,
+) -> (Json, Option<Diagnostic>) {
+    match symbol {
+        None => (
+            json!({
+                "file": file_name,
+                "defs": def_summaries(a),
+            }),
+            None,
+        ),
+        Some(name) => match resolve_symbol(a, name) {
+            Resolved::Def(def) => (json!({"symbol": def_json(a, def)}), None),
+            Resolved::Sym(owner, sym) => (json!({"symbol": sym_json(a, owner, sym)}), None),
+            Resolved::Ambiguous(cands) => (Json::Null, Some(ambiguous(a, name, &cands))),
+            Resolved::Unknown => (
+                Json::Null,
+                Some(
+                    Diagnostic::error(Code::UnknownSymbol, format!("no symbol named `{name}`"))
+                        .subject(name.to_string()),
+                ),
+            ),
+        },
     }
 }
 
@@ -231,14 +239,17 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
                         "mutable": p.mutable,
                         "behavior": contract.get(i).map(|b| b.as_str()).unwrap_or("unknown"),
                     });
-                    if let Some(exits) = a.ownership.escapes.get(&def).and_then(|e| e.get(i)) {
-                        if !exits.is_empty() {
+                    if let Some(sum) = a.ownership.summary(def).get(i) {
+                        if !sum.escapes.is_empty() {
                             param["escapes"] = json!(
-                                exits
+                                sum.escapes
                                     .iter()
                                     .map(|e| e.as_str(&m.scope, &a.interner))
                                     .collect::<Vec<_>>()
                             );
+                        }
+                        if !sum.evidence.is_empty() {
+                            param["evidence"] = evidence_json(sum);
                         }
                     }
                     param
@@ -293,14 +304,17 @@ fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
     if let Some(sig) = m.scope.fn_sig(owner) {
         if let Some(i) = sig.params.iter().position(|p| p.symbol == sym) {
             obj["behavior"] = json!(a.ownership.contract(owner)[i].as_str());
-            if let Some(exits) = a.ownership.escapes.get(&owner).and_then(|e| e.get(i)) {
-                if !exits.is_empty() {
+            if let Some(sum) = a.ownership.summary(owner).get(i) {
+                if !sum.escapes.is_empty() {
                     obj["escapes"] = json!(
-                        exits
+                        sum.escapes
                             .iter()
                             .map(|e| e.as_str(&m.scope, &a.interner))
                             .collect::<Vec<_>>()
                     );
+                }
+                if !sum.evidence.is_empty() {
+                    obj["evidence"] = evidence_json(sum);
                 }
             }
             if ty.is_none() {
@@ -316,6 +330,18 @@ fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
         }
     }
     obj
+}
+
+fn evidence_json(s: &ontixa_memory::ParamSummary) -> Json {
+    json!(
+        s.evidence
+            .iter()
+            .map(|e| json!({
+                "kind": e.kind.as_str(),
+                "span": {"start": e.at.start, "end": e.at.end},
+            }))
+            .collect::<Vec<_>>()
+    )
 }
 
 fn def_summaries(a: &Artifacts) -> Vec<Json> {
@@ -404,6 +430,17 @@ fn print_symbol(s: &Json) {
     }
     if let Some(b) = s["behavior"].as_str() {
         println!("  behavior: {b}");
+    }
+    if let Some(evs) = s["evidence"].as_array() {
+        for e in evs {
+            let k = e["kind"].as_str().unwrap_or("?");
+            let sp = &e["span"];
+            println!(
+                "    {k} at {}..{}",
+                sp["start"].as_u64().unwrap_or(0),
+                sp["end"].as_u64().unwrap_or(0)
+            );
+        }
     }
     if let Some(es) = s["escapes"].as_array() {
         let list: Vec<&str> = es.iter().filter_map(|e| e.as_str()).collect();
