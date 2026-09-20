@@ -20,3 +20,6 @@ ontixa-mir.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+ontixa-interpreter.workspace = true

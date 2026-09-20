@@ -56,8 +56,13 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// Runs `entry` (usually `main`) and returns its value.
+    /// Runs `entry` (usually `main`) and returns its value. A
+    /// `module::name` entry selects the function from that module's
+    /// file; a bare name resolves in the workspace root file.
     pub fn run(&self, entry: &str) -> Result<Value, RuntimeError> {
+        if let Some((m, f)) = entry.split_once("::") {
+            return self.run_in(m, f);
+        }
         let sym = self
             .interner
             .get(entry)
@@ -65,10 +70,35 @@ impl<'a> Interp<'a> {
         let def = self
             .module
             .scope
+            .root_env()
             .fns
             .get(&sym)
             .copied()
             .ok_or_else(|| RuntimeError::MissingEntry(entry.to_string()))?;
+        self.call(def, Vec::new())
+    }
+
+    /// Runs `entry` from the file providing module `module` — the
+    /// form cross-module entry points take (`dep::helper`).
+    pub fn run_in(&self, module: &str, entry: &str) -> Result<Value, RuntimeError> {
+        let missing = || RuntimeError::MissingEntry(format!("{module}::{entry}"));
+        let m = self.interner.get(module).ok_or_else(missing)?;
+        let file = self
+            .module
+            .scope
+            .files
+            .iter()
+            .find(|f| self.module.scope.file_name(**f) == Some(m))
+            .copied()
+            .ok_or_else(missing)?;
+        let sym = self.interner.get(entry).ok_or_else(missing)?;
+        let def = self
+            .module
+            .scope
+            .env(file)
+            .and_then(|e| e.fns.get(&sym))
+            .copied()
+            .ok_or_else(missing)?;
         self.call(def, Vec::new())
     }
 

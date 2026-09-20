@@ -41,15 +41,20 @@ pub struct StageTiming {
     pub nanos: u64,
 }
 
-/// Everything a compiled file produced — the artifacts downstream
-/// tools (CLI, daemon, agents) consume.
+/// Everything a compiled workspace produced — the artifacts
+/// downstream tools (CLI, daemon, agents) consume.
 #[derive(Debug, Clone)]
 pub struct Artifacts {
     /// Source revision these artifacts were built from.
     pub built_revision: u64,
-    /// Canonical AST.
+    /// Canonical AST of the demanded (root) file.
     pub ast: AstModule,
+    /// Canonical ASTs of every file in the workspace, by `FileId`.
+    /// Needed to rebase item-relative spans of defs living in
+    /// dependency files.
+    pub asts: FxHashMap<FileId, AstModule>,
     /// Resolved, lowered HIR (post-typecheck — field indices filled).
+    /// `module.scope` spans the whole reachable workspace.
     pub module: HirModule,
     /// Interner that `InternId`s in the module resolve against.
     pub interner: Interner,
@@ -99,6 +104,9 @@ impl CheckReport {
 /// evaluation.
 struct FileSlot {
     text: Arc<str>,
+    /// The module name this file provides (`use m;` resolves against
+    /// it). Convention: the file's stem.
+    module: String,
 }
 
 /// Query-oriented compiler state. One `Db` is one workspace session:
@@ -107,6 +115,12 @@ struct FileSlot {
 #[derive(Default)]
 pub struct Db {
     files: Vec<FileSlot>,
+    /// Workspace root per file, installed by `Scope` discovery:
+    /// `root_of(dep)` is the file whose `use`-walk reached `dep`.
+    /// Files never discovered keep the default (`self`). Top-level
+    /// demands reset the demanded file's root to itself — the file
+    /// you `check`/`compile` is the root of *its* workspace.
+    roots: FxHashMap<FileId, FileId>,
     /// Session-persistent interner — `InternId`s never change meaning
     /// across revisions, which is what makes `DefKey` stable.
     pub(crate) interner: Interner,
@@ -129,11 +143,27 @@ impl Db {
         Self::default()
     }
 
-    /// Registers a source file; returns its index.
+    /// Registers a source file; returns its index. The file provides
+    /// a module named `file{n}` — single-source callers never resolve
+    /// `use`s, so the name is only a placeholder.
     pub fn add_source(&mut self, text: impl Into<String>) -> usize {
+        let name = format!("file{}", self.files.len());
+        self.add_source_named(name, text)
+    }
+
+    /// Registers a source file providing module `module` (its file
+    /// stem, by convention); returns its index.
+    pub fn add_source_named(
+        &mut self,
+        module: impl Into<String>,
+        text: impl Into<String>,
+    ) -> usize {
         self.revision += 1;
         let text: Arc<str> = text.into().into();
-        self.files.push(FileSlot { text: text.clone() });
+        self.files.push(FileSlot {
+            text: text.clone(),
+            module: module.into(),
+        });
         let key = QueryKey::Source(FileId::new(self.files.len() as u32 - 1));
         self.memo.insert(
             key,
@@ -175,6 +205,28 @@ impl Db {
     /// The current source text of a file.
     pub fn source(&self, file: usize) -> &str {
         &self.files[file].text
+    }
+
+    /// Number of registered files.
+    pub(crate) fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// The module name a file provides (its stem, by convention).
+    pub(crate) fn file_module(&self, f: FileId) -> &str {
+        &self.files[f.index()].module
+    }
+
+    /// The workspace root a file belongs to. Files never claimed by
+    /// a `Scope` discovery root at themselves.
+    pub(crate) fn root_of(&self, f: FileId) -> FileId {
+        self.roots.get(&f).copied().unwrap_or(f)
+    }
+
+    /// Records `root` as the workspace `f` belongs to. Called by
+    /// `Scope` evaluation as it discovers reachable files.
+    pub(crate) fn set_root(&mut self, f: FileId, root: FileId) {
+        self.roots.insert(f, root);
     }
 
     /// The session interner (for resolving `InternId`s in artifacts).
@@ -291,7 +343,10 @@ impl Db {
 
     fn def_key(&mut self, file: usize, name: &str, ctor: fn(DefKey) -> QueryKey) -> QueryKey {
         let name = self.interner.intern(name);
-        ctor(DefKey::new(FileId::new(file as u32), name))
+        let f = FileId::new(file as u32);
+        // The def resolves under the workspace its file belongs to —
+        // `root_of` routes a dependency file to its claiming root.
+        ctor(DefKey::new(self.root_of(f), f, name))
     }
 
     // ---- engine internals ------------------------------------------
@@ -300,6 +355,23 @@ impl Db {
     /// freshness. Public accessors funnel through here.
     fn top_demand(&mut self, key: QueryKey) -> Value {
         self.last_run.clear();
+        // The demanded file roots its own workspace — `check dep.ixa`
+        // means "dep's workspace", even if `dep` was earlier reached
+        // as a dependency of some other root.
+        let root = key.file();
+        self.roots.insert(root, root);
+        // Reclaim the workspace's file set from the memoized scope.
+        // A dep that was since `check`ed directly has `roots[dep] =
+        // dep`; a fresh `Scope(root)` never re-runs `set_root`, so
+        // without this reclaim the dep would keep routing to its own
+        // single-file workspace for the whole demand.
+        if let Some(entry) = self.memo.get(&QueryKey::Scope(root)) {
+            if let Value::Scope(s) = &entry.value {
+                for f in s.files.clone() {
+                    self.roots.insert(f, root);
+                }
+            }
+        }
         self.demand(key)
     }
 
@@ -325,7 +397,13 @@ impl Db {
             QueryStats::bump(&mut self.stats.reused, key);
             return;
         }
-        let computed_at = entry.computed_at;
+        // A dep makes this entry dirty when it changed *after the
+        // entry's last verification* — not after the entry's last
+        // value change. Comparing against `computed_at` would
+        // re-evaluate forever an entry that recomputed to an equal
+        // value (early cutoff): its `computed_at` stays behind its
+        // deps' forever, so the check would never heal.
+        let verified_at = entry.verified_at;
         let deps = entry.deps.clone();
         let mut dirty = false;
         for dep in deps {
@@ -333,7 +411,7 @@ impl Db {
             let changed = self
                 .memo
                 .get(&dep)
-                .is_none_or(|d| d.computed_at > computed_at);
+                .is_none_or(|d| d.computed_at > verified_at);
             if changed {
                 dirty = true;
                 break;

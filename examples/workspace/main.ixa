@@ -1,0 +1,14 @@
+// main.ixa — workspace root. `use` declarations pull sibling
+// modules in; `m::x` paths resolve through them.
+
+use math;
+use math::Vec2;
+
+fn main() -> i32 {
+    let v = Vec2 { x: 3, y: 4 };
+    return math::double(norm2(v));
+}
+
+fn norm2(v: Vec2) -> i32 {
+    return math::norm(v);
+}

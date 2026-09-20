@@ -37,6 +37,10 @@ pub enum SyntaxKind {
     ELSE_KW,
     TRUE_KW,
     FALSE_KW,
+    /// `use m;` / `use m::x [as y];` — workspace imports.
+    USE_KW,
+    /// `as` — the alias keyword in `use` declarations.
+    AS_KW,
     // Reserved for future use.
     UNSAFE_KW,
     MUT_KW,
@@ -54,13 +58,11 @@ pub enum SyntaxKind {
     STRUCT_KW,
     ENUM_KW,
     PUB_KW,
-    USE_KW,
     MOD_KW,
     CONST_KW,
     STATIC_KW,
     TYPE_KW,
     WHERE_KW,
-    AS_KW,
     IN_KW,
     MOVE_KW,
     ASYNC_KW,
@@ -123,6 +125,8 @@ pub enum SyntaxKind {
     // ---- Nodes ---------------------------------------------------------
     /// Root of every file.
     SOURCE_FILE,
+    /// `use m;` / `use m::x [as y];` — a workspace import.
+    USE_DECL,
     /// `data Name { ... }`.
     DATA_DECL,
     /// One `name: Type;` field inside a data declaration.
@@ -159,6 +163,8 @@ pub enum SyntaxKind {
     ARG_LIST,
     /// `expr.field`.
     FIELD_EXPR,
+    /// `m::x` — a module-qualified name in expression position.
+    PATH_EXPR,
     /// `(expr)`.
     PAREN_EXPR,
     /// Literal expression node wrapping a literal token.
@@ -387,6 +393,8 @@ static KIND_TABLE: &[SyntaxKind] = &[
     SyntaxKind::ELSE_KW,
     SyntaxKind::TRUE_KW,
     SyntaxKind::FALSE_KW,
+    SyntaxKind::USE_KW,
+    SyntaxKind::AS_KW,
     SyntaxKind::UNSAFE_KW,
     SyntaxKind::MUT_KW,
     SyntaxKind::SHARED_KW,
@@ -403,13 +411,11 @@ static KIND_TABLE: &[SyntaxKind] = &[
     SyntaxKind::STRUCT_KW,
     SyntaxKind::ENUM_KW,
     SyntaxKind::PUB_KW,
-    SyntaxKind::USE_KW,
     SyntaxKind::MOD_KW,
     SyntaxKind::CONST_KW,
     SyntaxKind::STATIC_KW,
     SyntaxKind::TYPE_KW,
     SyntaxKind::WHERE_KW,
-    SyntaxKind::AS_KW,
     SyntaxKind::IN_KW,
     SyntaxKind::MOVE_KW,
     SyntaxKind::ASYNC_KW,
@@ -467,6 +473,7 @@ static KIND_TABLE: &[SyntaxKind] = &[
     SyntaxKind::AT,
     SyntaxKind::POUND,
     SyntaxKind::SOURCE_FILE,
+    SyntaxKind::USE_DECL,
     SyntaxKind::DATA_DECL,
     SyntaxKind::FIELD,
     SyntaxKind::FN_DECL,
@@ -487,6 +494,7 @@ static KIND_TABLE: &[SyntaxKind] = &[
     SyntaxKind::CALL_EXPR,
     SyntaxKind::ARG_LIST,
     SyntaxKind::FIELD_EXPR,
+    SyntaxKind::PATH_EXPR,
     SyntaxKind::PAREN_EXPR,
     SyntaxKind::LITERAL,
     SyntaxKind::STRUCT_LIT,

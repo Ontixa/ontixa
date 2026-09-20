@@ -3,7 +3,7 @@
 use crate::graph::{EdgeKind, NodeId, NodeKind, SemanticGraph};
 use ontixa_hir::{DefKind, HirBody, HirExprKind, HirModule, HirStmt, SymbolKind};
 use ontixa_memory::{OwnershipTables, ParamBehavior};
-use ontixa_source::{DefId, ExprId, Interner, Span, SymbolId};
+use ontixa_source::{DefId, ExprId, FileId, Interner, Span, SymbolId};
 use ontixa_types::{ModuleTypes, Ty, TypeTables};
 use rustc_hash::FxHashMap;
 use serde_json::json;
@@ -67,6 +67,23 @@ impl Builder<'_> {
             json!(self.module.scope.module.index()),
         );
 
+        // One module node per reachable file — its stem is the name
+        // `use` declarations resolve against. Defs hang off *their*
+        // file's module node, so cross-file ownership stays visible.
+        let mut file_nodes: FxHashMap<FileId, NodeId> = FxHashMap::default();
+        for &file in &self.module.scope.files {
+            let label = self
+                .module
+                .scope
+                .file_name(file)
+                .map(|n| self.interner.resolve(n).to_string())
+                .unwrap_or_else(|| format!("file {}", file.index()));
+            let n = self.g.add_node(NodeKind::Module, label, None);
+            self.g.set_attr(n, "file", json!(file.index()));
+            self.g.add_edge(module_node, n, EdgeKind::Declares);
+            file_nodes.insert(file, n);
+        }
+
         // Pass 1: def + module-level symbol nodes, so cross-references
         // resolve. Body-local symbols (params, locals) are created in
         // pass 2 when their owning body is walked.
@@ -79,8 +96,10 @@ impl Builder<'_> {
                 .g
                 .add_node(kind, label, Some(self.abs(def.id, def.span)));
             self.symbol_nodes.insert((def.id, def.name), n);
-            self.g.add_edge(module_node, n, EdgeKind::Declares);
+            let owner = file_nodes.get(&def.file).copied().unwrap_or(module_node);
+            self.g.add_edge(owner, n, EdgeKind::Declares);
             self.g.set_attr(n, "def", json!(def.id.index()));
+            self.g.set_attr(n, "file", json!(def.file.index()));
         }
         for sym in self.module.scope.symbols.iter() {
             // Module-level symbols: defs (already added) and fields.

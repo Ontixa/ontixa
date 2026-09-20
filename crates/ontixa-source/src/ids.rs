@@ -121,13 +121,20 @@ impl SymbolId {
 }
 
 /// Stable identity of a top-level definition across edits and
-/// sessions: the file that declares it plus its interned name.
+/// sessions: the workspace root it was resolved under, the file that
+/// declares it, plus its interned name.
 ///
-/// [`DefId`] is a dense per-revision index — it shifts when defs are
-/// inserted or reordered. `DefKey` is what incremental queries,
-/// cross-revision state, and future multi-file references key on.
+/// [`DefId`] is a dense per-scope index — it shifts when defs are
+/// inserted or reordered, and the *same* def carries different
+/// `DefId`s in different workspaces. The `root` component therefore
+/// belongs to the key: a body lowered under workspace A is not the
+/// same value as one lowered under workspace B, even for the same
+/// file. `DefKey` is what incremental queries and cross-revision
+/// state key on.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct DefKey {
+    /// The workspace root this def was resolved under.
+    pub root: FileId,
     /// Declaring file.
     pub file: FileId,
     /// Definition name (interned in the `Db`-level interner).
@@ -135,14 +142,15 @@ pub struct DefKey {
 }
 
 impl DefKey {
-    /// Creates a key for the def named `name` in `file`.
-    pub const fn new(file: FileId, name: InternId) -> Self {
-        Self { file, name }
+    /// Creates a key for the def named `name` in `file`, resolved
+    /// under workspace `root`.
+    pub const fn new(root: FileId, file: FileId, name: InternId) -> Self {
+        Self { root, file, name }
     }
 }
 
 impl fmt::Debug for DefKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DefKey({}:{})", self.file.0, self.name.0)
+        write!(f, "DefKey({}:{}:{})", self.root.0, self.file.0, self.name.0)
     }
 }

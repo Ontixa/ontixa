@@ -1,7 +1,7 @@
 //! The [`Diagnostic`] record.
 
 use crate::code::Code;
-use ontixa_source::{DefId, Span};
+use ontixa_source::{DefId, FileId, Span};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// How bad the finding is. Errors reject the program; warnings allow
@@ -57,6 +57,10 @@ pub struct Diagnostic {
     /// Internal pipeline metadata — `Diagnostics(file)` rebases
     /// tagged diagnostics and clears the tag before they surface.
     pub origin: Option<DefId>,
+    /// The source file this diagnostic's spans index into. `None`
+    /// means "the operation's root file" — set during collection or
+    /// by [`Diagnostics::set_file`] in multi-file passes.
+    pub file: Option<FileId>,
 }
 
 impl Diagnostic {
@@ -73,6 +77,7 @@ impl Diagnostic {
             subject: None,
             details: JsonMap::new(),
             origin: None,
+            file: None,
         }
     }
 
@@ -163,6 +168,9 @@ impl Diagnostic {
 #[derive(Debug, Default, Clone)]
 pub struct Diagnostics {
     items: Vec<Diagnostic>,
+    /// Stamped onto pushed diagnostics that don't already carry a
+    /// `file` — set by passes that emit for a specific source file.
+    current_file: Option<FileId>,
 }
 
 impl Diagnostics {
@@ -171,9 +179,31 @@ impl Diagnostics {
         Self::default()
     }
 
-    /// Appends one diagnostic.
-    pub fn push(&mut self, d: Diagnostic) {
+    /// Appends one diagnostic. If [`Self::set_file`] established a
+    /// current file and the diagnostic doesn't already carry one, it
+    /// is stamped with it.
+    pub fn push(&mut self, mut d: Diagnostic) {
+        if d.file.is_none() {
+            d.file = self.current_file;
+        }
         self.items.push(d);
+    }
+
+    /// Sets the file stamped onto subsequently pushed diagnostics.
+    /// Workspace-level passes call this once per file so each
+    /// diagnostic knows which source text its spans index into.
+    /// `None` restores unstamped pushing.
+    pub fn set_file(&mut self, file: Option<FileId>) {
+        self.current_file = file;
+    }
+
+    /// Tags `file` on diagnostics pushed at or after `mark` that
+    /// don't already carry one — the post-hoc form of `set_file`,
+    /// for collectors stamping a whole stage's output.
+    pub fn tag_file_from(&mut self, mark: usize, file: FileId) {
+        for d in &mut self.items[mark..] {
+            d.file.get_or_insert(file);
+        }
     }
 
     /// Whether any diagnostic has error severity.
@@ -199,10 +229,13 @@ impl Diagnostics {
         self.items.is_empty()
     }
 
-    /// Sorts deterministically by primary span, then code. Call before
-    /// rendering when diagnostics were gathered by multiple passes.
+    /// Sorts deterministically by file, then primary span, then code.
+    /// Call before rendering when diagnostics were gathered by
+    /// multiple passes.
     pub fn sort(&mut self) {
         self.items.sort_by(|a, b| {
+            let fa = a.file.map(|f| f.index()).unwrap_or(0);
+            let fb = b.file.map(|f| f.index()).unwrap_or(0);
             let ka = a
                 .primary
                 .map(|s| (s.start, s.end))
@@ -211,7 +244,8 @@ impl Diagnostics {
                 .primary
                 .map(|s| (s.start, s.end))
                 .unwrap_or((u32::MAX, u32::MAX));
-            ka.cmp(&kb)
+            fa.cmp(&fb)
+                .then_with(|| ka.cmp(&kb))
                 .then_with(|| a.code.as_str().cmp(b.code.as_str()))
         });
     }

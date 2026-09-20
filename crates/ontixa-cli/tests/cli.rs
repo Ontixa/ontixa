@@ -353,3 +353,122 @@ fn daemon_bad_lines_get_envelopes_not_crashes() {
     assert_eq!(lines[0]["error"]["kind"], "io");
     assert_eq!(lines[1]["error"]["kind"], "io");
 }
+
+// ---------- multi-file workspaces ----------
+
+/// A fresh directory for one test's workspace: `main.ixa` gets the
+/// root source, `math.ixa` the dep module.
+fn ws_fixture(tag: &str, root: &str, math: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ontixa_ws_{}_{}", tag, std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create ws dir");
+    std::fs::write(dir.join("math.ixa"), math).expect("write dep");
+    std::fs::write(dir.join("main.ixa"), root).expect("write root");
+    dir.join("main.ixa")
+}
+
+#[test]
+fn workspace_qualified_call_runs() {
+    let main = ws_fixture(
+        "call",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }",
+    );
+    let out = ontixa(&["run", main.to_str().unwrap(), "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true, "{d}");
+    assert_eq!(d["result"]["value"], 42);
+}
+
+/// A diagnostic in a dependency file names *that* file and offsets
+/// into *its* text — not the root's.
+#[test]
+fn workspace_dep_diagnostic_names_dep_file() {
+    let main = ws_fixture(
+        "depdiag",
+        "use math; fn main() -> i32 { return math::v(); }",
+        "fn v() -> i32 { return nope; }",
+    );
+    let out = ontixa(&["check", main.to_str().unwrap(), "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], false);
+    let diags = d["diagnostics"].as_array().unwrap();
+    let dep = diags
+        .iter()
+        .find(|x| {
+            x["primary"]["file"]
+                .as_str()
+                .is_some_and(|f| f.contains("math.ixa"))
+        })
+        .unwrap_or_else(|| panic!("no dep-file diagnostic: {diags:?}"));
+    // `nope`'s span indexes math.ixa's own text.
+    let math_src = "fn v() -> i32 { return nope; }";
+    let at = math_src.find("nope").unwrap() as u64;
+    assert_eq!(dep["primary"]["start"], at);
+    assert_eq!(dep["primary"]["end"], at + 4);
+}
+
+/// `use`d modules join the daemon's workspace: sibling files are
+/// loaded lazily at `check` time, and file-1 queries appear in the
+/// evaluated list.
+#[test]
+fn daemon_workspace_check_loads_siblings() {
+    let main = ws_fixture(
+        "daemonws",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }",
+    );
+    let p = main.to_str().unwrap();
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "check", "path": p}),
+        serde_json::json!({"op": "check", "path": p}),
+    ]);
+    assert_eq!(rs[1]["success"], true, "{:?}", rs[1]);
+    let ev: Vec<&str> = rs[1]["result"]["evaluated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|k| k.as_str())
+        .collect();
+    // File 1 (math) was discovered through `use` and its defs checked.
+    assert!(
+        ev.iter().any(|k| k.contains("FileId(1)")),
+        "no dep-file query evaluated: {ev:?}"
+    );
+    // Recheck: pure verification.
+    assert_eq!(rs[2]["result"]["evaluated"].as_array().unwrap().len(), 0);
+}
+
+/// Editing a dep through the daemon re-runs the dep's chain while
+/// the root's untouched bodies stay memoized.
+#[test]
+fn daemon_dep_edit_reruns_only_dep_chain() {
+    let main = ws_fixture(
+        "daemondep",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }",
+    );
+    let p = main.to_str().unwrap();
+    let dep = main.parent().unwrap().join("math.ixa");
+    let dep = dep.to_str().unwrap();
+    let edited = "fn double(x: i32) -> i32 { return x * 4; }";
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "check", "path": p}),
+        serde_json::json!({"op": "set", "path": dep, "text": edited}),
+        serde_json::json!({"op": "check", "path": p}),
+    ]);
+    assert_eq!(rs[3]["success"], true, "{:?}", rs[3]);
+    let ev: Vec<&str> = rs[3]["result"]["evaluated"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|k| k.as_str())
+        .collect();
+    let bodies: Vec<&&str> = ev.iter().filter(|k| k.contains("HirBody")).collect();
+    // Only `double` (file 1) re-lowered; `main` (file 0) stayed
+    // memoized — the signature didn't change. DefKeys print as
+    // `DefKey(root:file:name)`.
+    assert_eq!(bodies.len(), 1, "expected one dirty body: {ev:?}");
+    assert!(bodies[0].contains("DefKey(0:1:"), "{ev:?}");
+}

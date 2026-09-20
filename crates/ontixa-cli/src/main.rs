@@ -146,14 +146,19 @@ fn main() -> ExitCode {
 
 // ---------- shared plumbing ----------
 
-/// Reads a file, runs `work` on a fresh `Db` inside `catch_unwind`,
-/// and returns the source file handle plus `work`'s output. The ICE
-/// boundary lives here: any panic inside the pipeline becomes an
-/// `I_INTERNAL` diagnostic, never a bare crash.
+/// Reads a file and its workspace (every sibling `.ixa`), runs
+/// `work` on a fresh `Db` inside `catch_unwind`, and returns the
+/// source files plus `work`'s output. The ICE boundary lives here:
+/// any panic inside the pipeline becomes an `I_INTERNAL` diagnostic,
+/// never a bare crash.
+///
+/// The workspace registers eagerly: each file provides a module
+/// named by its stem, which `use m;` declarations resolve against.
+/// Only files reachable through `use`s enter the compiled scope.
 fn with_db<T>(
     file: &Path,
     work: impl FnOnce(&mut Db, usize) -> T,
-) -> Result<(SourceFile, T), CompileFailure> {
+) -> Result<(Vec<SourceFile>, T), CompileFailure> {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -163,25 +168,42 @@ fn with_db<T>(
             )));
         }
     };
-    let sf = SourceFile::new(
-        FileId::new(0),
-        file.display().to_string(),
-        Some(file.to_path_buf()),
-        text.clone(),
-    );
+    let mut sources = Vec::new();
+    for (path, sib_text) in ontixa_cli::workspace::workspace_files(file) {
+        let text = match sib_text {
+            Some(t) => t,
+            None => text.clone(), // the root — already read above
+        };
+        sources.push((ontixa_cli::workspace::module_name(&path), path, text));
+    }
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut db = Db::new();
-        let f = db.add_source(text);
-        work(&mut db, f)
+        let mut sfs = Vec::with_capacity(sources.len());
+        for (module, path, text) in sources {
+            let f = db.add_source_named(module, text.clone());
+            sfs.push(SourceFile::new(
+                FileId::new(f as u32),
+                path.display().to_string(),
+                Some(path),
+                text,
+            ));
+        }
+        (sfs, work(&mut db, 0))
     }));
     match result {
-        Ok(a) => Ok((sf, a)),
+        Ok(a) => Ok(a),
         Err(payload) => {
             let msg = payload
                 .downcast_ref::<&str>()
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown panic".into());
+            let sf = SourceFile::new(
+                FileId::new(0),
+                file.display().to_string(),
+                Some(file.to_path_buf()),
+                text,
+            );
             let d = Diagnostic {
                 code: Code::Internal,
                 severity: Severity::Error,
@@ -197,6 +219,7 @@ fn with_db<T>(
                 subject: None,
                 details: Default::default(),
                 origin: None,
+                file: None,
             };
             Err(CompileFailure::Ice(sf, Box::new(d)))
         }
@@ -209,29 +232,29 @@ fn compiled(
     file: &Path,
     command: &'static str,
     json: bool,
-) -> Result<(SourceFile, Artifacts), ExitCode> {
+) -> Result<(Vec<SourceFile>, Artifacts), ExitCode> {
     match compile(file) {
-        Ok((sf, mut a)) => {
+        Ok((sfs, mut a)) => {
             a.diags.sort();
-            Ok((sf, a))
+            Ok((sfs, a))
         }
         Err(f) => Err(emit_failure(f, command, json)),
     }
 }
 
-/// Compiles a file through `Db::compile` — the full artifact path
-/// (graph + MIR), for commands that consume them.
-fn compile(file: &Path) -> Result<(SourceFile, Artifacts), CompileFailure> {
+/// Compiles a workspace through `Db::compile` — the full artifact
+/// path (graph + MIR), for commands that consume them.
+fn compile(file: &Path) -> Result<(Vec<SourceFile>, Artifacts), CompileFailure> {
     with_db(file, |db, f| db.compile_owned(f))
 }
 
-/// Checks a file through `Db::check` — diagnostics only, no graph or
-/// MIR. The cheap path for `check`.
+/// Checks a workspace through `Db::check` — diagnostics only, no
+/// graph or MIR. The cheap path for `check`.
 fn checked(
     file: &Path,
     command: &'static str,
     json: bool,
-) -> Result<(SourceFile, CheckReport), ExitCode> {
+) -> Result<(Vec<SourceFile>, CheckReport), ExitCode> {
     match with_db(file, |db, f| db.check(f)) {
         Ok(x) => Ok(x),
         Err(f) => Err(emit_failure(f, command, json)),
@@ -241,18 +264,18 @@ fn checked(
 // ---------- commands ----------
 
 fn check(file: PathBuf, json: bool, timings: bool) -> ExitCode {
-    let (sf, report) = match checked(&file, "check", json) {
+    let (sfs, report) = match checked(&file, "check", json) {
         Ok(x) => x,
         Err(c) => return c,
     };
     if json {
-        let mut e = Envelope::new("check").diagnostics(&report.diags, &sf);
+        let mut e = Envelope::new("check").diagnostics(&report.diags, &sfs);
         if timings {
             e = e.timings(&report.timings);
         }
         return e.emit();
     }
-    let code = emit_human_diags(&report.diags, &sf);
+    let code = emit_human_diags(&report.diags, &sfs);
     if timings {
         print_timings(&report.timings);
     }
@@ -263,19 +286,19 @@ fn check(file: PathBuf, json: bool, timings: bool) -> ExitCode {
 }
 
 fn run(file: PathBuf, entry: String, json: bool, timings: bool) -> ExitCode {
-    let (sf, a) = match compiled(&file, "run", json) {
+    let (sfs, a) = match compiled(&file, "run", json) {
         Ok(x) => x,
         Err(c) => return c,
     };
     if a.diags.has_errors() {
         return if json {
-            let mut e = Envelope::new("run").diagnostics(&a.diags, &sf);
+            let mut e = Envelope::new("run").diagnostics(&a.diags, &sfs);
             if timings {
                 e = e.timings(&a.timings);
             }
             e.emit()
         } else {
-            emit_human_diags(&a.diags, &sf)
+            emit_human_diags(&a.diags, &sfs)
         };
     }
     let interp = ontixa_interpreter::Interp::new(&a.mir, &a.module, &a.interner);
@@ -283,7 +306,7 @@ fn run(file: PathBuf, entry: String, json: bool, timings: bool) -> ExitCode {
         Ok(v) => {
             if json {
                 let mut e = Envelope::new("run")
-                    .diagnostics(&a.diags, &sf)
+                    .diagnostics(&a.diags, &sfs)
                     .result(json!({
                         "entry": entry,
                         "value": value_json(&v, &a),
@@ -303,7 +326,7 @@ fn run(file: PathBuf, entry: String, json: bool, timings: bool) -> ExitCode {
         }
         Err(e) => {
             if json {
-                let mut env = Envelope::new("run").diagnostics(&a.diags, &sf).error(
+                let mut env = Envelope::new("run").diagnostics(&a.diags, &sfs).error(
                     "runtime",
                     e.to_string(),
                     2,
@@ -393,7 +416,7 @@ fn tokens(file: PathBuf, json: bool) -> ExitCode {
             })
             .collect();
         return Envelope::new("tokens")
-            .diagnostics(&lex_diags, &sf)
+            .diagnostics(&lex_diags, std::slice::from_ref(&sf))
             .result(json!({"tokens": items}))
             .emit();
     }
@@ -425,7 +448,7 @@ fn to_json_value<T: serde::Serialize>(v: &T) -> Json {
 
 /// `ast` / `mir` / `graph` — same contract, different payload.
 fn dump(file: PathBuf, json: bool, what: &'static str) -> ExitCode {
-    let (sf, a) = match compiled(&file, what, json) {
+    let (sfs, a) = match compiled(&file, what, json) {
         Ok(x) => x,
         Err(c) => return c,
     };
@@ -438,19 +461,19 @@ fn dump(file: PathBuf, json: bool, what: &'static str) -> ExitCode {
         let mut res = serde_json::Map::new();
         res.insert(what.to_string(), payload);
         return Envelope::new(what)
-            .diagnostics(&a.diags, &sf)
+            .diagnostics(&a.diags, &sfs)
             .result(Json::Object(res))
             .emit();
     }
-    let code = emit_human_diags(&a.diags, &sf);
+    let code = emit_human_diags(&a.diags, &sfs);
     println!("{}", serde_json::to_string_pretty(&payload).unwrap());
     code
 }
 
 fn explain_cmd(file: PathBuf, symbol: Option<String>, json: bool, timings: bool) -> ExitCode {
-    let (sf, a) = match compiled(&file, "explain", json) {
+    let (sfs, a) = match compiled(&file, "explain", json) {
         Ok(x) => x,
         Err(c) => return c,
     };
-    explain::run(&file, sf, a, symbol.as_deref(), json, timings)
+    explain::run(&file, sfs, a, symbol.as_deref(), json, timings)
 }

@@ -36,8 +36,10 @@
 use crate::behavior::ParamBehavior;
 use crate::place::{Loan, LoanKind, Place, Region, place_of};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
-use ontixa_hir::{HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope};
-use ontixa_source::{DefId, ExprId, InternId, Interner, Span, SymbolId};
+use ontixa_hir::{
+    DefKind, HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope,
+};
+use ontixa_source::{DefId, DefKey, ExprId, FileId, Interner, Span, SymbolId};
 use ontixa_types::{ModuleTypes, Ty, TypeTables};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -152,10 +154,14 @@ impl EscapeExit {
 /// unchanged or body-local edits).
 #[derive(Debug, Default)]
 pub struct OwnershipOracle {
-    /// Final contracts of the last completed run, by def name.
-    prev_contracts: FxHashMap<InternId, Vec<ParamBehavior>>,
-    /// Memoized per-body facts, by def name.
-    facts: FxHashMap<InternId, FactsEntry>,
+    /// Final contracts of the last completed run, per workspace root
+    /// — `DefId`s are scope-relative, so one table per root.
+    prev_contracts: FxHashMap<FileId, ContractTable>,
+    /// Memoized per-body facts, by `DefKey`. The key carries the
+    /// workspace root: the same def lowered under two different
+    /// workspaces is a different value (`DefId`s differ), and
+    /// same-named defs in different files must never conflate.
+    facts: FxHashMap<DefKey, FactsEntry>,
     /// Bodies actually re-walked during the last run.
     pub last_collected: usize,
     /// Bodies served from the fact memo during the last run.
@@ -172,10 +178,12 @@ struct FactsEntry {
     facts: Vec<ParamFacts>,
     /// Escape exits + evidence per parameter.
     summaries: Vec<ParamSummary>,
-    /// `(callee name, contract vector)` — every callee contract the
+    /// `(callee def, contract vector)` — every callee contract the
     /// collection consumed, at the values it observed through the
-    /// view. Valid only while those views hold.
-    consumed: Vec<(InternId, Vec<ParamBehavior>)>,
+    /// view. `DefId`s are relative to the entry's workspace root
+    /// (the map key); verification skips entries of other roots.
+    /// Valid only while those views hold.
+    consumed: Vec<(DefId, Vec<ParamBehavior>)>,
 }
 
 /// Stamps identifying the inputs `collect_facts` for a def depends
@@ -194,7 +202,7 @@ pub struct FactStamps {
 struct CollectedFacts {
     facts: Vec<ParamFacts>,
     summaries: Vec<ParamSummary>,
-    consumed: Vec<(InternId, Vec<ParamBehavior>)>,
+    consumed: Vec<(DefId, Vec<ParamBehavior>)>,
 }
 
 /// Infers ownership for the whole module and enforces
@@ -215,7 +223,10 @@ pub fn infer_ownership(
     oracle.last_collected = 0;
     oracle.last_reused = 0;
     oracle.last_rounds = 0;
-    let mut hypothesis = std::mem::take(&mut oracle.prev_contracts);
+    let mut hypothesis = oracle
+        .prev_contracts
+        .remove(&module.scope.root)
+        .unwrap_or_default();
 
     let (contracts, summaries) = loop {
         oracle.last_rounds += 1;
@@ -228,23 +239,29 @@ pub fn infer_ownership(
         }
         // Hypothesis was wrong somewhere: drop the drifted entries
         // and rerun under this round's finals.
-        for name in drifted {
-            oracle.facts.remove(&name);
+        for def in drifted {
+            oracle.facts.remove(&def);
         }
-        hypothesis = contracts
-            .iter()
-            .map(|(d, c)| (def_name(&module.scope, *d), c.clone()))
-            .collect();
+        hypothesis = contracts.clone();
     };
 
-    oracle.prev_contracts = contracts
-        .iter()
-        .map(|(d, c)| (def_name(&module.scope, *d), c.clone()))
-        .collect();
-    // Forget memos of defs that no longer exist.
     oracle
-        .facts
-        .retain(|name, _| module.scope.fns.contains_key(name));
+        .prev_contracts
+        .insert(module.scope.root, contracts.clone());
+    // Forget memos of defs that no longer exist or are no longer
+    // functions (the stamp check in `memo_take` catches content
+    // drift). Entries of other workspace roots are not this scope's
+    // business — keep them untouched.
+    oracle.facts.retain(|k, _| {
+        if k.root != module.scope.root {
+            return true;
+        }
+        module
+            .scope
+            .env(k.file)
+            .and_then(|e| e.fns.get(&k.name).or_else(|| e.datas.get(&k.name)))
+            .is_some_and(|&d| matches!(module.scope.def(d).kind, DefKind::Function(_)))
+    });
 
     // ---- Phase B: enforcement ----
     for def in module.scope.defs.iter() {
@@ -289,27 +306,21 @@ pub fn infer_ownership(
     }
 }
 
-/// The interned name of a def — the cross-revision identity used by
-/// the oracle.
-fn def_name(scope: &ModuleScope, def: DefId) -> InternId {
-    scope.symbols.get(scope.def(def).name).name
-}
-
 /// One fixpoint round: contracts seeded at bottom, a
 /// reverse-dependency worklist, and per-body fact collection under
 /// the hypothesis view. Returns the round's contracts plus the set
-/// of def names whose consumed contracts no longer match the finals
+/// of defs whose consumed contracts no longer match the finals
 /// (hypothesis drift — a nonempty set forces another round).
 fn fixpoint_round(
     module: &HirModule,
     types: &ModuleTypes,
     stamps: Option<&[FactStamps]>,
-    hypothesis: &FxHashMap<InternId, Vec<ParamBehavior>>,
+    hypothesis: &ContractTable,
     oracle: &mut OwnershipOracle,
 ) -> (
     ContractTable,
     FxHashMap<DefId, Vec<ParamSummary>>,
-    FxHashSet<InternId>,
+    FxHashSet<DefKey>,
 ) {
     let mut contracts: ContractTable = module
         .scope
@@ -355,9 +366,8 @@ fn fixpoint_round(
     // anything new. Reading through the view is what makes a
     // confirmed hypothesis equal a full recollection.
     let view = |contracts: &ContractTable, callee: DefId| -> Vec<ParamBehavior> {
-        let name = def_name(&module.scope, callee);
         hypothesis
-            .get(&name)
+            .get(&callee)
             .cloned()
             .unwrap_or_else(|| contracts.get(&callee).cloned().unwrap_or_default())
     };
@@ -378,37 +388,34 @@ fn fixpoint_round(
         queued.remove(&f);
         let sig = module.scope.fn_sig(f).unwrap();
         let body = module.body(f).unwrap();
-        let fname = def_name(&module.scope, f);
-        let (facts, sum) = match memo_take(&module.scope, oracle, stamps, f, fname, |g| {
-            view(&contracts, g)
-        }) {
-            Some(pair) => {
-                oracle.last_reused += 1;
-                pair
-            }
-            None => {
-                oracle.last_collected += 1;
-                let collected = collect_facts(
-                    &module.scope,
-                    body,
-                    types[f.index()].as_ref().unwrap_or_else(|| empty_tables()),
-                    |g| view(&contracts, g),
-                    sig,
-                );
-                if let Some(stamps) = stamps {
-                    oracle.facts.insert(
-                        fname,
-                        FactsEntry {
-                            stamps: stamps[f.index()],
-                            facts: collected.facts.clone(),
-                            summaries: collected.summaries.clone(),
-                            consumed: collected.consumed,
-                        },
-                    );
+        let (facts, sum) =
+            match memo_take(&module.scope, oracle, stamps, f, |g| view(&contracts, g)) {
+                Some(pair) => {
+                    oracle.last_reused += 1;
+                    pair
                 }
-                (collected.facts, collected.summaries)
-            }
-        };
+                None => {
+                    oracle.last_collected += 1;
+                    let collected = collect_facts(
+                        body,
+                        types[f.index()].as_ref().unwrap_or_else(|| empty_tables()),
+                        |g| view(&contracts, g),
+                        sig,
+                    );
+                    if let Some(stamps) = stamps {
+                        oracle.facts.insert(
+                            module.scope.def_key(f),
+                            FactsEntry {
+                                stamps: stamps[f.index()],
+                                facts: collected.facts.clone(),
+                                summaries: collected.summaries.clone(),
+                                consumed: collected.consumed,
+                            },
+                        );
+                    }
+                    (collected.facts, collected.summaries)
+                }
+            };
         summaries.insert(f, sum);
         let mut next = Vec::with_capacity(sig.params.len());
         for (i, p) in sig.params.iter().enumerate() {
@@ -429,16 +436,16 @@ fn fixpoint_round(
     // Verification: every recorded consumed contract must equal the
     // round's finals. Entries that checked out against the
     // hypothesis mid-round are only sound if the hypothesis held.
+    // Entries belonging to other workspace roots describe different
+    // scopes — their `DefId`s don't index this contract table.
     let mut drifted = FxHashSet::default();
-    for (fname, entry) in &oracle.facts {
-        for (callee_name, recorded) in &entry.consumed {
-            let actual = module
-                .scope
-                .fns
-                .get(callee_name)
-                .and_then(|d| contracts.get(d));
-            if actual != Some(recorded) {
-                drifted.insert(*fname);
+    for (key, entry) in &oracle.facts {
+        if key.root != module.scope.root {
+            continue;
+        }
+        for (callee, recorded) in &entry.consumed {
+            if contracts.get(callee) != Some(recorded) {
+                drifted.insert(*key);
                 break;
             }
         }
@@ -453,16 +460,14 @@ fn memo_take(
     oracle: &OwnershipOracle,
     stamps: Option<&[FactStamps]>,
     def: DefId,
-    name: InternId,
     view: impl Fn(DefId) -> Vec<ParamBehavior>,
 ) -> Option<(Vec<ParamFacts>, Vec<ParamSummary>)> {
     let stamps = stamps?;
-    let entry = oracle.facts.get(&name)?;
+    let entry = oracle.facts.get(&scope.def_key(def))?;
     if entry.stamps != stamps[def.index()] {
         return None;
     }
-    for (callee_name, recorded) in &entry.consumed {
-        let callee = scope.fns.get(callee_name)?;
+    for (callee, recorded) in &entry.consumed {
         if view(*callee) != *recorded {
             return None;
         }
@@ -583,14 +588,12 @@ fn classify(ty: Ty, f: &ParamFacts) -> ParamBehavior {
 /// Returns the facts plus the `(callee, contract)` pairs the walk
 /// consumed — the memo validity record.
 fn collect_facts(
-    scope: &ModuleScope,
     body: &HirBody,
     tables: &TypeTables,
     view: impl Fn(DefId) -> Vec<ParamBehavior>,
     sig: &ontixa_hir::FnSig,
 ) -> CollectedFacts {
     let mut c = FactCollector {
-        scope,
         body,
         tables,
         view: &view,
@@ -619,7 +622,6 @@ fn collect_facts(
 }
 
 struct FactCollector<'a, 'v> {
-    scope: &'a ModuleScope,
     body: &'a HirBody,
     tables: &'a TypeTables,
     /// Contract lookup: hypothesis-first during incremental rounds.
@@ -631,8 +633,8 @@ struct FactCollector<'a, 'v> {
     summaries: Vec<ParamSummary>,
     /// Local → param indices whose value the local may carry.
     carriers: FxHashMap<SymbolId, Carriers>,
-    /// `(callee name, contract)` read during this walk, in order.
-    consumed: Vec<(InternId, Vec<ParamBehavior>)>,
+    /// `(callee def, contract)` read during this walk, in order.
+    consumed: Vec<(DefId, Vec<ParamBehavior>)>,
 }
 
 impl FactCollector<'_, '_> {
@@ -643,11 +645,10 @@ impl FactCollector<'_, '_> {
     /// The contract the callee is viewed under, recorded as consumed.
     fn contract_of(&mut self, def: DefId) -> Vec<ParamBehavior> {
         let c = (self.view)(def);
-        let name = self.scope.symbols.get(self.scope.def(def).name).name;
-        if let Some(e) = self.consumed.iter_mut().find(|(n, _)| *n == name) {
+        if let Some(e) = self.consumed.iter_mut().find(|(d, _)| *d == def) {
             e.1 = c.clone();
         } else {
-            self.consumed.push((name, c.clone()));
+            self.consumed.push((def, c.clone()));
         }
         c
     }

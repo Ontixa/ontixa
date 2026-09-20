@@ -16,7 +16,7 @@ mod rebase;
 
 pub use ast::{
     AstModule, BinOp, Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Literal, Param,
-    Place, Stmt, TypeExpr, UnOp,
+    Path, Place, Stmt, TypeExpr, UnOp, UseDecl,
 };
 pub use lower::lower_module;
 pub use rebase::rebase_item;
@@ -81,7 +81,7 @@ mod tests {
                     init: Some(Expr::StructLit { name, fields, .. }),
                     ..
                 } => {
-                    assert_eq!(name.name, "P");
+                    assert_eq!(name.display(), "P");
                     assert_eq!(fields[0].name.name, "x");
                 }
                 other => panic!("expected struct literal, got {other:?}"),

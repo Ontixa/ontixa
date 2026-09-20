@@ -46,7 +46,7 @@ mod tests {
     fn local_ty(src: &str, name: &str) -> Ty {
         let (m, tables, mut interner, diags) = check_src(src);
         assert!(diags.is_empty(), "{diags:?}");
-        let main = m.scope.fns[&interner.intern("main")];
+        let main = m.scope.root_env().fns[&interner.intern("main")];
         let body = m.body(main).expect("body");
         let sym = body
             .local_ids()
@@ -96,7 +96,7 @@ mod tests {
             "data P { x: i32; y: i32; } fn main() -> i32 { let p = P { x: 1, y: 2 }; return p.y; }",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        let main = m.scope.fns[&interner.intern("main")];
+        let main = m.scope.root_env().fns[&interner.intern("main")];
         let body = m.body(main).expect("body");
         let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
             panic!()
@@ -166,8 +166,8 @@ mod tests {
             "data P { x: i32; } fn id(p: P) -> P { return p; } fn main() -> i32 { let q = id(P { x: 1 }); return q.x; }",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        let p_def = m.scope.datas[&interner.intern("P")];
-        let main = m.scope.fns[&interner.intern("main")];
+        let p_def = m.scope.root_env().datas[&interner.intern("P")];
+        let main = m.scope.root_env().fns[&interner.intern("main")];
         let body = m.body(main).expect("body");
         let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
             panic!()

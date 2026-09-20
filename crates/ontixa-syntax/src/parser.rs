@@ -190,14 +190,15 @@ impl Parser<'_> {
         self.start(SyntaxKind::SOURCE_FILE);
         while !self.at_end() {
             match self.current() {
+                SyntaxKind::USE_KW => self.use_decl(),
                 SyntaxKind::DATA_KW => self.data_decl(),
                 SyntaxKind::FN_KW => self.fn_decl(),
                 _ => self.err_recover(
                     format!(
-                        "expected `data` or `fn`, found {}",
+                        "expected `use`, `data` or `fn`, found {}",
                         self.current().describe()
                     ),
-                    &[SyntaxKind::DATA_KW, SyntaxKind::FN_KW],
+                    &[SyntaxKind::USE_KW, SyntaxKind::DATA_KW, SyntaxKind::FN_KW],
                 ),
             }
         }
@@ -252,9 +253,33 @@ impl Parser<'_> {
         self.finish();
     }
 
+    /// `use m;` — binds a module name — or `use m::x [as y];` — binds
+    /// one member of a module under a (possibly aliased) local name.
+    /// Path segments are `NAME_REF`s; the `as` alias is a `NAME`.
+    fn use_decl(&mut self) {
+        self.start(SyntaxKind::USE_DECL);
+        self.bump(); // use
+        self.name_ref();
+        while self.at(SyntaxKind::COLON2) {
+            self.bump(); // ::
+            self.name_ref();
+        }
+        if self.at(SyntaxKind::AS_KW) {
+            self.bump(); // as
+            self.name();
+        }
+        self.expect(SyntaxKind::SEMICOLON, "after `use` declaration");
+        self.finish();
+    }
+
+    /// `Name` or `m::Name` — a (possibly qualified) type reference.
     fn type_ref(&mut self) {
         self.start(SyntaxKind::TYPE_REF);
         self.name();
+        while self.at(SyntaxKind::COLON2) {
+            self.bump(); // ::
+            self.name();
+        }
         self.finish();
     }
 
@@ -549,6 +574,19 @@ impl Parser<'_> {
             SyntaxKind::IDENT => {
                 let cp = self.checkpoint();
                 self.name_ref();
+                // `m::x` — a module-qualified path. The `::` chain is
+                // part of the name, so it binds tighter than any
+                // postfix or infix operator.
+                let mut qualified = false;
+                while self.at(SyntaxKind::COLON2) {
+                    qualified = true;
+                    self.bump(); // ::
+                    self.name_ref();
+                }
+                if qualified {
+                    self.start_at(cp, SyntaxKind::PATH_EXPR);
+                    self.finish();
+                }
                 if allow_struct && self.at(SyntaxKind::L_BRACE) {
                     self.start_at(cp, SyntaxKind::STRUCT_LIT);
                     self.struct_lit_fields();
