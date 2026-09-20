@@ -16,7 +16,7 @@
 //! which dispatches between the body arena and the module
 //! `SymbolTable`.
 
-use ontixa_source::{DefId, ExprId, InternId, ModuleId, Span, SymbolId};
+use ontixa_source::{DefId, ExprId, FileId, InternId, ModuleId, Span, SymbolId};
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 
@@ -137,8 +137,15 @@ impl SymbolTable {
 /// A top-level definition (function or data).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Def {
-    /// This def's ID.
+    /// This def's ID — dense over the whole workspace, so a def in a
+    /// dependency file can be referenced directly by `Call`/`StructLit`.
     pub id: DefId,
+    /// The file that declares this def.
+    pub file: FileId,
+    /// Index of the def's item within `file`'s `AstModule.items` —
+    /// locates the item's absolute start (the rebase base) without a
+    /// name lookup.
+    pub item: u32,
     /// Symbol carrying the def's name.
     pub name: SymbolId,
     /// Kind-specific payload.
@@ -204,27 +211,84 @@ pub struct FieldDef {
     pub index: u32,
 }
 
-/// The module scope produced by name resolution: everything knowable
-/// without looking inside function bodies.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ModuleScope {
-    /// Module identity.
-    pub module: ModuleId,
-    /// Top-level definitions, indexed by `DefId`.
-    pub defs: Vec<Def>,
-    /// Module-level symbol table (defs and `data` fields only;
-    /// params and locals are body-local).
-    pub symbols: SymbolTable,
+/// One file's name environment within the workspace: what its
+/// top-level names and `use` declarations bring into scope.
+///
+/// `fns`/`datas` hold only *this file's own* defs (one namespace — a
+/// name may be defined once per file). `modules` binds module names
+/// (`use m;`) and `imports` binds member aliases (`use m::x as y;`).
+/// Bare names resolve through `fns`/`datas` then `imports`;
+/// `m::x` paths resolve through `modules` then the target's env.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FileEnv {
     /// Function name → `DefId`.
     pub fns: FxHashMap<InternId, DefId>,
     /// Data name → `DefId`.
     pub datas: FxHashMap<InternId, DefId>,
+    /// Module name → the file that provides it (`use m;`).
+    pub modules: FxHashMap<InternId, FileId>,
+    /// Bound name → the imported def (`use m::x [as y];`).
+    pub imports: FxHashMap<InternId, DefId>,
+}
+
+/// The workspace scope produced by name resolution: every definition
+/// in every reachable file, plus each file's name environment.
+/// Defs are globally indexed (`DefId` spans the whole workspace) so a
+/// call in one module can reference a callee in another directly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleScope {
+    /// Module identity (the workspace root's module).
+    pub module: ModuleId,
+    /// The workspace root file — the entry the scope was built around.
+    pub root: FileId,
+    /// Top-level definitions across all reachable files, indexed by
+    /// `DefId`. Order is deterministic: files in discovery order
+    /// (`files`), items in source order within each file.
+    pub defs: Vec<Def>,
+    /// Module-level symbol table (defs and `data` fields only;
+    /// params and locals are body-local).
+    pub symbols: SymbolTable,
+    /// Per-file name environments.
+    pub envs: FxHashMap<FileId, FileEnv>,
+    /// Reachable files in discovery order — the root first.
+    pub files: Vec<FileId>,
+    /// Module name (file stem) per reachable file.
+    pub file_names: FxHashMap<FileId, InternId>,
 }
 
 impl ModuleScope {
     /// Looks up a def by ID.
     pub fn def(&self, id: DefId) -> &Def {
         &self.defs[id.index()]
+    }
+
+    /// The name environment of `file` (`None` when the file is not
+    /// part of this workspace).
+    pub fn env(&self, file: FileId) -> Option<&FileEnv> {
+        self.envs.get(&file)
+    }
+
+    /// The root file's name environment — where unqualified lookups
+    /// in workspace-level entry points resolve.
+    pub fn root_env(&self) -> &FileEnv {
+        self.envs
+            .get(&self.root)
+            .expect("scope without its root env")
+    }
+
+    /// The module name a file provides (its stem), resolved through
+    /// `interner`.
+    pub fn file_name(&self, file: FileId) -> Option<InternId> {
+        self.file_names.get(&file).copied()
+    }
+
+    /// The stable query key of a def in this workspace —
+    /// `(root, file, name)`. Per-definition query results are only
+    /// valid within the scope that produced them (`DefId`s are
+    /// scope-relative), so the root belongs to the key.
+    pub fn def_key(&self, id: DefId) -> ontixa_source::DefKey {
+        let def = self.def(id);
+        ontixa_source::DefKey::new(self.root, def.file, self.symbols.get(def.name).name)
     }
 
     /// Function signature of a def, when it is a function.

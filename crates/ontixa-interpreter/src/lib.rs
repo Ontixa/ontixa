@@ -193,7 +193,7 @@ mod tests {
                    fn main() -> i32 { let mut q = P { x: 1 }; bump(q); return q.x; }";
         let (mut mir, module, _t, _o, interner, diags) = ontixa_mir::mir_src(src);
         assert!(diags.is_empty(), "{diags:?}");
-        let main = module.scope.fns[&interner.get("main").unwrap()];
+        let main = module.scope.root_env().fns[&interner.get("main").unwrap()];
         tamper_contracts(&mut mir, main, |c| {
             c[0] = ontixa_memory::ParamBehavior::Borrow
         });
@@ -216,7 +216,7 @@ mod tests {
                    fn main() -> i32 { let mut q = Q { p: P { x: 1 } }; bump(q); return q.p.x; }";
         let (mut mir, module, _t, _o, interner, diags) = ontixa_mir::mir_src(src);
         assert!(diags.is_empty(), "{diags:?}");
-        let main = module.scope.fns[&interner.get("main").unwrap()];
+        let main = module.scope.root_env().fns[&interner.get("main").unwrap()];
         tamper_contracts(&mut mir, main, |c| {
             c[0] = ontixa_memory::ParamBehavior::Borrow
         });

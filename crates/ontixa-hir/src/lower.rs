@@ -12,10 +12,10 @@
 //! guesses, so later passes never see fabricated semantics.
 
 use crate::hir::{
-    HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope, Name, Symbol,
-    SymbolKind, TypeRef,
+    FileEnv, HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope, Name,
+    Symbol, SymbolKind, TypeRef,
 };
-use ontixa_ast::{AstModule, Block, Expr, FnDecl, Ident, Item, Place, Stmt, TypeExpr};
+use ontixa_ast::{AstModule, Block, Expr, FnDecl, Ident, Item, Path, Place, Stmt, TypeExpr};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_source::{DefId, ExprId, InternId, Interner, Span, SymbolId};
 use rustc_hash::FxHashMap;
@@ -67,6 +67,7 @@ pub fn lower_body(
     let mark = diags.len();
     let mut b = BodyLowerer {
         def,
+        file: scope.def(def).file,
         scope,
         interner,
         diags,
@@ -107,8 +108,22 @@ pub fn lower_body(
     }
 }
 
+/// How a `path` failed to resolve — selects the diagnostic shape.
+#[derive(Debug, Clone, Copy)]
+enum PathErr {
+    /// The `m` in `m::x` is not a bound module.
+    UnknownModule,
+    /// `m` exists but has no member `x`.
+    UnknownMember,
+    /// Unqualified name not found, or a path longer than `m::x`.
+    NotFound,
+}
+
 struct BodyLowerer<'a> {
     def: DefId,
+    /// The file this body lives in — selects the [`FileEnv`] its
+    /// names resolve through.
+    file: ontixa_source::FileId,
     scope: &'a ModuleScope,
     interner: &'a mut Interner,
     diags: &'a mut Diagnostics,
@@ -166,6 +181,71 @@ impl BodyLowerer<'_> {
             scope.insert(interned, id);
         }
         id
+    }
+
+    /// This file's name environment — what its own defs and `use`
+    /// declarations brought into scope.
+    fn env(&self) -> &FileEnv {
+        self.scope
+            .env(self.file)
+            .expect("body lowered outside its workspace")
+    }
+
+    /// Resolves a `path` (`x` or `m::x`) to a definition through this
+    /// file's env. Any def kind may come back — callers check.
+    fn path_def(&mut self, path: &Path) -> Result<DefId, PathErr> {
+        match path.segs.as_slice() {
+            [one] => {
+                let interned = self.interner.intern(&one.name);
+                let env = self.env();
+                env.fns
+                    .get(&interned)
+                    .or_else(|| env.datas.get(&interned))
+                    .or_else(|| env.imports.get(&interned))
+                    .copied()
+                    .ok_or(PathErr::NotFound)
+            }
+            [module, member] => {
+                let module_id = self.interner.intern(&module.name);
+                let Some(&module_file) = self.env().modules.get(&module_id) else {
+                    return Err(PathErr::UnknownModule);
+                };
+                let member_id = self.interner.intern(&member.name);
+                self.scope
+                    .env(module_file)
+                    .and_then(|e| e.fns.get(&member_id).or_else(|| e.datas.get(&member_id)))
+                    .copied()
+                    .ok_or(PathErr::UnknownMember)
+            }
+            _ => Err(PathErr::NotFound),
+        }
+    }
+
+    /// The diagnostic for a failed [`Self::path_def`] — `code` covers
+    /// the member/name misses; an unknown module is always
+    /// `E_UNKNOWN_MODULE`.
+    fn path_error(&mut self, path: &Path, err: PathErr, what: &str, code: Code) {
+        let segs = &path.segs;
+        let d = match err {
+            PathErr::UnknownModule => Diagnostic::error(
+                Code::UnknownModule,
+                format!("unknown module `{}`", segs[0].name),
+            )
+            .primary(segs[0].span)
+            .subject(segs[0].name.clone()),
+            PathErr::UnknownMember => Diagnostic::error(
+                code,
+                format!("module `{}` has no {what} `{}`", segs[0].name, segs[1].name),
+            )
+            .primary(segs[1].span)
+            .subject(segs[1].name.clone()),
+            PathErr::NotFound => {
+                Diagnostic::error(code, format!("unknown {} `{}`", what, path.display()))
+                    .primary(path.span)
+                    .subject(path.display())
+            }
+        };
+        self.diags.push(d);
     }
 
     // ---------- blocks & statements ----------
@@ -283,26 +363,68 @@ impl BodyLowerer<'_> {
                 }
             }
             Expr::Call { callee, args, .. } => {
-                let interned = self.interner.intern(&callee.name);
                 let args: Vec<ExprId> = args.iter().filter_map(|a| self.expr(a)).collect();
-                match self.scope.fns.get(&interned) {
-                    Some(def) => self.alloc_expr(HirExprKind::Call { def: *def, args }, span),
-                    None => {
-                        let code = if self.scope.datas.contains_key(&interned)
-                            || self.lookup(interned).is_some()
-                        {
+                match self.path_def(callee) {
+                    Ok(d) if self.scope.fn_sig(d).is_some() => {
+                        self.alloc_expr(HirExprKind::Call { def: d, args }, span)
+                    }
+                    Ok(_) => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::NotCallable,
+                                format!("`{}` is not a function", callee.display()),
+                            )
+                            .primary(callee.span)
+                            .subject(callee.display()),
+                        );
+                        self.alloc_expr(HirExprKind::Poison, span)
+                    }
+                    Err(PathErr::NotFound) if callee.segs.len() == 1 => {
+                        // Preserve the historical message: a local or
+                        // data bearing the callee's name still reports
+                        // "not a function", otherwise "unknown symbol".
+                        let interned = self.interner.intern(&callee.segs[0].name);
+                        let code = if self.lookup(interned).is_some() {
                             Code::NotCallable
                         } else {
                             Code::UnknownSymbol
                         };
                         self.diags.push(
-                            Diagnostic::error(code, format!("`{}` is not a function", callee.name))
-                                .primary(callee.span)
-                                .subject(callee.name.clone()),
+                            Diagnostic::error(
+                                code,
+                                format!("`{}` is not a function", callee.display()),
+                            )
+                            .primary(callee.span)
+                            .subject(callee.display()),
                         );
                         self.alloc_expr(HirExprKind::Poison, span)
                     }
+                    Err(e) => {
+                        self.path_error(callee, e, "function", Code::UnknownSymbol);
+                        self.alloc_expr(HirExprKind::Poison, span)
+                    }
                 }
+            }
+            Expr::Path { path } => {
+                match self.path_def(path) {
+                    Ok(d) => {
+                        let what = if self.scope.fn_sig(d).is_some() {
+                            "a function"
+                        } else {
+                            "a type"
+                        };
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::UnknownSymbol,
+                                format!("`{}` is {what}, not a value", path.display()),
+                            )
+                            .primary(path.span)
+                            .subject(path.display()),
+                        );
+                    }
+                    Err(e) => self.path_error(path, e, "symbol", Code::UnknownSymbol),
+                }
+                self.alloc_expr(HirExprKind::Poison, span)
             }
             Expr::Field { base, name, .. } => {
                 let base = self.expr(base)?;
@@ -345,7 +467,6 @@ impl BodyLowerer<'_> {
             }
             Expr::Block { block, .. } => self.block(block),
             Expr::StructLit { name, fields, .. } => {
-                let interned = self.interner.intern(&name.name);
                 let fields: Vec<(Name, ExprId)> = fields
                     .iter()
                     .filter_map(|f| {
@@ -353,19 +474,23 @@ impl BodyLowerer<'_> {
                         self.expr(&f.value).map(|v| (fname, v))
                     })
                     .collect();
-                match self.scope.datas.get(&interned) {
-                    Some(def) => {
-                        self.alloc_expr(HirExprKind::StructLit { def: *def, fields }, span)
+                match self.path_def(name) {
+                    Ok(d) if self.scope.data_shape(d).is_some() => {
+                        self.alloc_expr(HirExprKind::StructLit { def: d, fields }, span)
                     }
-                    None => {
+                    Ok(_) => {
                         self.diags.push(
                             Diagnostic::error(
                                 Code::UnknownType,
-                                format!("unknown type `{}`", name.name),
+                                format!("`{}` is a function, not a type", name.display()),
                             )
                             .primary(name.span)
-                            .subject(name.name.clone()),
+                            .subject(name.display()),
                         );
+                        self.alloc_expr(HirExprKind::Poison, span)
+                    }
+                    Err(e) => {
+                        self.path_error(name, e, "type", Code::UnknownType);
                         self.alloc_expr(HirExprKind::Poison, span)
                     }
                 }
@@ -375,39 +500,58 @@ impl BodyLowerer<'_> {
     }
 
     fn resolve_type(&mut self, ty: &TypeExpr) -> TypeRef {
-        let name = ty.name.name.as_str();
-        match name {
-            "bool" => TypeRef::Bool,
-            "i32" => TypeRef::I32,
-            "i64" => TypeRef::I64,
-            "u32" => TypeRef::U32,
-            "u64" => TypeRef::U64,
-            "f32" => TypeRef::F32,
-            "f64" => TypeRef::F64,
-            "str" => TypeRef::Str,
-            "unit" => TypeRef::Unit,
-            _ => {
-                let interned = self.interner.intern(name);
-                match self.scope.datas.get(&interned) {
-                    Some(def) => TypeRef::Struct(*def),
-                    None => {
-                        self.diags.push(
-                            Diagnostic::error(Code::UnknownType, format!("unknown type `{name}`"))
-                                .primary(ty.name.span)
-                                .subject(name.to_string()),
-                        );
-                        TypeRef::Poison
-                    }
-                }
+        let segs = &ty.path.segs;
+        if segs.len() == 1 {
+            let name = segs[0].name.as_str();
+            match name {
+                "bool" => return TypeRef::Bool,
+                "i32" => return TypeRef::I32,
+                "i64" => return TypeRef::I64,
+                "u32" => return TypeRef::U32,
+                "u64" => return TypeRef::U64,
+                "f32" => return TypeRef::F32,
+                "f64" => return TypeRef::F64,
+                "str" => return TypeRef::Str,
+                "unit" => return TypeRef::Unit,
+                _ => {}
+            }
+        }
+        match self.path_def(&ty.path) {
+            Ok(d) if self.scope.data_shape(d).is_some() => TypeRef::Struct(d),
+            Ok(_) => {
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::UnknownType,
+                        format!("`{}` is a function, not a type", ty.path.display()),
+                    )
+                    .primary(ty.path.span)
+                    .subject(ty.path.display()),
+                );
+                TypeRef::Poison
+            }
+            Err(e) => {
+                self.path_error(&ty.path, e, "type", Code::UnknownType);
+                TypeRef::Poison
             }
         }
     }
 
     /// Describes a def-level name for a better "unknown binding" message.
     fn describe_def(&self, interned: InternId) -> String {
-        if self.scope.fns.contains_key(&interned) {
+        let env = self.env();
+        if env.fns.contains_key(&interned)
+            || env
+                .imports
+                .get(&interned)
+                .is_some_and(|d| self.scope.fn_sig(*d).is_some())
+        {
             " (a function, not a value)".to_string()
-        } else if self.scope.datas.contains_key(&interned) {
+        } else if env.datas.contains_key(&interned)
+            || env
+                .imports
+                .get(&interned)
+                .is_some_and(|d| self.scope.data_shape(*d).is_some())
+        {
             " (a type, not a value)".to_string()
         } else {
             String::new()

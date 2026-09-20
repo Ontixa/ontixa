@@ -23,25 +23,31 @@
 
 use ontixa_cli::envelope::Envelope;
 use ontixa_cli::explain::explain_result;
+use ontixa_cli::workspace::{module_name, path_key, workspace_files};
 use ontixa_db::{Artifacts, Db};
 use ontixa_source::{FileId, SourceFile};
 use serde_json::{Value as Json, json};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Per-session state: the query engine plus path → file-id bindings.
+/// `files` keys are canonicalized (`path_key`) so `./x.ixa` and
+/// `x.ixa` share a slot; `display` is indexed by file id for
+/// diagnostic rendering.
 #[derive(Default)]
 struct Session {
     db: Db,
     files: HashMap<String, usize>,
+    display: Vec<String>,
 }
 
 impl Session {
     /// The file index for `path`, opening/reading it if needed.
     fn open(&mut self, path: &str) -> Result<usize, String> {
-        if let Some(&f) = self.files.get(path) {
+        let key = path_key(Path::new(path));
+        if let Some(&f) = self.files.get(&key) {
             return Ok(f);
         }
         let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -49,28 +55,59 @@ impl Session {
     }
 
     /// Registers `path` with `text`, reusing the slot when known.
+    /// The file provides a module named by its stem.
     fn bind(&mut self, path: &str, text: String) -> usize {
-        match self.files.get(path) {
+        let key = path_key(Path::new(path));
+        match self.files.get(&key) {
             Some(&f) => {
                 self.db.set_source(f, text);
                 f
             }
-            None => {
-                let f = self.db.add_source(text);
-                self.files.insert(path.to_string(), f);
-                f
-            }
+            None => self.bind_named(path, &key, text),
         }
     }
 
-    /// A `SourceFile` view of a bound path — for diagnostic spans.
-    fn source_file(&self, path: &str, f: usize) -> SourceFile {
-        SourceFile::new(
-            FileId::new(f as u32),
-            path.to_string(),
-            Some(PathBuf::from(path)),
-            self.db.source(f).to_string(),
-        )
+    /// Binds a fresh file slot providing `path`'s stem module.
+    fn bind_named(&mut self, display: &str, key: &str, text: String) -> usize {
+        let f = self
+            .db
+            .add_source_named(module_name(Path::new(display)), text);
+        self.files.insert(key.to_string(), f);
+        debug_assert_eq!(self.display.len(), f);
+        self.display.push(display.to_string());
+        f
+    }
+
+    /// Ensures `path`'s workspace is bound: the file itself plus
+    /// every sibling `.ixa` not already bound. Client `set`s always
+    /// win — a bound sibling is never re-read from disk.
+    fn ensure_workspace(&mut self, path: &str) -> Result<usize, String> {
+        let f = self.open(path)?;
+        for (p, text) in workspace_files(Path::new(path)) {
+            let key = path_key(&p);
+            if self.files.contains_key(&key) {
+                continue;
+            }
+            if let Some(text) = text {
+                self.bind_named(&p.display().to_string(), &key, text);
+            }
+        }
+        Ok(f)
+    }
+
+    /// `SourceFile` views of every bound file, indexed by file id —
+    /// diagnostics render against their `file` tag.
+    fn source_files(&self) -> Vec<SourceFile> {
+        (0..self.display.len())
+            .map(|f| {
+                SourceFile::new(
+                    FileId::new(f as u32),
+                    self.display[f].clone(),
+                    Some(PathBuf::from(&self.display[f])),
+                    self.db.source(f).to_string(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -130,35 +167,35 @@ fn handle(s: &mut Session, req: &Json) -> Json {
                 Err(msg) => Envelope::new("daemon").error("io", msg, 2).into_parts().0,
             }
         }
-        "check" => match s.open(path) {
+        "check" => match s.ensure_workspace(path) {
             Err(msg) => Envelope::new("check").error("io", msg, 2).into_parts().0,
             Ok(f) => {
-                let sf = s.source_file(path, f);
                 // Check-only demand: diagnostics without graph/MIR.
                 let report = s.db.check(f);
                 let ev = evaluated(&s.db);
+                let sfs = s.source_files();
                 Envelope::new("check")
-                    .diagnostics(&report.diags, &sf)
+                    .diagnostics(&report.diags, &sfs)
                     .result(json!({"evaluated": ev}))
                     .into_parts()
                     .0
             }
         },
-        "explain" => match s.open(path) {
+        "explain" => match s.ensure_workspace(path) {
             Err(msg) => Envelope::new("explain").error("io", msg, 2).into_parts().0,
             Ok(f) => {
-                let sf = s.source_file(path, f);
                 let (mut a, ev) = compile(s, f);
                 a.diags.sort();
                 let (mut result, extra) = explain_result(&a, req["symbol"].as_str(), path);
                 if let Json::Object(m) = &mut result {
                     m.insert("evaluated".into(), ev);
                 }
+                let sfs = s.source_files();
                 let mut e = Envelope::new("explain")
-                    .diagnostics(&a.diags, &sf)
+                    .diagnostics(&a.diags, &sfs)
                     .result(result);
                 if let Some(d) = &extra {
-                    e = e.extra_diagnostic(d, &sf);
+                    e = e.extra_diagnostic(d, &sfs);
                 }
                 e.into_parts().0
             }
@@ -170,7 +207,7 @@ fn handle(s: &mut Session, req: &Json) -> Json {
                 .0
         }
         "close" => {
-            let had = s.files.remove(path).is_some();
+            let had = s.files.remove(&path_key(Path::new(path))).is_some();
             Envelope::new("daemon")
                 .result(json!({"closed": had}))
                 .into_parts()

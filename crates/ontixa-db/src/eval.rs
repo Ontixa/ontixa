@@ -11,12 +11,13 @@ use std::sync::Arc;
 
 use ontixa_ast::{AstModule, Item};
 use ontixa_diagnostics::{Diagnostic, Diagnostics};
-use ontixa_hir::{Def, HirBody, HirModule, ModuleScope};
+use ontixa_hir::{HirBody, HirModule, ModuleScope, WorkspaceFile};
 use ontixa_memory::{FactStamps, OwnershipTables};
 use ontixa_mir::{MirBody, MirModule};
 use ontixa_semantic::SemanticGraph;
 use ontixa_source::{DefKey, FileId, InternId};
 use ontixa_types::ModuleTypes;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::db::{Artifacts, Db};
 use crate::query::{CheckedBody, QueryKey, Value};
@@ -26,6 +27,9 @@ use crate::query::{CheckedBody, QueryKey, Value};
 /// their own entries).
 pub(crate) fn eval(db: &mut Db, key: QueryKey) -> (Value, Vec<Diagnostic>) {
     let mut diags = Diagnostics::new();
+    // Every diagnostic this eval emits belongs to the key's file —
+    // workspace passes re-stamp per file as they go.
+    diags.set_file(Some(key.file()));
     let value = match key {
         // `Source` values are seeded by `add_source`/`set_source` and
         // never go stale; this arm exists only to keep eval total.
@@ -43,11 +47,7 @@ pub(crate) fn eval(db: &mut Db, key: QueryKey) -> (Value, Vec<Diagnostic>) {
             };
             Value::Ast(Arc::new(ontixa_ast::lower_module(&root, &mut diags)))
         }
-        QueryKey::Scope(f) => {
-            let module_ast = ast(db, f);
-            let scope = ontixa_hir::resolve_module(&module_ast, &mut db.interner, &mut diags);
-            Value::Scope(Arc::new(scope))
-        }
+        QueryKey::Scope(f) => Value::Scope(Arc::new(scope_eval(db, f, &mut diags))),
         QueryKey::AstItem(k) => {
             let module_ast = ast(db, k.file);
             let item = module_ast.items.iter().find_map(|i| {
@@ -93,8 +93,12 @@ fn ast(db: &mut Db, f: FileId) -> Arc<AstModule> {
     }
 }
 
+/// The workspace scope containing `f`: `Scope` entries are keyed by
+/// workspace root, and `root_of` routes a dependency file to the
+/// root that discovered it.
 fn scope(db: &mut Db, f: FileId) -> Arc<ModuleScope> {
-    match db.demand(QueryKey::Scope(f)) {
+    let root = db.root_of(f);
+    match db.demand(QueryKey::Scope(root)) {
         Value::Scope(s) => s,
         _ => unreachable!("Scope produced wrong value"),
     }
@@ -115,7 +119,8 @@ fn checked(db: &mut Db, k: DefKey) -> Option<CheckedBody> {
 }
 
 fn ownership_t(db: &mut Db, f: FileId) -> Arc<OwnershipTables> {
-    match db.demand(QueryKey::Ownership(f)) {
+    let root = db.root_of(f);
+    match db.demand(QueryKey::Ownership(root)) {
         Value::Ownership(o) => o,
         _ => unreachable!("Ownership produced wrong value"),
     }
@@ -129,7 +134,8 @@ fn mir(db: &mut Db, k: DefKey) -> Option<MirBody> {
 }
 
 fn graph_v(db: &mut Db, f: FileId) -> SemanticGraph {
-    match db.demand(QueryKey::Graph(f)) {
+    let root = db.root_of(f);
+    match db.demand(QueryKey::Graph(root)) {
         Value::Graph(g) => g,
         _ => unreachable!("Graph produced wrong value"),
     }
@@ -144,23 +150,18 @@ fn diags_v(db: &mut Db, f: FileId) -> Vec<Diagnostic> {
 
 // ---- evaluators -----------------------------------------------------
 
-/// The interned name of a def (its `DefKey` component).
-fn def_name(scope: &ModuleScope, def: &Def) -> InternId {
-    scope.symbols.get(def.name).name
-}
-
 /// `lower_body` for the fn named by `key`. `None` when the key names
 /// a `data` def or a name that no longer resolves (stale caller —
 /// callers always discover keys through `scope`). Depends on the
 /// item's own AST slice, so an edit elsewhere in the file never
 /// re-lowers this body.
 fn hir_body(db: &mut Db, key: DefKey, diags: &mut Diagnostics) -> Option<HirBody> {
-    let scope = scope(db, key.file);
+    let scope = scope(db, key.root);
     let item = match db.demand(QueryKey::AstItem(key)) {
         Value::Item(i) => i,
         _ => unreachable!("AstItem produced wrong value"),
     }?;
-    let &def = scope.fns.get(&key.name)?;
+    let &def = scope.env(key.file)?.fns.get(&key.name)?;
     let Item::Fn(decl) = item else { return None };
     Some(ontixa_hir::lower_body(
         &decl,
@@ -171,19 +172,78 @@ fn hir_body(db: &mut Db, key: DefKey, diags: &mut Diagnostics) -> Option<HirBody
     ))
 }
 
+/// `resolve_workspace` rooted at `root`: discovers the reachable
+/// file set by walking `use` declarations over the module-name table
+/// (every registered file provides the module named by its stem),
+/// then runs the three-pass resolver. Demanding each file's `Ast`
+/// records the dependency edge — an edit to a `use` list or a
+/// dependency's signatures re-runs resolution.
+fn scope_eval(db: &mut Db, root: FileId, diags: &mut Diagnostics) -> ModuleScope {
+    // Module table: name → file. First registration wins on a
+    // duplicate stem; the resolver reports the ambiguity itself.
+    let mut module_of: FxHashMap<InternId, FileId> = FxHashMap::default();
+    for i in 0..db.file_count() {
+        let f = FileId::new(i as u32);
+        let module = db.file_module(f).to_string();
+        let name = db.interner.intern(&module);
+        module_of.entry(name).or_insert(f);
+    }
+    // Breadth-first discovery over `use` decls, root first — the
+    // `files` order is part of the scope value's determinism.
+    let mut order = vec![root];
+    let mut seen: FxHashSet<FileId> = [root].into_iter().collect();
+    let mut head = 0;
+    while head < order.len() {
+        let f = order[head];
+        head += 1;
+        let module_ast = ast(db, f);
+        for u in &module_ast.uses {
+            let Some(seg0) = u.path.segs.first() else {
+                continue;
+            };
+            let name = db.interner.intern(&seg0.name);
+            if let Some(&dep) = module_of.get(&name) {
+                if dep != f && seen.insert(dep) {
+                    order.push(dep);
+                }
+            }
+        }
+    }
+    for &f in &order {
+        db.set_root(f, root);
+    }
+    let asts: Vec<Arc<AstModule>> = order.iter().map(|&f| ast(db, f)).collect();
+    // Owned copies — `file_module` borrows `db`, which
+    // `resolve_workspace` needs mutably for the interner.
+    let modules: Vec<String> = order
+        .iter()
+        .map(|&f| db.file_module(f).to_string())
+        .collect();
+    let files: Vec<WorkspaceFile> = order
+        .iter()
+        .enumerate()
+        .map(|(i, &file)| WorkspaceFile {
+            file,
+            module: &modules[i],
+            ast: &asts[i],
+        })
+        .collect();
+    ontixa_hir::resolve_workspace(root, &files, &mut db.interner, diags)
+}
+
 /// `check_body` for one function — the per-definition unit of
 /// type-inference reuse.
 fn body_types(db: &mut Db, key: DefKey, diags: &mut Diagnostics) -> Option<CheckedBody> {
-    let scope = scope(db, key.file);
+    let scope = scope(db, key.root);
     let mut body = hir(db, key)?;
     let tables = ontixa_types::check_body(&scope, &mut body, &db.interner, diags);
     Some(CheckedBody { body, tables })
 }
 
-/// Assembles the `HirModule` + `ModuleTypes` views module-wide passes
-/// (ownership, graph) still consume — from per-definition query
-/// results, not a monolithic re-lower.
-fn assemble(db: &mut Db, f: FileId, scope: &ModuleScope) -> (HirModule, ModuleTypes) {
+/// Assembles the `HirModule` + `ModuleTypes` views workspace-wide
+/// passes (ownership, graph) still consume — from per-definition
+/// query results, not a monolithic re-lower.
+fn assemble(db: &mut Db, scope: &ModuleScope) -> (HirModule, ModuleTypes) {
     let mut bodies = Vec::with_capacity(scope.defs.len());
     let mut types = Vec::with_capacity(scope.defs.len());
     for def in &scope.defs {
@@ -192,7 +252,7 @@ fn assemble(db: &mut Db, f: FileId, scope: &ModuleScope) -> (HirModule, ModuleTy
             types.push(None);
             continue;
         }
-        match checked(db, DefKey::new(f, def_name(scope, def))) {
+        match checked(db, scope.def_key(def.id)) {
             Some(c) => {
                 bodies.push(Some(c.body));
                 types.push(Some(c.tables));
@@ -227,7 +287,7 @@ fn ownership(db: &mut Db, f: FileId, diags: &mut Diagnostics) -> Arc<OwnershipTa
             types.push(None);
             continue;
         }
-        let key = DefKey::new(f, def_name(&scope, def));
+        let key = scope.def_key(def.id);
         // Demand the raw body first: its stamp is what the oracle
         // compares against to reuse collected facts.
         let _ = hir(db, key);
@@ -257,36 +317,46 @@ fn ownership(db: &mut Db, f: FileId, diags: &mut Diagnostics) -> Arc<OwnershipTa
 
 /// `lower_fn` for one function.
 fn mir_body(db: &mut Db, key: DefKey) -> Option<MirBody> {
-    let scope = scope(db, key.file);
+    let scope = scope(db, key.root);
     let c = checked(db, key)?;
-    let own = ownership_t(db, key.file);
+    let own = ownership_t(db, key.root);
     Some(ontixa_mir::lower_fn(&scope, &c.body, &c.tables, &own))
 }
 
-/// The file's semantic program graph. Node spans are file-absolute
-/// for consumers — `bases` translates item-relative body/scope spans
-/// by each def's item start (`DefId` indexes `items`, since defs are
-/// allocated in item order).
+/// The workspace's semantic program graph (keyed under its root
+/// file). Node spans are file-absolute for consumers — `bases[def]`
+/// is the absolute start of `def`'s item *in its own file*, so a
+/// def in a dependency rebases against that file's coordinates.
 fn graph(db: &mut Db, f: FileId) -> SemanticGraph {
-    let module_ast = ast(db, f);
     let scope = scope(db, f);
-    let (module, types) = assemble(db, f, &scope);
+    let (module, types) = assemble(db, &scope);
     let own = ownership_t(db, f);
-    let bases: Vec<u32> = module_ast.items.iter().map(|i| i.span().start).collect();
+    let mut bases = vec![0u32; scope.defs.len()];
+    let mut asts: FxHashMap<FileId, Arc<AstModule>> = FxHashMap::default();
+    for def in &scope.defs {
+        let a = asts.entry(def.file).or_insert_with(|| ast(db, def.file));
+        bases[def.id.index()] = a.items[def.item as usize].span().start;
+    }
     ontixa_semantic::build_graph(&module, &types, &own, &db.interner, &bases)
 }
 
-/// Every diagnostic emitted anywhere in this file's pipeline,
+/// Every diagnostic emitted anywhere in this workspace's pipeline,
 /// collected from dependency entries in demand order. Item-relative
 /// diagnostics (`origin`-tagged) are rebased to file-absolute here —
-/// the file's current `AstModule` supplies each def's item base.
+/// each def's own file supplies the item base — and stamped with the
+/// def's `file` so consumers know which source text the spans index.
 fn diagnostics(db: &mut Db, f: FileId) -> Vec<Diagnostic> {
     let _ = db.demand(QueryKey::Parse(f));
-    let module_ast = ast(db, f);
     let sc = scope(db, f);
+    // Demand every reachable file's AST — its parse/lower diags are
+    // part of the workspace's diagnostics even when it has no defs.
+    let mut asts: FxHashMap<FileId, Arc<AstModule>> = FxHashMap::default();
+    for &file in &sc.files {
+        asts.insert(file, ast(db, file));
+    }
     for def in &sc.defs {
         if sc.fn_sig(def.id).is_some() {
-            let _ = checked(db, DefKey::new(f, def_name(&sc, def)));
+            let _ = checked(db, sc.def_key(def.id));
         }
     }
     let _ = ownership_t(db, f);
@@ -298,7 +368,16 @@ fn diagnostics(db: &mut Db, f: FileId) -> Vec<Diagnostic> {
     for dep in db.deps_so_far().to_vec() {
         for d in db.entry_diags(dep) {
             let d = match d.origin {
-                Some(def) => d.rebased(module_ast.items[def.index()].span().start),
+                Some(did) => {
+                    let def = sc.def(did);
+                    let base = asts[&def.file].items[def.item as usize].span().start;
+                    let mut d = d.rebased(base);
+                    // The origin's file is authoritative — an
+                    // eval-level stamp names the *query's* file,
+                    // which for a dep's def is not the root.
+                    d.file = Some(def.file);
+                    d
+                }
                 None => d.clone(),
             };
             if !out.contains(&d) {
@@ -310,11 +389,15 @@ fn diagnostics(db: &mut Db, f: FileId) -> Vec<Diagnostic> {
 }
 
 /// The assembled artifact bundle — `compile` is a *pure join* of
-/// per-definition and file-level query results.
+/// per-definition and workspace-level query results.
 fn compile(db: &mut Db, f: FileId) -> Arc<Artifacts> {
-    let module_ast = ast(db, f);
     let sc = scope(db, f);
-    let (module, types) = assemble(db, f, &sc);
+    let mut asts: FxHashMap<FileId, AstModule> = FxHashMap::default();
+    for &file in &sc.files {
+        asts.insert(file, (*ast(db, file)).clone());
+    }
+    let module_ast = asts[&f].clone();
+    let (module, types) = assemble(db, &sc);
     let ownership = ownership_t(db, f);
     let graph = graph_v(db, f);
     let mut mirs = Vec::with_capacity(sc.defs.len());
@@ -323,7 +406,7 @@ fn compile(db: &mut Db, f: FileId) -> Arc<Artifacts> {
             mirs.push(None);
             continue;
         }
-        mirs.push(mir(db, DefKey::new(f, def_name(&sc, def))));
+        mirs.push(mir(db, sc.def_key(def.id)));
     }
     let mut diags = Diagnostics::new();
     for d in diags_v(db, f) {
@@ -333,7 +416,8 @@ fn compile(db: &mut Db, f: FileId) -> Arc<Artifacts> {
     let timings = db.stage_timings();
     Arc::new(Artifacts {
         built_revision: db.revision,
-        ast: (*module_ast).clone(),
+        ast: module_ast,
+        asts,
         module,
         interner: db.interner.clone(),
         types,

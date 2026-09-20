@@ -28,9 +28,52 @@ impl Ident {
     }
 }
 
+/// A `::`-separated name path: `m` or `m::x`. A single segment is a
+/// plain (unqualified) name; two segments name a member of a module.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Path {
+    /// Segments in written order (`m`, then `x`).
+    pub segs: Vec<Ident>,
+    /// Span covering the whole path.
+    pub span: Span,
+}
+
+impl Path {
+    /// A one-segment path from a bare identifier.
+    pub fn single(name: Ident) -> Self {
+        Self {
+            span: name.span,
+            segs: vec![name],
+        }
+    }
+
+    /// The display form (`m::x`).
+    pub fn display(&self) -> String {
+        self.segs
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+}
+
+/// A `use` declaration: `use m;` binds a module name; `use m::x as y;`
+/// binds one member of a module under `y` (or `x` without `as`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UseDecl {
+    /// `m` (module import) or `m::x` (member import).
+    pub path: Path,
+    /// The `as` alias, when written.
+    pub alias: Option<Ident>,
+    /// Span of the whole declaration.
+    pub span: Span,
+}
+
 /// Root of a compilation unit.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AstModule {
+    /// `use` declarations in source order.
+    pub uses: Vec<UseDecl>,
     /// Top-level items in source order.
     pub items: Vec<Item>,
     /// Whole-file span.
@@ -107,11 +150,12 @@ pub struct Param {
     pub span: Span,
 }
 
-/// A type position. Milestone 1 has named types only.
+/// A type position: a named type, optionally module-qualified
+/// (`m::Name`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TypeExpr {
-    /// The type name as written.
-    pub name: Ident,
+    /// The type path as written.
+    pub path: Path,
 }
 
 /// A block: statements plus an optional trailing expression whose value
@@ -206,10 +250,10 @@ pub enum Expr {
         /// The referenced name.
         name: Ident,
     },
-    /// `callee(args)`.
+    /// `callee(args)` — `callee` is `f` or `m::f`.
     Call {
-        /// The called function name.
-        callee: Ident,
+        /// The called function path.
+        callee: Path,
         /// Arguments.
         args: Vec<Expr>,
         /// Expression span.
@@ -262,14 +306,21 @@ pub enum Expr {
         /// Expression span.
         span: Span,
     },
-    /// `Name { f: v, ... }`.
+    /// `Name { f: v, ... }` — `name` is `S` or `m::S`.
     StructLit {
-        /// Struct name.
-        name: Ident,
+        /// Struct path.
+        name: Path,
         /// Field initializers.
         fields: Vec<FieldInit>,
         /// Expression span.
         span: Span,
+    },
+    /// A module-qualified name in value position (`m::x` written
+    /// without a call). Always at least two segments — a bare name is
+    /// a `Var`.
+    Path {
+        /// The path as written.
+        path: Path,
     },
     /// Placeholder for input the parser could not interpret. Never
     /// produced for valid source.
@@ -293,6 +344,7 @@ impl Expr {
             | Expr::StructLit { span, .. }
             | Expr::Error { span } => *span,
             Expr::Var { name } => name.span,
+            Expr::Path { path } => path.span,
         }
     }
 }

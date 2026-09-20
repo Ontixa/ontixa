@@ -51,7 +51,7 @@ mod tests {
     fn lowers_straight_line_fn() {
         let (mir, m, mut interner) =
             mir("fn main() -> i32 { let x = 1; let y = x + 1; return y; }");
-        let main = m.scope.fns[&interner.intern("main")];
+        let main = m.scope.root_env().fns[&interner.intern("main")];
         let body = mir.body(main).expect("main body");
         assert_eq!(body.blocks.len(), 1);
         assert!(matches!(body.blocks[0].term, Terminator::Return(_)));
@@ -63,7 +63,7 @@ mod tests {
     fn lowers_if_to_branch_diamond() {
         let (mir, m, mut interner) =
             mir("fn main() -> i32 { let x = if true { 1 } else { 2 }; return x; }");
-        let main = m.scope.fns[&interner.intern("main")];
+        let main = m.scope.root_env().fns[&interner.intern("main")];
         let body = mir.body(main).expect("body");
         assert!(
             body.blocks
@@ -77,7 +77,7 @@ mod tests {
         let (mir, m, mut interner) = mir(
             "data P { x: i32; } fn read(p: P) -> i32 { return p.x; } fn main() -> i32 { let q = P { x: 1 }; return read(q); }",
         );
-        let main = m.scope.fns[&interner.intern("main")];
+        let main = m.scope.root_env().fns[&interner.intern("main")];
         let body = mir.body(main).expect("body");
         let call = body
             .blocks
@@ -99,7 +99,7 @@ mod tests {
         let (mir, m, mut interner) = mir(
             "fn f(mut a: i32, b: i32) -> i32 { let mut x = a; let y = b; x = x + y; return x; }",
         );
-        let f = m.scope.fns[&interner.intern("f")];
+        let f = m.scope.root_env().fns[&interner.intern("f")];
         let body = mir.body(f).expect("body");
         // Params come first: `mut a` writable, `b` not.
         assert!(body.locals[0].mutable);

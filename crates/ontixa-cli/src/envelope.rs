@@ -27,7 +27,7 @@
 //!   `internal` (ICE).
 
 use ontixa_db::StageTiming;
-use ontixa_diagnostics::{Diagnostic, Diagnostics, diagnostic_json};
+use ontixa_diagnostics::{Diagnostic, Diagnostics, diagnostic_json_in};
 use ontixa_source::SourceFile;
 use serde_json::{Map as JsonMap, Value as Json};
 use std::process::ExitCode;
@@ -55,20 +55,22 @@ impl Envelope {
         }
     }
 
-    /// Fills `diagnostics` from the compiled artifacts.
-    pub fn diagnostics(mut self, diags: &Diagnostics, sf: &SourceFile) -> Self {
+    /// Fills `diagnostics` from the compiled artifacts. `files` holds
+    /// the workspace's source files — each diagnostic renders against
+    /// the file its `file` tag names.
+    pub fn diagnostics(mut self, diags: &Diagnostics, files: &[SourceFile]) -> Self {
         self.has_errors = diags.has_errors();
-        self.diags = diags.iter().map(|d| diagnostic_json(d, sf)).collect();
+        self.diags = diags.iter().map(|d| diagnostic_json_in(d, files)).collect();
         self
     }
 
     /// Attaches a single extra diagnostic (e.g. an ambiguity report
     /// produced by `explain` rather than the compiler passes).
-    pub fn extra_diagnostic(mut self, d: &Diagnostic, sf: &SourceFile) -> Self {
+    pub fn extra_diagnostic(mut self, d: &Diagnostic, files: &[SourceFile]) -> Self {
         if d.severity == ontixa_diagnostics::Severity::Error {
             self.has_errors = true;
         }
-        self.diags.push(diagnostic_json(d, sf));
+        self.diags.push(diagnostic_json_in(d, files));
         self
     }
 
@@ -149,7 +151,7 @@ pub fn emit_failure(f: CompileFailure, command: &'static str, json: bool) -> Exi
             ExitCode::from(2)
         }
         (CompileFailure::Ice(sf, d), true) => Envelope::new(command)
-            .extra_diagnostic(&d, &sf)
+            .extra_diagnostic(&d, std::slice::from_ref(&sf))
             .error("internal", d.message.clone(), 3)
             .emit(),
         (CompileFailure::Ice(sf, d), false) => {
@@ -160,10 +162,12 @@ pub fn emit_failure(f: CompileFailure, command: &'static str, json: bool) -> Exi
 }
 
 /// Renders diagnostics for human mode; returns the exit code.
-pub fn emit_human_diags(diags: &Diagnostics, sf: &SourceFile) -> ExitCode {
+/// `files` holds the workspace's source files — each diagnostic
+/// renders against the file its `file` tag names.
+pub fn emit_human_diags(diags: &Diagnostics, files: &[SourceFile]) -> ExitCode {
     if !diags.is_empty() {
         let diags: Vec<Diagnostic> = diags.iter().cloned().collect();
-        eprint!("{}", ontixa_diagnostics::render_all(&diags, sf));
+        eprint!("{}", ontixa_diagnostics::render_all_in(&diags, files));
     }
     if diags.has_errors() {
         ExitCode::from(1)

@@ -17,4 +17,7 @@ mod render;
 
 pub use code::Code;
 pub use diagnostic::{Diagnostic, Diagnostics, Label, Severity};
-pub use render::{diagnostic_json, render, render_all, to_json};
+pub use render::{
+    diagnostic_json, diagnostic_json_in, render, render_all, render_all_in, render_in, to_json,
+    to_json_in,
+};

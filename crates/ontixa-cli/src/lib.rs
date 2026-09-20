@@ -3,3 +3,4 @@
 
 pub mod envelope;
 pub mod explain;
+pub mod workspace;

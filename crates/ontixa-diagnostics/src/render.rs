@@ -111,6 +111,20 @@ pub fn render(d: &Diagnostic, file: &SourceFile) -> String {
     out
 }
 
+/// The file a diagnostic's spans index into: `d.file` when set,
+/// else the operation's root (`files[0]`).
+fn file_of<'a>(d: &Diagnostic, files: &'a [SourceFile]) -> &'a SourceFile {
+    d.file
+        .and_then(|id| files.iter().find(|f| f.id() == id))
+        .or_else(|| files.first())
+        .expect("diagnostics need at least one source file")
+}
+
+/// `render` against the diagnostic's own file — the multi-file form.
+pub fn render_in(d: &Diagnostic, files: &[SourceFile]) -> String {
+    render(d, file_of(d, files))
+}
+
 /// Renders all diagnostics joined by blank lines.
 pub fn render_all(diags: &[Diagnostic], file: &SourceFile) -> String {
     diags
@@ -118,6 +132,23 @@ pub fn render_all(diags: &[Diagnostic], file: &SourceFile) -> String {
         .map(|d| render(d, file))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `render_all` across a workspace: each diagnostic renders against
+/// the file its `file` tag names.
+pub fn render_all_in(diags: &[Diagnostic], files: &[SourceFile]) -> String {
+    diags
+        .iter()
+        .map(|d| render_in(d, files))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `diagnostic_json` against the diagnostic's own file — the
+/// multi-file form. The `file` field in `primary` names the actual
+/// source file.
+pub fn diagnostic_json_in(d: &Diagnostic, files: &[SourceFile]) -> JsonValue {
+    diagnostic_json(d, file_of(d, files))
 }
 
 /// Serializes one diagnostic to the versioned JSON shape.
@@ -177,5 +208,14 @@ pub fn to_json(diags: &[Diagnostic], file: &SourceFile) -> JsonValue {
     serde_json::json!({
         "version": DIAGNOSTICS_SCHEMA_VERSION,
         "diagnostics": diags.iter().map(|d| diagnostic_json(d, file)).collect::<Vec<_>>(),
+    })
+}
+
+/// `to_json` across a workspace — each diagnostic resolves its own
+/// file through `d.file`.
+pub fn to_json_in(diags: &[Diagnostic], files: &[SourceFile]) -> JsonValue {
+    serde_json::json!({
+        "version": DIAGNOSTICS_SCHEMA_VERSION,
+        "diagnostics": diags.iter().map(|d| diagnostic_json_in(d, files)).collect::<Vec<_>>(),
     })
 }

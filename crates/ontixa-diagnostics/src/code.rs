@@ -20,6 +20,9 @@ pub enum Code {
     DuplicateDef,
     /// An identifier did not resolve to any visible symbol.
     UnknownSymbol,
+    /// A `use` declaration or `m::x` path named a module that no file
+    /// in the workspace provides.
+    UnknownModule,
     /// A type position named something that is not a type.
     UnknownType,
     /// Field access on a value that has no fields.
@@ -80,6 +83,7 @@ impl Code {
             Code::UnexpectedCharacter => "E_UNEXPECTED_CHAR",
             Code::DuplicateDef => "E_DUPLICATE_DEF",
             Code::UnknownSymbol => "E_UNKNOWN_SYMBOL",
+            Code::UnknownModule => "E_UNKNOWN_MODULE",
             Code::UnknownType => "E_UNKNOWN_TYPE",
             Code::NotAStruct => "E_NOT_A_STRUCT",
             Code::UnknownField => "E_UNKNOWN_FIELD",

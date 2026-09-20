@@ -15,10 +15,11 @@ use ontixa_types::Ty;
 use serde_json::{Value as Json, json};
 use std::process::ExitCode;
 
-/// Runs `explain` on a compiled file.
+/// Runs `explain` on a compiled workspace. `sfs` holds the
+/// workspace's source files — `files[0]` is the root.
 pub fn run(
     file: &std::path::Path,
-    sf: SourceFile,
+    sfs: Vec<SourceFile>,
     mut a: Artifacts,
     symbol: Option<&str>,
     json: bool,
@@ -29,10 +30,10 @@ pub fn run(
 
     if json {
         let mut e = Envelope::new("explain")
-            .diagnostics(&a.diags, &sf)
+            .diagnostics(&a.diags, &sfs)
             .result(result);
         if let Some(d) = &extra {
-            e = e.extra_diagnostic(d, &sf);
+            e = e.extra_diagnostic(d, &sfs);
         }
         if timings {
             e = e.timings(&a.timings);
@@ -40,10 +41,10 @@ pub fn run(
         e.emit()
     } else {
         if let Some(d) = &extra {
-            eprint!("{}", ontixa_diagnostics::render(d, &sf));
+            eprint!("{}", ontixa_diagnostics::render_in(d, &sfs));
             return ExitCode::from(1);
         }
-        let code = emit_human_diags(&a.diags, &sf);
+        let code = emit_human_diags(&a.diags, &sfs);
         match symbol {
             None => {
                 println!("{}", file.display());
@@ -108,19 +109,59 @@ fn sym_of(m: &HirModule, owner: DefId, sym: SymbolId) -> &ontixa_hir::Symbol {
     }
 }
 
-/// Resolves a query name to a semantic symbol. Top-level def names
-/// take precedence (they're unique); otherwise every symbol whose
-/// name matches is a candidate — params, locals, fields.
+/// Resolves a query name to a semantic symbol. `m::x` selects a def
+/// in module `m`'s file directly; a bare name matches top-level defs
+/// in every reachable file (ambiguous when several modules define
+/// it); otherwise every symbol whose name matches is a candidate —
+/// params, locals, fields.
 fn resolve_symbol(a: &Artifacts, name: &str) -> Resolved {
+    if let Some((m, member)) = name.split_once("::") {
+        let scope = &a.module.scope;
+        let def = a
+            .interner
+            .get(m)
+            .and_then(|mi| {
+                scope
+                    .files
+                    .iter()
+                    .find(|f| scope.file_name(**f) == Some(mi))
+            })
+            .and_then(|f| scope.env(*f))
+            .and_then(|e| {
+                a.interner
+                    .get(member)
+                    .and_then(|id| e.fns.get(&id).or_else(|| e.datas.get(&id)))
+            })
+            .copied();
+        return match def {
+            Some(d) => Resolved::Def(d),
+            None => Resolved::Unknown,
+        };
+    }
     if let Some(id) = a.interner.get(name) {
-        if let Some(def) = a
+        // Def names are unique per file, not per workspace — a bare
+        // name may legitimately resolve in several modules.
+        let mut defs: Vec<DefId> = a
             .module
             .scope
-            .fns
-            .get(&id)
-            .or(a.module.scope.datas.get(&id))
-        {
-            return Resolved::Def(*def);
+            .files
+            .iter()
+            .filter_map(|f| a.module.scope.env(*f))
+            .flat_map(|e| e.fns.get(&id).into_iter().chain(e.datas.get(&id)))
+            .copied()
+            .collect();
+        defs.sort();
+        defs.dedup();
+        match defs.len() {
+            1 => return Resolved::Def(defs[0]),
+            0 => {}
+            _ => {
+                let cands = defs
+                    .iter()
+                    .map(|d| (*d, a.module.scope.def(*d).name))
+                    .collect();
+                return Resolved::Ambiguous(cands);
+            }
         }
     }
     let mut cands: Vec<(DefId, SymbolId)> = Vec::new();
@@ -150,9 +191,10 @@ fn resolve_symbol(a: &Artifacts, name: &str) -> Resolved {
 
 /// The absolute start offset of `def`'s source item — the base for
 /// converting its item-relative symbol/evidence spans to
-/// file-absolute for output.
+/// file-absolute for output. The def's own file supplies the AST.
 fn item_base(a: &Artifacts, def: DefId) -> u32 {
-    a.ast.items[def.index()].span().start
+    let d = a.module.scope.def(def);
+    a.asts[&d.file].items[d.item as usize].span().start
 }
 
 /// Builds the ambiguity diagnostic: one label per candidate so both

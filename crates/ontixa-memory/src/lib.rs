@@ -61,7 +61,7 @@ mod tests {
     fn behavior(src: &str, f: &str, idx: usize) -> ParamBehavior {
         let (m, _, own, mut interner, diags) = analyze_src(src);
         assert!(diags.is_empty(), "{diags:?}");
-        let def: DefId = m.scope.fns[&interner.intern(f)];
+        let def: DefId = m.scope.root_env().fns[&interner.intern(f)];
         own.contract(def)[idx]
     }
 
@@ -565,7 +565,7 @@ mod tests {
             "data P { x: i32; } fn id(p: P) -> P { return p; } fn main() -> i32 { return 0; }",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        let id: DefId = m.scope.fns[&interner.intern("id")];
+        let id: DefId = m.scope.root_env().fns[&interner.intern("id")];
         let esc = &own.summary(id)[0].escapes;
         assert_eq!(esc, &[EscapeExit::Return]);
     }
@@ -577,8 +577,8 @@ mod tests {
              fn relay(p: P) -> P { return id(p); } fn main() -> i32 { return 0; }",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        let id: DefId = m.scope.fns[&interner.intern("id")];
-        let relay: DefId = m.scope.fns[&interner.intern("relay")];
+        let id: DefId = m.scope.root_env().fns[&interner.intern("id")];
+        let relay: DefId = m.scope.root_env().fns[&interner.intern("relay")];
         let esc = &own.summary(relay)[0].escapes;
         assert!(esc.contains(&EscapeExit::ViaCall(id)), "{esc:?}");
         assert!(esc.contains(&EscapeExit::Return), "{esc:?}");
@@ -590,7 +590,7 @@ mod tests {
             "data P { x: i32; } fn read(p: P) -> i32 { return p.x; } fn main() -> i32 { return 0; }",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        let read: DefId = m.scope.fns[&interner.intern("read")];
+        let read: DefId = m.scope.root_env().fns[&interner.intern("read")];
         assert!(own.summary(read)[0].escapes.is_empty());
     }
 }

@@ -9,7 +9,8 @@
 //! item-local diagnostics stay valid until rebased at collection.
 
 use crate::ast::{
-    Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Param, Place, Stmt, TypeExpr,
+    Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Param, Path, Place, Stmt,
+    TypeExpr,
 };
 use ontixa_source::Span;
 
@@ -30,9 +31,16 @@ fn ident(i: &Ident, base: u32) -> Ident {
     Ident::new(i.name.clone(), rel(i.span, base))
 }
 
+fn path(p: &Path, base: u32) -> Path {
+    Path {
+        segs: p.segs.iter().map(|s| ident(s, base)).collect(),
+        span: rel(p.span, base),
+    }
+}
+
 fn type_expr(t: &TypeExpr, base: u32) -> TypeExpr {
     TypeExpr {
-        name: ident(&t.name, base),
+        path: path(&t.path, base),
     }
 }
 
@@ -136,7 +144,7 @@ fn expr(e: &Expr, base: u32) -> Expr {
             name: ident(name, base),
         },
         Expr::Call { callee, args, span } => Expr::Call {
-            callee: ident(callee, base),
+            callee: path(callee, base),
             args: args.iter().map(|a| expr(a, base)).collect(),
             span: rel(*span, base),
         },
@@ -180,7 +188,7 @@ fn expr(e: &Expr, base: u32) -> Expr {
             span: rel(*span, base),
         },
         Expr::StructLit { name, fields, span } => Expr::StructLit {
-            name: ident(name, base),
+            name: path(name, base),
             fields: fields
                 .iter()
                 .map(|f| FieldInit {
@@ -190,6 +198,9 @@ fn expr(e: &Expr, base: u32) -> Expr {
                 })
                 .collect(),
             span: rel(*span, base),
+        },
+        Expr::Path { path: p } => Expr::Path {
+            path: path(p, base),
         },
         Expr::Error { span } => Expr::Error {
             span: rel(*span, base),

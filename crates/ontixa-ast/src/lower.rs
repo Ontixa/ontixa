@@ -8,7 +8,7 @@
 
 use crate::ast::{
     AstModule, BinOp, Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Literal, Param,
-    Place, Stmt, TypeExpr, UnOp,
+    Path, Place, Stmt, TypeExpr, UnOp, UseDecl,
 };
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_source::Span;
@@ -19,15 +19,41 @@ use ontixa_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 /// `diags` receives structural diagnostics discovered during lowering.
 pub fn lower_module(root: &SyntaxNode, diags: &mut Diagnostics) -> AstModule {
     let mut l = Lowerer { diags };
-    let items: Vec<Item> = root.children().filter_map(|child| l.item(&child)).collect();
-    // The module span covers its items — NOT the root text range, so
-    // trailing trivia (a comment appended at EOF) doesn't widen the
-    // module and churn every downstream query.
-    let span = match (items.first(), items.last()) {
-        (Some(f), Some(l)) => Span::new(f.span().start, l.span().end),
-        _ => Span::empty(0),
+    let mut uses = Vec::new();
+    let mut items = Vec::new();
+    for child in root.children() {
+        match child.kind() {
+            SyntaxKind::USE_DECL => uses.push(l.use_decl(&child)),
+            _ => {
+                if let Some(item) = l.item(&child) {
+                    items.push(item);
+                }
+            }
+        }
+    }
+    // The module span covers its declarations — NOT the root text
+    // range, so trailing trivia (a comment appended at EOF) doesn't
+    // widen the module and churn every downstream query.
+    let start = uses
+        .first()
+        .map(|u| u.span.start)
+        .into_iter()
+        .chain(items.first().map(|i| i.span().start))
+        .min()
+        .unwrap_or(0);
+    let end = uses
+        .last()
+        .map(|u| u.span.end)
+        .into_iter()
+        .chain(items.last().map(|i| i.span().end))
+        .max()
+        .unwrap_or(0);
+    let span = if uses.is_empty() && items.is_empty() {
+        Span::empty(0)
+    } else {
+        Span::new(start, end)
     };
-    AstModule { items, span }
+    AstModule { uses, items, span }
 }
 
 struct Lowerer<'a> {
@@ -72,11 +98,53 @@ impl Lowerer<'_> {
             .unwrap_or_else(|| Ident::new("<missing>", node.text_range().into()))
     }
 
+    /// `use` declaration: `NAME_REF` children are the path segments;
+    /// a `NAME` child is the `as` alias.
+    fn use_decl(&mut self, node: &SyntaxNode) -> UseDecl {
+        let segs: Vec<Ident> = node
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::NAME_REF)
+            .map(|n| self.name(&n))
+            .collect();
+        let alias = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::NAME)
+            .map(|n| self.name(&n));
+        let span = decl_span(node);
+        let path = Path {
+            span: segs
+                .first()
+                .zip(segs.last())
+                .map(|(f, l)| Span::new(f.span.start, l.span.end))
+                .unwrap_or(span),
+            segs,
+        };
+        UseDecl { path, alias, span }
+    }
+
+    /// A `TYPE_REF` node's path — one `NAME` child per segment.
+    fn path_of(&self, node: &SyntaxNode) -> Path {
+        let segs: Vec<Ident> = node
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::NAME || n.kind() == SyntaxKind::NAME_REF)
+            .map(|n| self.name(&n))
+            .collect();
+        let node_span: Span = node.text_range().into();
+        Path {
+            span: segs
+                .first()
+                .zip(segs.last())
+                .map(|(f, l)| Span::new(f.span.start, l.span.end))
+                .unwrap_or(node_span),
+            segs,
+        }
+    }
+
     fn type_ref(&self, node: &SyntaxNode) -> Option<TypeExpr> {
         node.children()
             .find(|n| n.kind() == SyntaxKind::TYPE_REF)
             .map(|n| TypeExpr {
-                name: self.first_name(&n),
+                path: self.path_of(&n),
             })
     }
 
@@ -319,6 +387,9 @@ impl Lowerer<'_> {
             SyntaxKind::NAME_REF => Expr::Var {
                 name: self.name(node),
             },
+            SyntaxKind::PATH_EXPR => Expr::Path {
+                path: self.path_of(node),
+            },
             SyntaxKind::CALL_EXPR => self.call_expr(node)?,
             SyntaxKind::FIELD_EXPR => {
                 let (base, field) = split_field_expr(node)?;
@@ -379,15 +450,19 @@ impl Lowerer<'_> {
             }
         }
         let callee_node = callee_node?;
-        if callee_node.kind() != SyntaxKind::NAME_REF {
-            self.error(
-                "only direct function calls are supported",
-                callee_node.text_range().into(),
-            );
-            return None;
-        }
+        let callee = match callee_node.kind() {
+            SyntaxKind::NAME_REF => Path::single(self.name(&callee_node)),
+            SyntaxKind::PATH_EXPR => self.path_of(&callee_node),
+            _ => {
+                self.error(
+                    "only direct function calls are supported",
+                    callee_node.text_range().into(),
+                );
+                return None;
+            }
+        };
         Some(Expr::Call {
-            callee: self.name(&callee_node),
+            callee,
             args,
             span: node.text_range().into(),
         })
@@ -474,7 +549,19 @@ impl Lowerer<'_> {
     }
 
     fn struct_lit(&mut self, node: &SyntaxNode) -> Option<Expr> {
-        let name = self.first_name(node);
+        // The struct name is the first child: a `NAME_REF` (`S {..}`)
+        // or a `PATH_EXPR` (`m::S {..}`).
+        let name = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::NAME_REF || n.kind() == SyntaxKind::PATH_EXPR)
+            .map(|n| {
+                if n.kind() == SyntaxKind::PATH_EXPR {
+                    self.path_of(&n)
+                } else {
+                    Path::single(self.name(&n))
+                }
+            })
+            .unwrap_or_else(|| Path::single(Ident::new("<missing>", node.text_range().into())));
         let fields = node
             .children()
             .filter(|n| n.kind() == SyntaxKind::STRUCT_LIT_FIELD)
@@ -582,6 +669,7 @@ fn is_expr_kind(kind: SyntaxKind) -> bool {
         SyntaxKind::LITERAL
             | SyntaxKind::CALL_EXPR
             | SyntaxKind::FIELD_EXPR
+            | SyntaxKind::PATH_EXPR
             | SyntaxKind::BIN_EXPR
             | SyntaxKind::PREFIX_EXPR
             | SyntaxKind::IF_EXPR

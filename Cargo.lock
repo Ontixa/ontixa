@@ -193,6 +193,7 @@ dependencies = [
  "ontixa-ast",
  "ontixa-diagnostics",
  "ontixa-hir",
+ "ontixa-interpreter",
  "ontixa-memory",
  "ontixa-mir",
  "ontixa-semantic",

@@ -28,12 +28,12 @@ mod lower;
 mod resolve;
 
 pub use hir::{
-    BinOp, DataShape, Def, DefKind, FieldDef, FnSig, HirBody, HirExpr, HirExprKind, HirModule,
-    HirPlace, HirStmt, LitValue, Literal, ModuleScope, Name, ParamDef, Symbol, SymbolKind,
-    SymbolTable, TypeRef, UnOp,
+    BinOp, DataShape, Def, DefKind, FieldDef, FileEnv, FnSig, HirBody, HirExpr, HirExprKind,
+    HirModule, HirPlace, HirStmt, LitValue, Literal, ModuleScope, Name, ParamDef, Symbol,
+    SymbolKind, SymbolTable, TypeRef, UnOp,
 };
 pub use lower::{lower_bodies, lower_body};
-pub use resolve::resolve_module;
+pub use resolve::{WorkspaceFile, resolve_module, resolve_workspace};
 
 /// Lowers an [`ontixa_ast::AstModule`] to a fully resolved
 /// [`HirModule`], appending name-resolution diagnostics to `diags`.
@@ -49,8 +49,9 @@ pub fn lower_hir(
 ) -> HirModule {
     let scope = resolve_module(ast, interner, diags);
     let module = lower_bodies(ast, scope, interner, diags);
-    // `DefId` indexes `ast.items` — defs are allocated in item order.
-    diags.rebase_tagged(|d| ast.items[d.index()].span().start);
+    // `Def.item` locates the owning item — its absolute start is the
+    // rebase base for that def's tagged diagnostics.
+    diags.rebase_tagged(|d| ast.items[module.scope.def(d).item as usize].span().start);
     module
 }
 
@@ -94,7 +95,11 @@ mod tests {
 
     fn fn_def(m: &HirModule, name: &str, interner: &mut Interner) -> DefId {
         let id = interner.intern(name);
-        *m.scope.fns.get(&id).expect("function not resolved")
+        *m.scope
+            .root_env()
+            .fns
+            .get(&id)
+            .expect("function not resolved")
     }
 
     #[test]
@@ -103,9 +108,10 @@ mod tests {
             "data P { x: i32; } fn f(p: P) -> i32 { return p.x; } fn main() -> i32 { return 0; }",
         );
         assert!(diags.is_empty(), "{diags:?}");
-        assert!(m.scope.datas.contains_key(&interner.intern("P")));
-        assert!(m.scope.fns.contains_key(&interner.intern("f")));
-        assert!(m.scope.fns.contains_key(&interner.intern("main")));
+        let env = m.scope.root_env();
+        assert!(env.datas.contains_key(&interner.intern("P")));
+        assert!(env.fns.contains_key(&interner.intern("f")));
+        assert!(env.fns.contains_key(&interner.intern("main")));
         assert_eq!(m.scope.defs.len(), 3);
     }
 
@@ -115,7 +121,7 @@ mod tests {
             parse_hir("data P { x: i32; } fn f(p: P) -> i32 { return p.x; }");
         let f = fn_def(&m, "f", &mut interner);
         let sig = m.scope.fn_sig(f).expect("fn sig");
-        let p_def = m.scope.datas[&interner.intern("P")];
+        let p_def = m.scope.root_env().datas[&interner.intern("P")];
         assert_eq!(sig.params[0].ty, TypeRef::Struct(p_def));
         assert_eq!(sig.ret, TypeRef::I32);
         let shape = m.scope.data_shape(p_def).expect("data shape");
@@ -167,7 +173,7 @@ mod tests {
         let HirExprKind::StructLit { def, fields } = &body.expr(*init).kind else {
             panic!("expected struct lit")
         };
-        assert_eq!(*def, m.scope.datas[&interner.intern("P")]);
+        assert_eq!(*def, m.scope.root_env().datas[&interner.intern("P")]);
         assert_eq!(fields.len(), 1);
     }
 
