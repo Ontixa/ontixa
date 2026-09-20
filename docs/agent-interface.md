@@ -79,21 +79,37 @@ text matching. `check`/`explain`/`graph`/`run` on a root file follow
 render against their own `SourceFile`. `DefKey(root:file:name)` is
 the cross-revision symbol identity an agent should hold.
 
-Renames are transactions, not edits (ADR-0014):
+Renames are transactions, not edits (ADR-0014, ADR-0015):
 
 1. `ontixa rename main.ixa math::double twice` (or daemon `rename`
-   without `apply`) returns the **plan**: exact per-file spans,
-   post-edit sources, and the `revision` it was planned against —
-   the live `Db` is untouched.
-2. Validation happens before any apply: `E_INVALID_NAME`,
-   `E_UNKNOWN_SYMBOL`/`E_AMBIGUOUS_SYMBOL`, `E_NAME_CONFLICT`
-   (file-tagged), and a shadow compile that rejects with
-   `E_RENAME_REJECTED` if the edited sources introduce new errors.
-3. `apply` (CLI `--apply` / daemon `"apply":true,"revision":R`)
+   without `apply`) returns the **validated plan**: exact per-file
+   spans, post-edit sources, and the `revision` it was planned
+   against — the live `Db` is untouched. The plan is bound to the
+   `Db` incarnation, workspace fingerprint, and candidate payload —
+   it cannot cross sessions or carry swapped bytes (`E_PLAN_MISMATCH`).
+2. Target selection: `symbol` names a top-level def (`x` or
+   `m::x`); daemon `"at":<byte-offset>` or CLI `@<byte-offset>`
+   selects a body-local binding or parameter positionally through
+   the function's HIR — shadowing resolves as name resolution does.
+   `E_UNSUPPORTED_TARGET` covers non-renameable selections.
+3. Validation happens before any apply: `E_BASELINE_ERRORS` (rename
+   needs an error-free workspace; warnings don't block),
+   `E_INVALID_NAME`, `E_UNKNOWN_SYMBOL`/`E_AMBIGUOUS_SYMBOL`,
+   `E_NAME_CONFLICT` (file-tagged), and a shadow compile that
+   rejects `E_RENAME_REJECTED` on any new error **or any binding
+   drift** — a reference that would rebind (capture) is refused even
+   when the candidate compiles.
+4. `apply` (CLI `--apply` / daemon `"apply":true,"revision":R`)
    commits only if the workspace revision still matches —
    `E_STALE_REVISION` otherwise, with zero mutation. On success all
-   files land in one revision bump; CLI writes roll back on mid-loop
-   IO failure.
+   files land in one `set_sources` revision bump — no partial state.
+5. **Disk persistence** (CLI `--apply` only; the daemon only
+   mutates memory and returns `new_sources`): candidates are staged
+   as sibling `.ontixa-tx-*.stage` files behind a
+   `.ontixa-tx-*.journal`, then swapped in per file. Disk bytes must
+   equal the validated snapshot or nothing writes; a pending journal
+   blocks new transactions; `ontixa recover <dir>` resolves a dead
+   transaction forward or back, preserving evidence on conflict.
 
 Alias semantics: `use m::x` rebinds, so bare `x` refs rewrite with
 the member segment; `use m::x as y` keeps `y` — only the member

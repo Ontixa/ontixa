@@ -35,15 +35,24 @@ use std::path::{Path, PathBuf};
 /// Per-session state: the query engine plus path → file-id bindings.
 /// `files` keys are canonicalized (`path_key`) so `./x.ixa` and
 /// `x.ixa` share a slot; `display` is indexed by file id for
-/// diagnostic rendering.
+/// diagnostic rendering. `poisoned` marks a session whose handler
+/// panicked — the `Db` may hold a half-applied mutation, so it is
+/// never used again: reads error until `open`/`set` resets it.
 #[derive(Default)]
 struct Session {
     db: Db,
     files: HashMap<String, usize>,
     display: Vec<String>,
+    poisoned: bool,
 }
 
 impl Session {
+    /// Drops all state after a panic — a fresh `Db` incarnation, so
+    /// no plan or memo from the poisoned session can leak through.
+    fn reset(&mut self) {
+        *self = Session::default();
+    }
+
     /// The file index for `path`, opening/reading it if needed.
     fn open(&mut self, path: &str) -> Result<usize, String> {
         let key = path_key(Path::new(path));
@@ -150,6 +159,23 @@ fn compile(s: &mut Session, f: usize) -> (Artifacts, Json) {
 fn handle(s: &mut Session, req: &Json) -> Json {
     let op = req["op"].as_str().unwrap_or("");
     let path = req["path"].as_str().unwrap_or("");
+    if s.poisoned {
+        // A handler panic may have left the Db mid-mutation — never
+        // serve reads from it. `open`/`set` rebuilds the session
+        // from scratch; everything else tells the client to reopen.
+        if matches!(op, "open" | "set") {
+            s.reset();
+        } else {
+            return Envelope::new("daemon")
+                .error(
+                    "internal",
+                    "session was reset after an internal failure; reopen files",
+                    3,
+                )
+                .into_parts()
+                .0;
+        }
+    }
     match op {
         "open" | "set" => {
             // `set` carries text; `open` reads from disk.
@@ -204,7 +230,8 @@ fn handle(s: &mut Session, req: &Json) -> Json {
         // edits plus the revision they were computed against; apply
         // requires that revision back as a stale guard. The daemon
         // updates its own sources only — persisting is the client's
-        // job (the response carries the new texts).
+        // job (the response carries the new texts). `at` selects a
+        // local binding by byte offset instead of `symbol`.
         "rename" => match s.ensure_workspace(path) {
             Err(msg) => Envelope::new("rename").error("io", msg, 2).into_parts().0,
             Ok(f) => {
@@ -226,7 +253,11 @@ fn handle(s: &mut Session, req: &Json) -> Json {
                         .into_parts()
                         .0
                 } else {
-                    match s.db.plan_rename(f, symbol, to) {
+                    let planned = match req["at"].as_u64() {
+                        Some(off) => s.db.plan_rename_at(f, f, off as u32, to),
+                        None => s.db.plan_rename(f, symbol, to),
+                    };
+                    match planned {
                         Err(e) => ontixa_cli::rename::rejection_json(&e, &s.source_files()),
                         Ok(plan) if apply => match s.db.apply_rename(&plan) {
                             Err(e) => ontixa_cli::rename::rejection_json(&e, &s.source_files()),
@@ -235,7 +266,7 @@ fn handle(s: &mut Session, req: &Json) -> Json {
                                 let mut result =
                                     ontixa_cli::rename::applied_json(&plan, &rep, &sfs);
                                 result["new_sources"] = json!(
-                                    plan.new_sources
+                                    plan.new_sources()
                                         .iter()
                                         .map(|(f, text)| json!({
                                             "file": sfs[*f].name(),
@@ -309,8 +340,15 @@ fn main() {
             return;
         }
         let resp = catch_unwind(AssertUnwindSafe(|| handle(&mut s, &req))).unwrap_or_else(|_| {
+            // The Db may hold a half-applied mutation — poison the
+            // session so nothing reads it until a reset.
+            s.poisoned = true;
             Envelope::new("daemon")
-                .error("internal", "panic in request handler", 3)
+                .error(
+                    "internal",
+                    "panic in request handler; session requires reset",
+                    3,
+                )
                 .into_parts()
                 .0
         });

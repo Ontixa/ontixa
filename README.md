@@ -97,7 +97,9 @@ $ ontixa graph file.ixa            # Semantic Program Graph (JSON)
 $ ontixa explain file.ixa          # inferred contracts + timings
 $ ontixa explain file.ixa m::sym   # a single symbol, qualified ok
 $ ontixa rename file.ixa m::old new         # preview edits
-$ ontixa rename file.ixa m::old new --apply # guarded atomic apply
+$ ontixa rename file.ixa @138 new           # local/param rename by byte offset
+$ ontixa rename file.ixa m::old new --apply # guarded apply; staged+journaled to disk
+$ ontixa recover dir/                       # resolve a transaction journal after a crash
 ```
 
 `ontixad` is the persistent daemon (NDJSON on stdio): `open`, `set`,

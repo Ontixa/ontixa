@@ -8,15 +8,24 @@
 //!   AST for sites that resolve to the target definition — the decl
 //!   name, `use` paths, call/type/struct-literal paths — and produces
 //!   one [`RenameEdit`] per name token.
+//! - **baseline policy**: rename requires a workspace free of
+//!   error diagnostics (`E_BASELINE_ERRORS` otherwise). Warnings do
+//!   not block. With a clean baseline, *any* error the
+//!   shadow-compile produces is new by definition — no signature
+//!   matching, no multiplicity guessing.
 //! - **validate** rejects an invalid new name, a name that would
 //!   collide with an existing binding in any affected file, or a
 //!   rename whose *shadow-compile* (a scratch `Db` built from the
-//!   edited sources) produces diagnostics the original did not.
-//! - **apply** checks the workspace revision is still the one the
-//!   plan was computed against (`E_STALE_REVISION` otherwise) and
+//!   edited sources) produces any error diagnostic.
+//! - **apply** re-verifies plan *provenance* — the plan's database
+//!   incarnation, workspace fingerprint, revision, candidate
+//!   fingerprint, and the expected bytes under every edit — then
 //!   installs every edited file in a single `set_sources` revision
-//!   bump — failed validation never mutates, and there is no
-//!   partial mutation: either all edits land or none do.
+//!   bump. A plan cannot cross databases or snapshots, and its
+//!   candidate bytes cannot be substituted after validation: the
+//!   fields are private and the plan is only constructible by
+//!   [`Db::plan_rename`]. Failed validation never mutates, and
+//!   there is no partial mutation: either all edits land or none do.
 //!
 //! Aliased imports (`use m::x as y`) keep their local name: only the
 //! path's member segment rewrites, references through `y` are
@@ -27,8 +36,8 @@ use std::sync::Arc;
 
 use ontixa_ast::{AstModule, Expr, Item, Path, Stmt};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
-use ontixa_hir::{FileEnv, ModuleScope};
-use ontixa_source::{DefId, DefKey, FileId, InternId, Interner, Span};
+use ontixa_hir::{FileEnv, HirBody, HirExprKind, HirStmt, ModuleScope};
+use ontixa_source::{DefId, DefKey, FileId, InternId, Interner, Span, SymbolId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::db::Db;
@@ -46,28 +55,115 @@ pub struct RenameEdit {
     pub replace: String,
 }
 
-/// A validated rename: the edits and the revision they were
-/// computed against. Apply with [`Db::apply_rename`]; pass `revision`
-/// back over the wire for the stale guard.
+/// The semantic identity a rename targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameTarget {
+    /// A top-level definition (`fn` or `data`) — the `use`-path,
+    /// call/type/literal-path and decl sites all rewrite.
+    Def(DefKey),
+    /// A parameter or `let` binding inside a function body —
+    /// `def` is the owning function's stable key, `sym` the
+    /// body-local symbol arena index. Only that body's decl,
+    /// `Var` references and assign-place bases rewrite.
+    Local {
+        /// The owning function's stable identity.
+        def: DefKey,
+        /// Body-local symbol (parameter or `let` binding).
+        sym: SymbolId,
+    },
+}
+
+/// A validated rename. All fields are private: a plan is only
+/// constructible by [`Db::plan_rename`] after validation, so its
+/// candidate bytes can never be substituted and it can never be
+/// applied to a different database or source snapshot. Apply with
+/// [`Db::apply_rename`]; pass `revision` back over the wire for the
+/// stale guard.
 #[derive(Debug, Clone)]
 pub struct RenamePlan {
     /// The workspace root the plan was computed under.
-    pub root: usize,
+    root: usize,
     /// The symbol as written (`x` or `m::x`).
-    pub symbol: String,
+    symbol: String,
     /// The target's current name.
-    pub old_name: String,
+    old_name: String,
     /// The requested new name.
-    pub new_name: String,
-    /// Root-aware identity of the renamed definition.
-    pub target: DefKey,
+    new_name: String,
+    /// Semantic identity of the renamed target.
+    target: RenameTarget,
     /// `Db::revision` at plan time — the apply-time stale guard.
-    pub revision: u64,
+    revision: u64,
+    /// Incarnation of the `Db` that produced this plan — a plan can
+    /// never cross database sessions.
+    db_id: u64,
+    /// Fingerprint of every registered file's module name and raw
+    /// source bytes at plan time — binds the plan to the exact
+    /// snapshot it validated.
+    workspace_fp: u64,
+    /// Fingerprint of `new_sources` — proves at apply time the
+    /// candidate payload is the one validation approved.
+    candidate_fp: u64,
     /// Every edit, sorted by `(file, span.start)` — the preview.
-    pub edits: Vec<RenameEdit>,
+    edits: Vec<RenameEdit>,
     /// `(file, post-edit text)` for every touched file — what apply
     /// installs atomically.
-    pub new_sources: Vec<(usize, String)>,
+    new_sources: Vec<(usize, String)>,
+}
+
+/// Everything `Db::make_plan` needs beyond the database's own
+/// provenance — request identity, semantic target, preview edits,
+/// and the candidate payload.
+struct PlanSpec {
+    root: usize,
+    symbol: String,
+    old_name: String,
+    new_name: String,
+    target: RenameTarget,
+    edits: Vec<RenameEdit>,
+    new_sources: Vec<(usize, String)>,
+}
+
+impl RenamePlan {
+    /// The workspace root the plan was computed under.
+    pub fn root(&self) -> usize {
+        self.root
+    }
+
+    /// The symbol as written (`x` or `m::x`).
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    /// The target's current name.
+    pub fn old_name(&self) -> &str {
+        &self.old_name
+    }
+
+    /// The requested new name.
+    pub fn new_name(&self) -> &str {
+        &self.new_name
+    }
+
+    /// Semantic identity of the renamed target.
+    pub fn target(&self) -> RenameTarget {
+        self.target
+    }
+
+    /// `Db::revision` at plan time — the apply-time stale guard.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Every edit, sorted by `(file, span.start)` — the preview.
+    pub fn edits(&self) -> &[RenameEdit] {
+        &self.edits
+    }
+
+    /// `(file, post-edit text)` for every touched file — what apply
+    /// installs atomically.
+    pub fn new_sources(&self) -> &[(usize, String)] {
+        &self.new_sources
+    }
 }
 
 /// What an applied rename reports back.
@@ -105,6 +201,15 @@ pub enum RenameError {
         /// Revision at apply time.
         current: u64,
     },
+    /// The workspace already reports error diagnostics — rename
+    /// requires a clean baseline (`E_BASELINE_ERRORS`).
+    BaselineErrors(Box<Diagnostic>),
+    /// The plan failed provenance checks at apply time: wrong
+    /// database, workspace fingerprint drift, a tampered candidate,
+    /// or unexpected bytes under an edit (`E_PLAN_MISMATCH`).
+    PlanMismatch(Box<Diagnostic>),
+    /// The symbol kind cannot be renamed (`E_UNSUPPORTED_TARGET`).
+    Unsupported(Box<Diagnostic>),
 }
 
 impl RenameError {
@@ -114,7 +219,10 @@ impl RenameError {
             RenameError::UnknownSymbol(d)
             | RenameError::AmbiguousSymbol(d)
             | RenameError::InvalidName(d)
-            | RenameError::Conflict(d) => vec![d.as_ref().clone()],
+            | RenameError::Conflict(d)
+            | RenameError::BaselineErrors(d)
+            | RenameError::PlanMismatch(d)
+            | RenameError::Unsupported(d) => vec![d.as_ref().clone()],
             RenameError::ValidationFailed(d, extra) => {
                 let mut v = vec![d.as_ref().clone()];
                 v.extend(extra.iter().cloned());
@@ -151,6 +259,8 @@ impl Db {
                 .subject(new_name.to_string()),
             )));
         }
+        self.check_baseline(root, symbol)?;
+
         let scope = self.scope(root);
         let target = resolve_target(&scope, &self.interner, root, symbol)?;
         let def_file = scope.def(target).file;
@@ -178,8 +288,226 @@ impl Db {
 
         // Splice edits into post-edit sources (per file, descending
         // spans so earlier offsets stay valid).
+        let new_sources = self.splice_sources(&edits);
+
+        // Binding correspondence baseline: every fn's ordered
+        // binding sequence — the sites a rename may rebind.
+        let fns = self.binding_baselines(&scope);
+
+        // Shadow-compile + correspondence: any new error, or any
+        // site that would resolve to a different symbol, rejects.
+        self.verify_candidate(
+            root,
+            &new_sources,
+            &fns,
+            &format!("{old_name} → {new_name}"),
+            symbol,
+        )?;
+
+        Ok(self.make_plan(PlanSpec {
+            root,
+            symbol: symbol.to_string(),
+            old_name,
+            new_name: new_name.to_string(),
+            target: RenameTarget::Def(scope.def_key(target)),
+            edits,
+            new_sources,
+        }))
+    }
+
+    /// Plans and validates a rename of the *body-local* binding or
+    /// parameter selected by byte `offset` in `file` under the
+    /// workspace rooted at `root`. Selection is positional — never
+    /// a bare name guess — and sites come from the body's own HIR
+    /// binding info, so shadowing resolves exactly the way name
+    /// resolution did.
+    ///
+    /// Same transaction core as [`Db::plan_rename`]: clean-baseline
+    /// gate, conflict/capture verification through shadow-compile
+    /// plus binding correspondence, and the same provenance-bound
+    /// plan — nothing else may apply it.
+    pub fn plan_rename_at(
+        &mut self,
+        root: usize,
+        file: usize,
+        offset: u32,
+        new_name: &str,
+    ) -> Result<RenamePlan, RenameError> {
+        let sel = format!("{file}@{offset}");
+        if !is_ident(new_name) {
+            return Err(RenameError::InvalidName(Box::new(
+                Diagnostic::error(
+                    Code::InvalidName,
+                    format!("`{new_name}` is not a valid identifier"),
+                )
+                .subject(new_name.to_string()),
+            )));
+        }
+        self.check_baseline(root, &sel)?;
+
+        let scope = self.scope(root);
+        let file_id = FileId::new(file as u32);
+        if file >= self.file_count() || !scope.files.contains(&file_id) {
+            return Err(RenameError::UnknownSymbol(Box::new(
+                Diagnostic::error(
+                    Code::UnknownSymbol,
+                    format!("file {file} is not part of this workspace"),
+                )
+                .subject(sel.clone()),
+            )));
+        }
+        let ast = self.ast_of(file_id);
+        let text = self.source(file).to_string();
+        let Some((item_i, fdecl)) = ast.items.iter().enumerate().find_map(|(i, it)| match it {
+            Item::Fn(f) if it.span().contains(offset) => Some((i, f)),
+            _ => None,
+        }) else {
+            return Err(RenameError::UnknownSymbol(Box::new(
+                Diagnostic::error(
+                    Code::UnknownSymbol,
+                    format!("no local binding at byte offset {offset}"),
+                )
+                .subject(sel.clone()),
+            )));
+        };
+        let item_base = ast.items[item_i].span().start;
+        let rel = offset - item_base;
+        // AstModule spans are file-absolute; the HIR body's are
+        // item-relative (lowered from the rebased item).
+        if fdecl.name.span.contains(offset) {
+            return Err(RenameError::Unsupported(Box::new(
+                Diagnostic::error(
+                    Code::UnsupportedTarget,
+                    format!(
+                        "offset {offset} selects the function's own name — \
+                         rename it with `rename <file> {} <new>` instead",
+                        fdecl.name.name
+                    ),
+                )
+                .subject(sel.clone()),
+            )));
+        }
+        let env = scope.env(file_id).expect("workspace file has env");
+        let fname = self
+            .interner
+            .get(&fdecl.name.name)
+            .expect("decl name interned");
+        let def = env
+            .fns
+            .get(&fname)
+            .copied()
+            .expect("declared fn resolves in its file env");
+        let key = scope.def_key(def);
+        let body = match self.demand(QueryKey::HirBody(key)) {
+            Value::Hir(Some(b)) => b,
+            _ => unreachable!("declared fn has a body"),
+        };
+        let sym = local_target(&body, rel, &self.interner).ok_or_else(|| {
+            RenameError::UnknownSymbol(Box::new(
+                Diagnostic::error(
+                    Code::UnknownSymbol,
+                    format!("no binding or reference at byte offset {offset}"),
+                )
+                .subject(sel.clone()),
+            ))
+        })?;
+        let sym_rec = &body.local_symbols[sym.local_index()];
+        let old_name = self.interner.resolve(sym_rec.name).to_string();
+        let old_len = old_name.len() as u32;
+
+        // Sites: the decl name, every `Var` resolving to `sym`, and
+        // every assign-place whose *base token* resolves to `sym`.
+        let mut edits = vec![RenameEdit {
+            file: file_id,
+            span: sym_rec.span.abs(item_base),
+            replace: new_name.to_string(),
+        }];
+        for e in &body.exprs {
+            if matches!(e.kind, HirExprKind::Var(s) if s == sym) {
+                edits.push(RenameEdit {
+                    file: file_id,
+                    span: e.span.abs(item_base),
+                    replace: new_name.to_string(),
+                });
+            }
+        }
+        for stmt in body_stmts(&body) {
+            if let HirStmt::Assign { target, .. } = stmt {
+                if target.base == sym {
+                    // The place span covers `x.f.g`; the rename site is
+                    // just the base token — verify the bytes, never assume.
+                    let span =
+                        Span::new(target.span.start, target.span.start + old_len).abs(item_base);
+                    if text.get(span.start as usize..span.end as usize) == Some(old_name.as_str()) {
+                        edits.push(RenameEdit {
+                            file: file_id,
+                            span,
+                            replace: new_name.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        edits.sort_by_key(|e| (e.file, e.span.start));
+        edits.dedup_by_key(|e| (e.file, e.span.start, e.span.end));
+
+        let new_sources = self.splice_sources(&edits);
+        let fns = vec![(file_id, fdecl.name.name.clone(), binding_seq(&body))];
+        self.verify_candidate(
+            root,
+            &new_sources,
+            &fns,
+            &format!("{old_name} → {new_name}"),
+            &sel,
+        )?;
+        Ok(self.make_plan(PlanSpec {
+            root,
+            symbol: sel,
+            old_name,
+            new_name: new_name.to_string(),
+            target: RenameTarget::Local { def: key, sym },
+            edits,
+            new_sources,
+        }))
+    }
+
+    /// Baseline policy: rename requires an error-free workspace —
+    /// validation compares the candidate against "zero errors", so a
+    /// dirty baseline would make the check meaningless. Warnings do
+    /// not block.
+    fn check_baseline(&mut self, root: usize, subject: &str) -> Result<(), RenameError> {
+        let baseline = self.check(root).diags;
+        let errors: Vec<Diagnostic> = baseline
+            .iter()
+            .filter(|d| d.severity == ontixa_diagnostics::Severity::Error)
+            .cloned()
+            .collect();
+        if errors.is_empty() {
+            return Ok(());
+        }
+        let mut d = Diagnostic::error(
+            Code::BaselineErrors,
+            format!(
+                "workspace has {} pre-existing error(s); \
+                 rename requires a clean baseline",
+                errors.len()
+            ),
+        )
+        .subject(subject.to_string());
+        for e in errors.iter().take(8) {
+            d = d.label(
+                e.primary.unwrap_or(Span::new(0, 0)),
+                format!("{}: {}", e.code.as_str(), e.message),
+            );
+        }
+        Err(RenameError::BaselineErrors(Box::new(d)))
+    }
+
+    /// Splices `edits` into `(file, post-edit text)` pairs — spans
+    /// descending per file so earlier offsets stay valid.
+    fn splice_sources(&self, edits: &[RenameEdit]) -> Vec<(usize, String)> {
         let mut by_file: FxHashMap<FileId, Vec<&RenameEdit>> = FxHashMap::default();
-        for e in &edits {
+        for e in edits {
             by_file.entry(e.file).or_default().push(e);
         }
         let mut new_sources = Vec::new();
@@ -192,11 +520,49 @@ impl Db {
             new_sources.push((f.index(), text));
         }
         new_sources.sort_by_key(|(f, _)| *f);
+        new_sources
+    }
 
-        // Shadow-compile: build a scratch Db from the edited sources
-        // and demand its diagnostics. Any error the original
-        // workspace did not already produce rejects the rename.
-        let baseline = error_signature(&self.check(root).diags);
+    /// Every workspace fn's binding sequence — the correspondence
+    /// baseline for a def rename. `(file, def name, seq)` triples;
+    /// the name re-resolves the body inside the shadow database.
+    fn binding_baselines(&mut self, scope: &ModuleScope) -> Vec<(FileId, String, Vec<Binding>)> {
+        let mut fns = Vec::new();
+        for &f in &scope.files {
+            let Some(env) = scope.env(f) else { continue };
+            let mut defs: Vec<DefId> = env.fns.values().copied().collect();
+            defs.sort();
+            for d in defs {
+                let key = scope.def_key(d);
+                let name = self.interner.resolve(key.name).to_string();
+                let body = match self.demand(QueryKey::HirBody(key)) {
+                    Value::Hir(Some(b)) => b,
+                    _ => continue,
+                };
+                fns.push((f, name, binding_seq(&body)));
+            }
+        }
+        fns
+    }
+
+    /// Shadow-compiles the candidate sources and verifies:
+    ///
+    /// 1. **zero new errors** — the baseline is clean (gate above),
+    ///    so any error diagnostic in the shadow is new
+    ///    (`E_RENAME_REJECTED`);
+    /// 2. **binding correspondence** — every fn's ordered binding
+    ///    sequence must match its baseline: each `Var`, assign base,
+    ///    `let`, call and struct-literal site still resolves to the
+    ///    same symbol identity. A rename that silently rebinds a
+    ///    reference — a capture — fails here even when it compiles.
+    fn verify_candidate(
+        &mut self,
+        root: usize,
+        new_sources: &[(usize, String)],
+        fns: &[(FileId, String, Vec<Binding>)],
+        label: &str,
+        subject: &str,
+    ) -> Result<(), RenameError> {
         let mut scratch = Db::new();
         for i in 0..self.file_count() {
             let f = FileId::new(i as u32);
@@ -211,22 +577,19 @@ impl Db {
         let fresh: Vec<Diagnostic> = shadow
             .diags
             .iter()
-            .filter(|d| {
-                d.severity == ontixa_diagnostics::Severity::Error
-                    && !baseline.contains_key(&(d.code, d.file))
-            })
+            .filter(|d| d.severity == ontixa_diagnostics::Severity::Error)
             .cloned()
             .collect();
         if !fresh.is_empty() {
             let mut d = Diagnostic::error(
                 Code::RenameRejected,
                 format!(
-                    "renaming `{old_name}` to `{new_name}` would produce \
-                     {} new error(s); workspace unchanged",
+                    "renaming {label} would produce {} new error(s); \
+                     workspace unchanged",
                     fresh.len()
                 ),
             )
-            .subject(format!("{symbol} → {new_name}"));
+            .subject(subject.to_string());
             for e in &fresh {
                 d = d.label(
                     e.primary.unwrap_or(Span::new(0, 0)),
@@ -236,28 +599,135 @@ impl Db {
             return Err(RenameError::ValidationFailed(Box::new(d), fresh));
         }
 
-        Ok(RenamePlan {
-            root,
-            symbol: symbol.to_string(),
-            old_name,
-            new_name: new_name.to_string(),
-            target: scope.def_key(target),
-            revision: self.revision,
-            edits,
-            new_sources,
-        })
+        let root_fid = FileId::new(root as u32);
+        for (file, name, before) in fns {
+            let Some(sid) = scratch.interner().get(name) else {
+                continue;
+            };
+            let key = DefKey::new(root_fid, *file, sid);
+            let body = match scratch.demand(QueryKey::HirBody(key)) {
+                Value::Hir(Some(b)) => b,
+                _ => continue,
+            };
+            let after = binding_seq(&body);
+            if *before != after {
+                let drift = before
+                    .iter()
+                    .zip(after.iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or_else(|| before.len().min(after.len()));
+                return Err(RenameError::ValidationFailed(
+                    Box::new(
+                        Diagnostic::error(
+                            Code::RenameRejected,
+                            format!(
+                                "renaming {label} would rebind a reference \
+                                 in `{name}`: binding #{drift} resolves \
+                                 differently ({:?} → {:?}); workspace unchanged",
+                                before.get(drift),
+                                after.get(drift),
+                            ),
+                        )
+                        .subject(subject.to_string()),
+                    ),
+                    Vec::new(),
+                ));
+            }
+        }
+        Ok(())
     }
 
-    /// Applies a planned rename: stale-guard first, then all edited
-    /// files land in one revision. Validation ran at plan time —
-    /// a matching revision means the inputs are identical, so the
-    /// plan is still valid.
+    /// Constructs the validated plan — provenance bound to this
+    /// database, snapshot, and candidate payload.
+    fn make_plan(&self, spec: PlanSpec) -> RenamePlan {
+        RenamePlan {
+            root: spec.root,
+            symbol: spec.symbol,
+            old_name: spec.old_name,
+            new_name: spec.new_name,
+            target: spec.target,
+            revision: self.revision,
+            db_id: self.id(),
+            workspace_fp: self.workspace_fingerprint(),
+            candidate_fp: sources_fingerprint(&spec.new_sources),
+            edits: spec.edits,
+            new_sources: spec.new_sources,
+        }
+    }
+
+    /// Applies a validated plan. Provenance is re-verified before any
+    /// mutation, in this order:
+    ///
+    /// 1. **database incarnation** — the plan must come from *this*
+    ///    `Db`; a plan cannot cross sessions, even between two
+    ///    databases at the same revision (`E_PLAN_MISMATCH`).
+    /// 2. **revision** — the workspace must not have changed since
+    ///    planning (`E_STALE_REVISION`).
+    /// 3. **workspace fingerprint** — the full registered-source
+    ///    snapshot must still match what was validated.
+    /// 4. **candidate fingerprint** — the `new_sources` payload must
+    ///    be byte-identical to the validated candidate.
+    /// 5. **expected bytes** — every edit's span must still cover
+    ///    exactly the old name in the live source.
+    ///
+    /// Only then do all edited files land in one `set_sources`
+    /// revision bump — rejection happens before any mutation.
     pub fn apply_rename(&mut self, plan: &RenamePlan) -> Result<RenameReport, RenameError> {
+        if plan.db_id != self.id() {
+            return Err(RenameError::PlanMismatch(Box::new(
+                Diagnostic::error(
+                    Code::PlanMismatch,
+                    "rename plan was produced by a different database \
+                     session; re-plan against this workspace",
+                )
+                .subject(plan.symbol.clone()),
+            )));
+        }
         if self.revision != plan.revision {
             return Err(RenameError::Stale {
                 planned: plan.revision,
                 current: self.revision,
             });
+        }
+        if self.workspace_fingerprint() != plan.workspace_fp {
+            return Err(RenameError::PlanMismatch(Box::new(
+                Diagnostic::error(
+                    Code::PlanMismatch,
+                    "workspace contents changed since the rename plan \
+                     was validated; re-plan and retry",
+                )
+                .subject(plan.symbol.clone()),
+            )));
+        }
+        if sources_fingerprint(&plan.new_sources) != plan.candidate_fp {
+            return Err(RenameError::PlanMismatch(Box::new(
+                Diagnostic::error(
+                    Code::PlanMismatch,
+                    "rename plan's candidate sources differ from the \
+                     validated payload; re-plan and retry",
+                )
+                .subject(plan.symbol.clone()),
+            )));
+        }
+        for e in &plan.edits {
+            let ok = self
+                .source(e.file.index())
+                .get(e.span.start as usize..e.span.end as usize)
+                .is_some_and(|s| s == plan.old_name);
+            if !ok {
+                return Err(RenameError::PlanMismatch(Box::new(
+                    Diagnostic::error(
+                        Code::PlanMismatch,
+                        format!(
+                            "edit site no longer covers `{}`; \
+                             the plan does not match this source",
+                            plan.old_name
+                        ),
+                    )
+                    .primary(e.span)
+                    .subject(plan.symbol.clone()),
+                )));
+            }
         }
         let files: Vec<usize> = plan.new_sources.iter().map(|(f, _)| *f).collect();
         let edits = plan.edits.len();
@@ -280,16 +750,109 @@ impl Db {
     }
 }
 
-/// `(code, file)` multiset of error diagnostics — what the
-/// shadow-compile must not grow.
-fn error_signature(diags: &Diagnostics) -> FxHashMap<(Code, Option<FileId>), usize> {
-    let mut sig = FxHashMap::default();
-    for d in diags {
-        if d.severity == ontixa_diagnostics::Severity::Error {
-            *sig.entry((d.code, d.file)).or_insert(0) += 1;
+/// One resolved binding site in a function body — local (param,
+/// `let`, `Var`, assign base) or top-level (call, struct literal).
+/// Compared by arena identity: the same site must resolve to the
+/// same symbol before and after a rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Binding {
+    /// A body-local symbol — the raw `SymbolId` (LOCAL_BIT|index).
+    Local(SymbolId),
+    /// A top-level definition — the scope-relative `DefId`.
+    Def(DefId),
+}
+
+/// Every statement in `body` — statements live inside `Block`
+/// expression nodes; iterating the flat arena reaches each exactly
+/// once.
+fn body_stmts(body: &HirBody) -> Vec<&HirStmt> {
+    let mut out = Vec::new();
+    for e in &body.exprs {
+        if let HirExprKind::Block { stmts, .. } = &e.kind {
+            out.extend(stmts.iter());
         }
     }
-    sig
+    out
+}
+
+/// The ordered binding sequence of a body: every `Var`, assign
+/// base, `let` decl, call and struct-literal site, in arena order.
+/// Two bodies with identical semantics produce identical sequences;
+/// any element drift means a reference would bind elsewhere.
+fn binding_seq(body: &HirBody) -> Vec<Binding> {
+    let mut seq = Vec::new();
+    for e in &body.exprs {
+        match &e.kind {
+            HirExprKind::Var(s) => seq.push(Binding::Local(*s)),
+            HirExprKind::Call { def, .. } | HirExprKind::StructLit { def, .. } => {
+                seq.push(Binding::Def(*def));
+            }
+            HirExprKind::Block { stmts, .. } => {
+                for s in stmts.iter() {
+                    match s {
+                        HirStmt::Let { symbol, .. } => seq.push(Binding::Local(*symbol)),
+                        HirStmt::Assign { target, .. } => {
+                            seq.push(Binding::Local(target.base));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    seq
+}
+
+/// The body-local symbol selected by item-relative byte `rel`:
+/// a decl name (param or `let`), a `Var` reference, or an
+/// assign-place base token — resolved through the body's own
+/// binding info, never by name matching.
+fn local_target(body: &HirBody, rel: u32, interner: &Interner) -> Option<SymbolId> {
+    // Decl sites first — a name token is its own binding, not a ref.
+    for sym in &body.local_symbols {
+        if sym.span.contains(rel) {
+            return Some(sym.id);
+        }
+    }
+    // References: `Var` spans cover the name token exactly.
+    for e in &body.exprs {
+        if let HirExprKind::Var(s) = &e.kind {
+            if e.span.contains(rel) {
+                return Some(*s);
+            }
+        }
+    }
+    // Assign targets: the base token is the head of the place span.
+    for stmt in body_stmts(body) {
+        if let HirStmt::Assign { target, .. } = stmt {
+            let rec = &body.local_symbols[target.base.local_index()];
+            let len = interner.resolve(rec.name).len() as u32;
+            if rel >= target.span.start && rel < target.span.start + len {
+                return Some(target.base);
+            }
+        }
+    }
+    None
+}
+
+/// FNV-1a-64 over the candidate `(file, text)` pairs — the
+/// fingerprint apply re-checks so a plan's payload can never be
+/// swapped after validation. Same constants as
+/// `Db::workspace_fingerprint`.
+fn sources_fingerprint(sources: &[(usize, String)]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |bytes: &[u8]| {
+        for b in bytes {
+            h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(&(sources.len() as u64).to_le_bytes());
+    for (f, text) in sources {
+        mix(&(*f as u64).to_le_bytes());
+        mix(text.as_bytes());
+    }
+    h
 }
 
 /// `new_name` must lex as exactly one identifier token — keywords
