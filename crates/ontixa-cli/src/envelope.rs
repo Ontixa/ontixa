@@ -26,7 +26,7 @@
 //!   `io` (unreadable file), `runtime` (trap / missing entry),
 //!   `internal` (ICE).
 
-use ontixa_db::{Artifacts, StageTiming};
+use ontixa_db::StageTiming;
 use ontixa_diagnostics::{Diagnostic, Diagnostics, diagnostic_json};
 use ontixa_source::SourceFile;
 use serde_json::{Map as JsonMap, Value as Json};
@@ -160,12 +160,12 @@ pub fn emit_failure(f: CompileFailure, command: &'static str, json: bool) -> Exi
 }
 
 /// Renders diagnostics for human mode; returns the exit code.
-pub fn emit_human_diags(a: &Artifacts, sf: &SourceFile) -> ExitCode {
-    if !a.diags.is_empty() {
-        let diags: Vec<Diagnostic> = a.diags.iter().cloned().collect();
+pub fn emit_human_diags(diags: &Diagnostics, sf: &SourceFile) -> ExitCode {
+    if !diags.is_empty() {
+        let diags: Vec<Diagnostic> = diags.iter().cloned().collect();
         eprint!("{}", ontixa_diagnostics::render_all(&diags, sf));
     }
-    if a.diags.has_errors() {
+    if diags.has_errors() {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -173,9 +173,9 @@ pub fn emit_human_diags(a: &Artifacts, sf: &SourceFile) -> ExitCode {
 }
 
 /// Prints `--timings` output for human mode.
-pub fn print_timings(a: &Artifacts) {
+pub fn print_timings(timings: &[StageTiming]) {
     eprintln!("timings:");
-    for t in &a.timings {
+    for t in timings {
         eprintln!("  {:>9}  {:>7} µs", t.stage, t.nanos / 1000);
     }
 }

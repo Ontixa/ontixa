@@ -43,7 +43,7 @@ pub fn run(
             eprint!("{}", ontixa_diagnostics::render(d, &sf));
             return ExitCode::from(1);
         }
-        let code = emit_human_diags(&a, &sf);
+        let code = emit_human_diags(&a.diags, &sf);
         match symbol {
             None => {
                 println!("{}", file.display());
@@ -52,7 +52,7 @@ pub fn run(
             Some(_) => print_symbol(&result["symbol"]),
         }
         if timings {
-            print_timings(&a);
+            print_timings(&a.timings);
         }
         code
     }

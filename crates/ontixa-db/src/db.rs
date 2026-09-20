@@ -74,6 +74,26 @@ impl Artifacts {
     }
 }
 
+/// The result of a check-only demand: diagnostics plus stage timings.
+/// Everything `check` needs, without the graph, MIR, or assembled
+/// [`Artifacts`] that `compile` builds — see [`Db::check`].
+#[derive(Debug, Clone)]
+pub struct CheckReport {
+    /// Source revision these diagnostics were produced from.
+    pub checked_revision: u64,
+    /// All diagnostics, sorted for deterministic output.
+    pub diags: Diagnostics,
+    /// Per-stage timings for the check.
+    pub timings: Vec<StageTiming>,
+}
+
+impl CheckReport {
+    /// True when no stage produced an error-severity diagnostic.
+    pub fn is_valid(&self) -> bool {
+        !self.diags.has_errors()
+    }
+}
+
 /// One file's input state. The text is duplicated into the `Source`
 /// memo entry — the file slot is only a fallback for out-of-band
 /// evaluation.
@@ -195,6 +215,29 @@ impl Db {
     /// [`Db::compile`].
     pub fn compile_owned(&mut self, file: usize) -> Artifacts {
         self.compile(file).clone()
+    }
+
+    /// Checks `file` without building run artifacts. Demands
+    /// `Diagnostics` only, so `Graph`, `MirBody`, and `Compile`
+    /// never evaluate — validation reuses the same pipeline as
+    /// `compile` but stops at ownership. The right demand for CLI
+    /// `check`, daemon `check`, and rename validation.
+    pub fn check(&mut self, file: usize) -> CheckReport {
+        let key = QueryKey::Diagnostics(FileId::new(file as u32));
+        self.top_demand(key);
+        let Value::Diags(diags) = &self.memo.get(&key).expect("diagnostics evaluated").value else {
+            unreachable!("Diagnostics produced wrong value")
+        };
+        let mut out = Diagnostics::new();
+        for d in diags {
+            out.push(d.clone());
+        }
+        out.sort();
+        CheckReport {
+            checked_revision: self.revision,
+            diags: out,
+            timings: self.stage_timings(),
+        }
     }
 
     /// A function's lowered body, by name. `None` for `data` defs and
@@ -365,6 +408,29 @@ impl Db {
     /// eval that ran).
     pub(crate) fn take_last_run(&mut self) -> Vec<(QueryKey, u64)> {
         self.last_run.clone()
+    }
+
+    /// Aggregates the last demand's per-query timings into per-stage
+    /// timings (multiple `hir`/`types`/`mir` evals sum into one stage
+    /// entry, in demand order).
+    pub(crate) fn stage_timings(&mut self) -> Vec<StageTiming> {
+        let mut order = Vec::new();
+        let mut agg: FxHashMap<&'static str, u64> = FxHashMap::default();
+        for (k, nanos) in self.take_last_run() {
+            if let Some(v) = agg.get_mut(k.name()) {
+                *v += nanos;
+            } else {
+                agg.insert(k.name(), nanos);
+                order.push(k.name());
+            }
+        }
+        order
+            .into_iter()
+            .map(|stage| StageTiming {
+                stage,
+                nanos: agg[stage],
+            })
+            .collect()
     }
 
     /// A file's text (fallback for the `Source` eval arm).

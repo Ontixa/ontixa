@@ -55,8 +55,13 @@ fn check_json_is_one_document() {
         .iter()
         .filter_map(|t| t["stage"].as_str())
         .collect();
-    for stage in ["lex+parse", "ast", "hir", "types", "ownership", "mir"] {
+    // check is check-only: frontend stages run, backend stages
+    // (graph, mir, assemble) must not — that's the check/build split.
+    for stage in ["lex+parse", "ast", "hir", "types", "ownership"] {
         assert!(stages.contains(&stage), "missing stage {stage}");
+    }
+    for stage in ["graph", "mir", "assemble"] {
+        assert!(!stages.contains(&stage), "check ran {stage}");
     }
     assert!(out.status.success());
 }

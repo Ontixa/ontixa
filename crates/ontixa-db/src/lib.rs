@@ -20,7 +20,7 @@ mod db;
 mod eval;
 mod query;
 
-pub use db::{Artifacts, Db, StageTiming};
+pub use db::{Artifacts, CheckReport, Db, StageTiming};
 pub use query::{CheckedBody, QueryKey, QueryStats};
 
 #[cfg(test)]
@@ -188,6 +188,69 @@ fn sink(p: P) -> i32 { return p.x; }";
         // Ownership's value changed → mir bodies that read contracts
         // re-lower: sink's body changed, main's contract input did.
         assert_eq!(evald_defs(&db, mir_key), ["main", "sink"]);
+    }
+
+    /// Check-vs-build split: `check` demands `Diagnostics` only —
+    /// no graph, no MIR, no artifact assembly. This is the evidence
+    /// that validation never pays for codegen-facing work.
+    #[test]
+    fn check_does_not_build_graph_or_mir() {
+        let mut db = Db::new();
+        let f = db.add_source(THREE_FN);
+        let report = db.check(f);
+        assert!(report.is_valid());
+        let evals = db.last_evaluated();
+        assert!(!evals.is_empty());
+        for key in &evals {
+            assert!(
+                !matches!(
+                    key,
+                    QueryKey::Graph(_) | QueryKey::MirBody(_) | QueryKey::Compile(_)
+                ),
+                "check evaluated {key:?}"
+            );
+        }
+        assert!(!db.stats().executed.contains_key("graph"));
+        assert!(!db.stats().executed.contains_key("mir"));
+        assert!(!db.stats().executed.contains_key("assemble"));
+    }
+
+    /// `check` is not a weaker pass — it reports exactly the
+    /// diagnostics `compile` collects, in the same sorted order.
+    #[test]
+    fn check_reports_same_diagnostics_as_compile() {
+        let src = "fn main() -> i32 { return nope; }";
+        let mut db = Db::new();
+        let f = db.add_source(src);
+        let report = db.check(f);
+        assert!(report.diags.has_errors());
+        let codes: Vec<_> = report.diags.iter().map(|d| d.code).collect();
+        let mut db2 = Db::new();
+        let f2 = db2.add_source(src);
+        let a = db2.compile(f2);
+        let codes2: Vec<_> = a.diags.iter().map(|d| d.code).collect();
+        assert_eq!(codes, codes2);
+    }
+
+    /// After `check`, `compile` evaluates only the missing tail —
+    /// graph + mir + assemble. Frontend work stays memoized.
+    #[test]
+    fn check_then_compile_evaluates_only_backend() {
+        let mut db = Db::new();
+        let f = db.add_source(THREE_FN);
+        assert!(db.check(f).is_valid());
+        assert!(db.compile(f).is_valid());
+        let evals = db.last_evaluated();
+        assert!(!evals.is_empty(), "compile must build graph+mir");
+        for key in &evals {
+            assert!(
+                matches!(
+                    key,
+                    QueryKey::Graph(_) | QueryKey::MirBody(_) | QueryKey::Compile(_)
+                ),
+                "compile re-ran frontend query {key:?}"
+            );
+        }
     }
 
     /// Multi-file: editing file B touches nothing in file A.
