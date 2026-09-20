@@ -183,7 +183,21 @@ impl Db {
     /// next `compile` is a pure verification pass.
     pub fn set_source(&mut self, file: usize, text: impl Into<String>) {
         self.revision += 1;
-        let text: Arc<str> = text.into().into();
+        self.write_source(file, text.into().into());
+    }
+
+    /// Replaces several files' texts in a *single* revision bump —
+    /// the atomic apply underneath rename transactions.
+    pub fn set_sources(&mut self, edits: &[(usize, String)]) {
+        self.revision += 1;
+        for (file, text) in edits {
+            self.write_source(*file, text.as_str().into());
+        }
+    }
+
+    /// Writes one file's `Source` entry, preserving `computed_at`
+    /// when the text is unchanged. Caller bumps the revision.
+    fn write_source(&mut self, file: usize, text: Arc<str>) {
         self.files[file].text = text.clone();
         let key = QueryKey::Source(FileId::new(file as u32));
         let computed_at = match self.memo.get(&key) {
@@ -200,6 +214,12 @@ impl Db {
                 verified_at: self.revision,
             },
         );
+    }
+
+    /// The current input revision — bumped once per `set_source(s)`
+    /// batch. Rename plans capture it for the stale guard.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The current source text of a file.
@@ -467,7 +487,9 @@ impl Db {
     }
 
     /// The revision a query's value last changed at (`0` = never).
-    pub(crate) fn stamp(&self, key: QueryKey) -> u64 {
+    /// Two demands reporting the same stamp mean the value compared
+    /// equal across the recompute — early cutoff held.
+    pub fn stamp(&self, key: QueryKey) -> u64 {
         self.memo.get(&key).map_or(0, |e| e.computed_at)
     }
 

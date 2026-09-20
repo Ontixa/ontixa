@@ -114,6 +114,26 @@ enum Cmd {
         #[arg(long)]
         timings: bool,
     },
+    /// Preview or apply a semantic rename across the workspace.
+    /// Edits are found through the compiler's own name resolution —
+    /// the decl site, `use` paths, and every call/type/literal path
+    /// that resolves to the definition — never text matching.
+    Rename {
+        /// The `.ixa` source file (workspace root).
+        file: PathBuf,
+        /// The definition to rename (`name` or `module::name`).
+        symbol: String,
+        /// The new name — must be a valid identifier that does not
+        /// collide with an existing binding.
+        new_name: String,
+        /// Validate and write the renamed files to disk. Without
+        /// this flag the command only previews the planned edits.
+        #[arg(long)]
+        apply: bool,
+        /// Emit machine-readable JSON (one envelope document).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// What `main` returns: the process exit code.
@@ -141,6 +161,13 @@ fn main() -> ExitCode {
             json,
             timings,
         } => explain_cmd(file, symbol, json, timings),
+        Cmd::Rename {
+            file,
+            symbol,
+            new_name,
+            apply,
+            json,
+        } => rename_cmd(file, symbol, new_name, apply, json),
     }
 }
 
@@ -476,4 +503,71 @@ fn explain_cmd(file: PathBuf, symbol: Option<String>, json: bool, timings: bool)
         Err(c) => return c,
     };
     explain::run(&file, sfs, a, symbol.as_deref(), json, timings)
+}
+
+/// `rename`: plan → (preview | validate+apply+write). Rejections are
+/// diagnostics — never a mutation.
+fn rename_cmd(
+    file: PathBuf,
+    symbol: String,
+    new_name: String,
+    apply: bool,
+    json: bool,
+) -> ExitCode {
+    let (sfs, outcome) = match with_db(&file, |db, f| match db.plan_rename(f, &symbol, &new_name) {
+        Err(e) => Err(e),
+        Ok(plan) if apply => db.apply_rename(&plan).map(|r| (plan, Some(r))),
+        Ok(plan) => Ok((plan, None)),
+    }) {
+        Ok(x) => x,
+        Err(f) => return emit_failure(f, "rename", json),
+    };
+    match outcome {
+        Err(e) => {
+            let diags = e.diagnostics();
+            if json {
+                let mut env = Envelope::new("rename");
+                for d in &diags {
+                    env = env.extra_diagnostic(d, &sfs);
+                }
+                env.emit()
+            } else {
+                eprint!("{}", ontixa_diagnostics::render_all_in(&diags, &sfs));
+                ExitCode::from(1)
+            }
+        }
+        Ok((plan, report)) => {
+            if let Some(rep) = &report {
+                // Apply landed in the Db — persist every touched
+                // file; a mid-write IO failure rolls back to the
+                // captured originals.
+                if let Err(e) = ontixa_cli::rename::persist(&plan, &sfs) {
+                    return emit_failure(CompileFailure::Io(e), "rename", json);
+                }
+                if json {
+                    return Envelope::new("rename")
+                        .diagnostics(&rep.diags, &sfs)
+                        .result(ontixa_cli::rename::applied_json(&plan, rep, &sfs))
+                        .emit();
+                }
+                let code = emit_human_diags(&rep.diags, &sfs);
+                println!(
+                    "renamed {} → {}: {} edit(s), {} file(s) written",
+                    plan.old_name,
+                    plan.new_name,
+                    rep.edits,
+                    rep.files.len(),
+                );
+                return code;
+            }
+            if json {
+                return Envelope::new("rename")
+                    .result(ontixa_cli::rename::plan_json(&plan, &sfs, false))
+                    .emit();
+            }
+            ontixa_cli::rename::print_preview(&plan, &sfs);
+            eprintln!("dry run — pass --apply to write the changes");
+            ExitCode::SUCCESS
+        }
+    }
 }

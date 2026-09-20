@@ -472,3 +472,206 @@ fn daemon_dep_edit_reruns_only_dep_chain() {
     assert_eq!(bodies.len(), 1, "expected one dirty body: {ev:?}");
     assert!(bodies[0].contains("DefKey(0:1:"), "{ev:?}");
 }
+
+// ---------- rename transactions ----------
+
+#[test]
+fn rename_preview_lists_edits_and_writes_nothing() {
+    let main = ws_fixture(
+        "renprev",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }\n\
+         fn norm(x: i32) -> i32 { return x; }",
+    );
+    let math_path = main.parent().unwrap().join("math.ixa");
+    let math_before = std::fs::read_to_string(&math_path).unwrap();
+    let out = ontixa(&[
+        "rename",
+        main.to_str().unwrap(),
+        "math::double",
+        "twice",
+        "--json",
+    ]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true, "{d}");
+    assert_eq!(d["result"]["applied"], false);
+    let edits = d["result"]["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 2, "{edits:?}");
+    assert!(
+        edits
+            .iter()
+            .any(|e| e["file"].as_str().unwrap().contains("math.ixa"))
+    );
+    assert!(
+        edits
+            .iter()
+            .any(|e| e["file"].as_str().unwrap().contains("main.ixa"))
+    );
+    assert!(edits.iter().all(|e| e["replace"] == "twice"));
+    assert_eq!(out.status.code(), Some(0));
+    // Preview never mutates disk.
+    assert_eq!(std::fs::read_to_string(&math_path).unwrap(), math_before);
+}
+
+#[test]
+fn rename_apply_writes_all_files_and_program_still_runs() {
+    let main = ws_fixture(
+        "renapply",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }",
+    );
+    let out = ontixa(&[
+        "rename",
+        main.to_str().unwrap(),
+        "math::double",
+        "twice",
+        "--apply",
+        "--json",
+    ]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true, "{d}");
+    assert_eq!(d["result"]["applied"], true);
+    let dir = main.parent().unwrap();
+    let math = std::fs::read_to_string(dir.join("math.ixa")).unwrap();
+    let main_src = std::fs::read_to_string(&main).unwrap();
+    assert!(math.contains("fn twice("), "{math}");
+    assert!(main_src.contains("math::twice(21)"), "{main_src}");
+    // The renamed workspace still compiles and runs.
+    let run = ontixa(&["run", main.to_str().unwrap(), "--json"]);
+    assert_eq!(envelope(&run)["result"]["value"], 42);
+}
+
+#[test]
+fn rename_rejections_emit_codes_and_write_nothing() {
+    let main = ws_fixture(
+        "renrej",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }\n\
+         fn norm(x: i32) -> i32 { return x; }",
+    );
+    let math_path = main.parent().unwrap().join("math.ixa");
+    let math_before = std::fs::read_to_string(&math_path).unwrap();
+    let reject = |args: &[&str]| {
+        let out = ontixa(args);
+        let d = envelope(&out);
+        assert_eq!(d["success"], false, "{d}");
+        assert_eq!(out.status.code(), Some(1));
+        d["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["code"].as_str().map(String::from))
+            .collect::<Vec<_>>()
+    };
+    let m = main.to_str().unwrap();
+    let conflict = reject(&["rename", m, "math::double", "norm", "--apply", "--json"]);
+    assert!(
+        conflict.iter().any(|c| c == "E_NAME_CONFLICT"),
+        "{conflict:?}"
+    );
+    let invalid = reject(&["rename", m, "math::double", "123x", "--json"]);
+    assert!(invalid.iter().any(|c| c == "E_INVALID_NAME"), "{invalid:?}");
+    let unknown = reject(&["rename", m, "math::nope", "x", "--json"]);
+    assert!(
+        unknown.iter().any(|c| c == "E_UNKNOWN_SYMBOL"),
+        "{unknown:?}"
+    );
+    // Rejected applies never touch disk.
+    assert_eq!(std::fs::read_to_string(&math_path).unwrap(), math_before);
+}
+
+/// An IO failure mid-apply rolls already-written files back — the
+/// workspace is never left half-renamed on disk.
+#[test]
+// Restoring writability is required for the fixture — clippy's
+// `set_readonly(false)` suspicion doesn't apply to test cleanup.
+#[allow(clippy::permissions_set_readonly_false)]
+fn rename_apply_io_failure_leaves_no_partial_writes() {
+    let main = ws_fixture(
+        "renio",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }",
+    );
+    let dir = main.parent().unwrap();
+    let math_path = dir.join("math.ixa");
+    let main_before = std::fs::read_to_string(&main).unwrap();
+    let math_before = std::fs::read_to_string(&math_path).unwrap();
+    // `math.ixa` unwritable: `main.ixa` (file 0) writes first, then
+    // the math write fails — persist rolls main back.
+    let mut perms = std::fs::metadata(&math_path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&math_path, perms).unwrap();
+    let out = ontixa(&[
+        "rename",
+        main.to_str().unwrap(),
+        "math::double",
+        "twice",
+        "--apply",
+        "--json",
+    ]);
+    let mut perms = std::fs::metadata(&math_path).unwrap().permissions();
+    perms.set_readonly(false);
+    std::fs::set_permissions(&math_path, perms).unwrap();
+    let d = envelope(&out);
+    assert_eq!(d["success"], false, "{d}");
+    assert_eq!(d["error"]["kind"], "io");
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), main_before);
+    assert_eq!(std::fs::read_to_string(&math_path).unwrap(), math_before);
+}
+
+/// The daemon `rename` op: preview carries the planned revision,
+/// apply requires it, and a stale revision is rejected before any
+/// mutation — the session's sources are only updated in-memory
+/// (`new_sources` are returned for the client to persist).
+#[test]
+fn daemon_rename_previews_applies_and_guards_stale() {
+    let main = ws_fixture(
+        "daemonren",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }",
+    );
+    let p = main.to_str().unwrap();
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "rename", "path": p, "symbol": "math::double", "to": "twice"}),
+    ]);
+    assert_eq!(rs[1]["success"], true, "{:?}", rs[1]);
+    assert_eq!(rs[1]["result"]["applied"], false);
+    let rev = rs[1]["result"]["revision"].as_u64().unwrap();
+    assert!(rs[1]["result"]["edits"].as_array().unwrap().len() >= 2);
+
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        // Apply naming the wrong revision → E_STALE_REVISION.
+        serde_json::json!({"op": "rename", "path": p, "symbol": "math::double", "to": "twice", "apply": true, "revision": rev + 9}),
+        // Apply with the planned revision → applied in-memory.
+        serde_json::json!({"op": "rename", "path": p, "symbol": "math::double", "to": "twice", "apply": true, "revision": rev}),
+        // The revision bumped — the same plan is now stale.
+        serde_json::json!({"op": "rename", "path": p, "symbol": "math::twice", "to": "triple", "apply": true, "revision": rev}),
+    ]);
+    let stale: Vec<&str> = rs[1]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x["code"].as_str())
+        .collect();
+    assert!(stale.contains(&"E_STALE_REVISION"), "{:?}", rs[1]);
+    assert_eq!(rs[2]["success"], true, "{:?}", rs[2]);
+    assert_eq!(rs[2]["result"]["applied"], true);
+    let srcs = rs[2]["result"]["new_sources"].as_array().unwrap();
+    assert_eq!(srcs.len(), 2);
+    assert!(
+        srcs.iter()
+            .all(|s| s["text"].as_str().unwrap().contains("twice"))
+    );
+    let stale2: Vec<&str> = rs[3]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x["code"].as_str())
+        .collect();
+    assert!(stale2.contains(&"E_STALE_REVISION"), "{:?}", rs[3]);
+    // The daemon never writes disk — math.ixa is untouched.
+    let math = std::fs::read_to_string(main.parent().unwrap().join("math.ixa")).unwrap();
+    assert!(math.contains("fn double("), "{math}");
+}
