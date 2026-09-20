@@ -136,6 +136,17 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Resolve a pending source-transaction journal under a
+    /// workspace directory — finishes a committed transaction or
+    /// rolls one back that never swapped. Safe to run on a clean
+    /// tree; reports `clean` when nothing is pending.
+    Recover {
+        /// The workspace directory to inspect for `.ontixa-tx-*.journal`.
+        dir: PathBuf,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// What `main` returns: the process exit code.
@@ -170,6 +181,7 @@ fn main() -> ExitCode {
             apply,
             json,
         } => rename_cmd(file, symbol, new_name, apply, json),
+        Cmd::Recover { dir, json } => recover_cmd(dir, json),
     }
 }
 
@@ -580,5 +592,62 @@ fn rename_cmd(
             eprintln!("dry run — pass --apply to write the changes");
             ExitCode::SUCCESS
         }
+    }
+}
+
+/// `ontixa recover <dir>` — resolves pending `.ontixa-tx-*.journal`
+/// files left by a persistence transaction that died in-flight.
+/// Idempotent; a clean tree reports `clean` and exits 0. A
+/// `conflict` exits non-zero — the journal, staged bytes and
+/// backups are left in place for manual resolution.
+fn recover_cmd(dir: PathBuf, json: bool) -> ExitCode {
+    use ontixa_cli::persist::RecoveryOutcome;
+    let outcomes = ontixa_cli::persist::recover(&dir);
+    let conflict = outcomes
+        .iter()
+        .any(|o| matches!(o, RecoveryOutcome::Conflict { .. }));
+    if json {
+        let docs: Vec<serde_json::Value> = outcomes
+            .iter()
+            .map(|o| match o {
+                RecoveryOutcome::Clean => serde_json::json!({"status": "clean"}),
+                RecoveryOutcome::Committed { tx, files } => serde_json::json!({
+                    "status": "committed", "tx": tx, "files": files,
+                }),
+                RecoveryOutcome::RolledBack { tx, files } => serde_json::json!({
+                    "status": "rolled_back", "tx": tx, "files": files,
+                }),
+                RecoveryOutcome::Conflict { tx, path } => serde_json::json!({
+                    "status": "conflict", "tx": tx, "path": path,
+                }),
+            })
+            .collect();
+        let code = Envelope::new("recover")
+            .result(serde_json::json!({ "outcomes": docs }))
+            .emit();
+        return if conflict { ExitCode::from(1) } else { code };
+    }
+    for o in &outcomes {
+        match o {
+            RecoveryOutcome::Clean => println!("clean — no pending transaction"),
+            RecoveryOutcome::Committed { tx, files } => {
+                println!("committed {tx}: {files} file(s) finalized");
+            }
+            RecoveryOutcome::RolledBack { tx, files } => {
+                println!("rolled back {tx}: {files} file(s) untouched");
+            }
+            RecoveryOutcome::Conflict { tx, path } => {
+                eprintln!(
+                    "conflict {tx}: {} matches neither the pre- nor \
+                     post-transaction snapshot — journal preserved",
+                    path.display()
+                );
+            }
+        }
+    }
+    if conflict {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }

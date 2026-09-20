@@ -583,9 +583,6 @@ fn rename_rejections_emit_codes_and_write_nothing() {
 /// An IO failure mid-apply rolls already-written files back — the
 /// workspace is never left half-renamed on disk.
 #[test]
-// Restoring writability is required for the fixture — clippy's
-// `set_readonly(false)` suspicion doesn't apply to test cleanup.
-#[allow(clippy::permissions_set_readonly_false)]
 fn rename_apply_io_failure_leaves_no_partial_writes() {
     let main = ws_fixture(
         "renio",
@@ -596,11 +593,10 @@ fn rename_apply_io_failure_leaves_no_partial_writes() {
     let math_path = dir.join("math.ixa");
     let main_before = std::fs::read_to_string(&main).unwrap();
     let math_before = std::fs::read_to_string(&math_path).unwrap();
-    // `math.ixa` unwritable: `main.ixa` (file 0) writes first, then
-    // the math write fails — persist rolls main back.
-    let mut perms = std::fs::metadata(&math_path).unwrap().permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&math_path, perms).unwrap();
+    // A pending transaction journal blocks any new write to the
+    // workspace — deterministic on every platform.
+    let journal = dir.join(".ontixa-tx-dead.journal");
+    std::fs::write(&journal, "{ not valid json").unwrap();
     let out = ontixa(&[
         "rename",
         main.to_str().unwrap(),
@@ -609,14 +605,30 @@ fn rename_apply_io_failure_leaves_no_partial_writes() {
         "--apply",
         "--json",
     ]);
-    let mut perms = std::fs::metadata(&math_path).unwrap().permissions();
-    perms.set_readonly(false);
-    std::fs::set_permissions(&math_path, perms).unwrap();
     let d = envelope(&out);
     assert_eq!(d["success"], false, "{d}");
     assert_eq!(d["error"]["kind"], "io");
+    assert!(
+        d["error"]["message"].as_str().unwrap().contains("pending"),
+        "{d}"
+    );
+    // Nothing was written; the journal is preserved.
     assert_eq!(std::fs::read_to_string(&main).unwrap(), main_before);
     assert_eq!(std::fs::read_to_string(&math_path).unwrap(), math_before);
+    assert!(journal.exists());
+
+    // `ontixa recover` reports the corrupt journal as a conflict
+    // (exit 1) and preserves it — it never guesses.
+    let out = ontixa(&["recover", dir.to_str().unwrap(), "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true, "{d}");
+    assert_eq!(d["result"]["outcomes"][0]["status"], "conflict", "{d}");
+    assert!(journal.exists());
+
+    // With the journal removed, recovery is a clean no-op.
+    std::fs::remove_file(&journal).unwrap();
+    let out = ontixa(&["recover", dir.to_str().unwrap()]);
+    assert!(out.status.success(), "{out:?}");
 }
 
 /// The daemon `rename` op: preview carries the planned revision,

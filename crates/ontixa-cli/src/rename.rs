@@ -10,6 +10,7 @@ use crate::envelope::Envelope;
 use ontixa_db::{RenameError, RenamePlan, RenameReport};
 use ontixa_source::SourceFile;
 use serde_json::{Value as Json, json};
+use std::path::PathBuf;
 
 /// The display name of file `f` in `sfs` (indexed by `FileId`).
 fn file_name(sfs: &[SourceFile], f: usize) -> String {
@@ -68,47 +69,56 @@ pub fn rejection_json(e: &RenameError, sfs: &[SourceFile]) -> Json {
     env.into_parts().0
 }
 
-/// Persists every `new_sources` entry to its path on disk.
+/// Persists every `new_sources` entry through the staged
+/// transaction engine in [`crate::persist`]:
 ///
-/// Stale-guard first: before any file is touched, each file's
-/// current disk bytes must match the source snapshot the plan was
-/// validated against — an external edit between load/plan and
-/// persist is a rejection, never a silent overwrite.
-///
-/// Then all-or-nothing in effect: every original is captured *before*
-/// the first write, so a mid-loop IO failure rolls the already
-/// written files back to their previous bytes — a rejected apply
-/// never leaves a half-renamed workspace on disk.
+/// * **stale guard** — each destination's disk bytes must equal the
+///   source snapshot the plan validated, or nothing is written;
+/// * **journal + staging** — candidates land in `*.stage` siblings,
+///   never truncating a live file;
+/// * **swap + rollback** — `dest → .bak` then `.stage → dest` per
+///   file, with progress in the journal; a mid-commit failure
+///   restores every swapped file, and a rollback failure leaves the
+///   journal for [`crate::persist::recover`].
 pub fn persist(plan: &RenamePlan, sfs: &[SourceFile]) -> Result<(), String> {
     let mut files = Vec::with_capacity(plan.new_sources().len());
+    let mut root: Option<PathBuf> = None;
     for (f, text) in plan.new_sources() {
         let Some(path) = sfs[*f].path() else {
             continue;
         };
-        let original =
-            std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        // The disk must still hold exactly the bytes the rename was
-        // validated against — raw-byte compare, no normalization.
-        if original != sfs[*f].text().as_bytes() {
-            return Err(format!(
-                "{} changed on disk since the rename was validated; \
-                 not overwriting external edits",
-                path.display()
-            ));
-        }
-        files.push((path.to_path_buf(), original, text));
+        // `before` is the validated snapshot — the disk stale guard
+        // compares live bytes against exactly this.
+        files.push(crate::persist::TxFile {
+            path: path.clone(),
+            before: sfs[*f].text().as_bytes().to_vec(),
+            after: text.clone().into_bytes(),
+        });
+        root = Some(match root {
+            None => parent_or_root(path),
+            Some(r) => common_ancestor(&r, &parent_or_root(path)),
+        });
     }
-    for (i, (path, _, text)) in files.iter().enumerate() {
-        if let Err(e) = std::fs::write(path, text) {
-            // Roll back the files already written — best effort,
-            // their originals are in memory.
-            for (p, original, _) in &files[..i] {
-                let _ = std::fs::write(p, original);
-            }
-            return Err(format!("cannot write {}: {e}", path.display()));
+    let Some(root) = root else {
+        return Ok(());
+    };
+    crate::persist::persist_tx(&root, &files).map_err(|e| e.to_string())
+}
+
+fn parent_or_root(p: &std::path::Path) -> PathBuf {
+    p.parent()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| p.to_path_buf())
+}
+
+fn common_ancestor(a: &std::path::Path, b: &std::path::Path) -> PathBuf {
+    let mut cur = a.to_path_buf();
+    while !b.starts_with(&cur) {
+        if !cur.pop() {
+            break;
         }
     }
-    Ok(())
+    cur
 }
 
 /// Human preview of a plan: one line per edit, stable order.
