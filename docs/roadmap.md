@@ -24,16 +24,31 @@ structured diagnostics, memoized DB.
 
 ## M3 — language breadth + modules
 
+Shipped (semantic-workspace campaign, PRs #3–#5):
+
+- multi-file workspaces: file-stem modules, `use m` / `use m::x [as
+  y]` / `m::x` paths, file-tagged diagnostics, `DefKey(root,file,
+  name)` identity (ADR-0013)
+- item-relative spans: offset-shifting edits preserve per-def
+  semantic values (see semantic-identity.md)
+- semantic rename transactions: plan → preview → shadow-compile →
+  revision-guarded atomic apply; CLI `rename` + daemon `rename` op
+  (ADR-0014); demo: `examples/workspace/demo.sh`
+- incremental engine fix: `verified_at` freshness (a changed dep no
+  longer forces permanent re-eval of equal-valued dependents)
+
+Remaining:
+
 - arrays/slices + `for` loops
 - `match`-like selection over `data` variants (enum data)
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - string ops + `str` slices
 - more primitives (`u*`, `f32`, `char`)
-- multi-file modules + `use`
 - `ontixa fmt` over the lossless CST
-- semantic patches (structured apply)
+- semantic patches beyond rename (structured apply of arbitrary
+  edits — the transaction shape exists; generality doesn't)
 - finer-grained file-level queries (per-item parse, incremental
-  graph) — M2's honest weakness; see benchmarks/README.md
+  graph) — the honest weakness stands; see benchmarks/README.md
 
 ## M4 — execution
 

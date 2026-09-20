@@ -3,24 +3,24 @@
 ## The pipeline
 
 ```text
-Source text (.ixa)
+Source text (.ixa files — one workspace, file stems are module names)
   │
   ▼  ontixa-syntax — lexer + recursive-descent parser
 Lossless CST (rowan green tree)
   │
   ▼  ontixa-ast — canonical owned AST
-AstModule
+AstModule (items + use decls + paths)
   │
-  ▼  ontixa-hir — name resolution, scopes, interning
-HirModule (ModuleScope + bodies, ExprId arena)
+  ▼  ontixa-hir — workspace name resolution, per-file envs, interning
+HirModule (ModuleScope: FileEnv per file + bodies, ExprId arenas)
   │
   ▼  ontixa-types — total type analysis, fills field indices
 TypeTables
   │
   ▼  ontixa-memory — ownership/borrow/move/escape inference
-OwnershipTables (per-function param contracts)
+OwnershipTables (per-function param contracts, DefKey-keyed facts)
   │
-  ├─▶ ontixa-semantic — Semantic Program Graph (JSON)
+  ├─▶ ontixa-semantic — Semantic Program Graph (JSON, per-file modules)
   │
   ▼  ontixa-mir — typed CFG, temporaries, terminators
 MirModule
@@ -29,8 +29,10 @@ MirModule
 Value
 ```
 
-`ontixa-db` wraps the whole pipeline in a memoized `Db`; `ontixa-cli`
-exposes it as the `ontixa` binary.
+`ontixa-db` wraps the whole pipeline in a memoized `Db` — the query
+engine (ADR-0008) plus the rename transaction engine (ADR-0014).
+`ontixa-cli` exposes it as the `ontixa` binary and the `ontixad`
+daemon (ADR-0012).
 
 ## Design choices and why
 
@@ -46,7 +48,10 @@ Lowering to a canonical AST gives later stages a clean owned tree.
 Every binding in HIR is a `SymbolId`; every definition a `DefId`.
 Unresolved names become *poison* nodes so later passes never branch
 on "did resolution fail". Text is interned (`InternId`) — semantic
-structures carry `u32`s, not strings.
+structures carry `u32`s, not strings. Resolution is workspace-shaped:
+`use` decls and `m::x` paths resolve through each file's `FileEnv`
+(members, bound modules, imports) built by `resolve_workspace`
+(ADR-0013).
 
 ### Total type checking
 
@@ -78,8 +83,21 @@ Cell-based storage (`Rc<RefCell<Value>>`) makes borrow/mut sharing
 real. When a backend arrives, its differential tests run against
 this executor.
 
-### The database is file-granular (for now)
+### The database is per-definition incremental
 
-`Db` memoizes per-file artifact bundles keyed by content revision.
-The salsa-style fine-grained design — per-query early cutoff — is
-ADR-0004; milestone 1 needs the *shape*, not the sophistication.
+`Db` is a salsa-style query engine: `Parse`/`Ast`/`Scope` are
+file/workspace-shaped inputs; `AstItem`/`HirBody`/`BodyTypes`/
+`MirBody` are per-`DefKey` derived values with early cutoff — a
+recomputed value comparing equal stops invalidation from
+propagating (ADR-0004/0008). Spans in derived values are
+item-relative, so offset-shifting edits preserve semantic identity
+(see `docs/semantic-identity.md`). `Db::set_sources` is the atomic
+multi-file write rename transactions commit through.
+
+### Renames are transactions
+
+`plan_rename` resolves sites semantically (never text), validates,
+and shadow-compiles the edited sources in a scratch `Db` — pure, no
+live mutation. `apply_rename` re-checks the planned revision
+(`E_STALE_REVISION` on drift) and commits every file in one
+revision bump (ADR-0014).

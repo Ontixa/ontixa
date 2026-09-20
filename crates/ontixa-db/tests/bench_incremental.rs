@@ -40,6 +40,28 @@ fn wide_src(n: usize) -> String {
     s
 }
 
+/// A multi-module workspace: `mods` dep modules of `n / mods`
+/// functions each, plus a root that imports every dep and calls one.
+/// Returns `(root_source, dep_sources)` — dep `i` registers as
+/// `FileId(i + 1)` under module name `dep{i}`.
+fn ws_src(mods: usize, n: usize) -> (String, Vec<String>) {
+    let per = n / mods;
+    let mut root = String::new();
+    let mut deps = Vec::new();
+    for m in 0..mods {
+        root.push_str(&format!("use dep{m};\n"));
+        let mut dep = String::new();
+        for i in 0..per {
+            dep.push_str(&format!(
+                "fn h{m}_{i}(p: i32) -> i32 {{ return p + {i}; }}\n"
+            ));
+        }
+        deps.push(dep);
+    }
+    root.push_str("fn main() -> i32 { return dep0::h0_0(0); }");
+    (root, deps)
+}
+
 fn median_ms(mut v: Vec<f64>) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[v.len() / 2]
@@ -93,6 +115,41 @@ fn bench_row(name: &str, src: &str, edited: &str, iters: usize) {
     );
 }
 
+/// A workspace benchmark row: same protocol as [`bench_row`], but
+/// the edit lands in `deps[0]` (file 1) while the root and sibling
+/// modules stay untouched — the eval count shows whether per-def
+/// invalidation survives module boundaries.
+fn bench_ws_row(name: &str, root: &str, deps: &[String], edited_dep: &str, iters: usize) {
+    let mut db = Db::new();
+    let f0 = db.add_source_named("main", root);
+    for (i, d) in deps.iter().enumerate() {
+        db.add_source_named(format!("dep{i}"), d);
+    }
+    let (cold_ms, cold_evals) = timed(&mut db, f0);
+
+    let mut noop = Vec::new();
+    let mut edit = Vec::new();
+    let mut edit_evals = Vec::new();
+    for _ in 0..iters {
+        let (ms, evals) = timed(&mut db, f0);
+        assert_eq!(evals, 0, "no-op recompile must evaluate nothing");
+        noop.push(ms);
+        db.set_source(1, edited_dep);
+        let (ms, n) = timed(&mut db, f0);
+        edit.push(ms);
+        edit_evals.push(n);
+        db.set_source(1, &deps[0]);
+        timed(&mut db, f0);
+    }
+    println!(
+        "| {name} | {cold_ms:.2} | {} | {:.3} | {:.3} | {} |",
+        cold_evals,
+        median_ms(noop),
+        median_ms(edit),
+        edit_evals[0],
+    );
+}
+
 #[test]
 #[ignore = "benchmark — run with --ignored --nocapture"]
 fn incremental_compile_bench() {
@@ -131,6 +188,34 @@ fn incremental_compile_bench() {
         "wide-256",
         &w256,
         &w256.replacen("return p + 0;", "return p + 9;", 1),
+        iters,
+    );
+
+    // Multi-module: 256 defs across 4 dep modules + a root. The edit
+    // lands in dep0 — sibling modules' defs must stay memoized.
+    let (root, deps) = ws_src(4, 256);
+    bench_ws_row(
+        "ws-4x64 body",
+        &root,
+        &deps,
+        &deps[0].replacen("return p + 0;", "return p + 9;", 1),
+        iters,
+    );
+    // Shifted edit: a leading comment moves *every* absolute offset
+    // in dep0. Item-relative spans still compare equal — the eval
+    // count should match the plain body edit, not the whole module.
+    bench_ws_row(
+        "ws-4x64 shift",
+        &root,
+        &deps,
+        &format!("// shifted\n{}", deps[0]),
+        iters,
+    );
+    // Same evidence single-file: a top-of-file comment in chain-256.
+    bench_row(
+        "chain-256 shift",
+        &c256,
+        &format!("// shifted\n{c256}"),
         iters,
     );
 }

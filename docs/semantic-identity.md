@@ -10,7 +10,7 @@ references possible.
 |---|---|---|
 | `FileId` | `Db` session | Stable: dense index of `add_source` order |
 | `InternId` | `Db` session | Stable: the session interner is append-only |
-| `DefKey` | `(FileId, InternId)` | **Stable across revisions** — a def's identity is its file + name |
+| `DefKey` | `(root, file, name)` — `FileId × FileId × InternId` | **Stable across revisions** — a def's identity is its workspace root + file + name (ADR-0013) |
 | `DefId` | one `ModuleScope` value | Per-revision: dense index; shifts when defs are added/removed/reordered |
 | `SymbolId` (module) | one `ModuleScope` value | Module-level symbols only: defs and `data` fields |
 | `SymbolId` (local, `LOCAL_BIT` set) | one `HirBody` | Body-local: params then `let` bindings, in order |
@@ -58,13 +58,31 @@ touch the body arena.
 its dependencies' diagnostics (demand order) plus its own eval's.
 The `Diagnostics` query therefore only has to collect direct deps.
 
-## Known limitation
+## Item-relative spans
 
-`Span` offsets are file-absolute. An edit that changes the byte length
-of one item shifts the spans of every following item, so those items'
-`AstItem`/`HirBody` values compare unequal and re-run. Cutoff is exact
-for same-length edits, edits inside a single body (that body's chain
-re-runs alone), and trailing-only changes. Making spans body-relative
-(offsets from the item's start, rebased at diagnostic render) would
-remove this class of false invalidation — deferred to a later
-milestone.
+Per-definition query values carry spans **relative to their owning
+item's start**, not file-absolute: `AstItem` rebases the item's AST
+on demand, and `Scope` stores `.rel(base)` spans for defs, fields,
+and params. An edit that shifts byte offsets — a leading comment, a
+longer sibling item — leaves every unaffected item's `AstItem`,
+`HirBody`, `BodyTypes`, and `MirBody` comparing equal, so their
+chains cut off without re-running.
+
+Absolute coordinates are restored at the boundaries that need them:
+`Diagnostics` re-anchors item-relative spans to file offsets when it
+collects them (each diagnostic's `origin` records which item
+produced it), the semantic graph translates with a per-def base
+table, and `explain` re-bases spans before rendering. Source text,
+the CST, and `Ast`/`Parse` stay file-absolute — only *derived
+per-item values* are relative.
+
+## Remaining granularity boundary
+
+`Parse`/`Ast` are still file-granular: any edit re-runs them for the
+edited file, and every `AstItem` in that file re-verifies (cheaply —
+they compare equal on trivia-only or shift-only changes). The
+workspace-level `Scope`/`Ownership` queries aggregate over the whole
+root's env, so a rename or signature edit anywhere re-runs them —
+their dependents still cut off when values compare equal. What
+survives every case: *unchanged definitions never change semantic
+value*, which is the guarantee incremental consumers key on.
