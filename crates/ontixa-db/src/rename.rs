@@ -8,15 +8,24 @@
 //!   AST for sites that resolve to the target definition — the decl
 //!   name, `use` paths, call/type/struct-literal paths — and produces
 //!   one [`RenameEdit`] per name token.
+//! - **baseline policy**: rename requires a workspace free of
+//!   error diagnostics (`E_BASELINE_ERRORS` otherwise). Warnings do
+//!   not block. With a clean baseline, *any* error the
+//!   shadow-compile produces is new by definition — no signature
+//!   matching, no multiplicity guessing.
 //! - **validate** rejects an invalid new name, a name that would
 //!   collide with an existing binding in any affected file, or a
 //!   rename whose *shadow-compile* (a scratch `Db` built from the
-//!   edited sources) produces diagnostics the original did not.
-//! - **apply** checks the workspace revision is still the one the
-//!   plan was computed against (`E_STALE_REVISION` otherwise) and
+//!   edited sources) produces any error diagnostic.
+//! - **apply** re-verifies plan *provenance* — the plan's database
+//!   incarnation, workspace fingerprint, revision, candidate
+//!   fingerprint, and the expected bytes under every edit — then
 //!   installs every edited file in a single `set_sources` revision
-//!   bump — failed validation never mutates, and there is no
-//!   partial mutation: either all edits land or none do.
+//!   bump. A plan cannot cross databases or snapshots, and its
+//!   candidate bytes cannot be substituted after validation: the
+//!   fields are private and the plan is only constructible by
+//!   [`Db::plan_rename`]. Failed validation never mutates, and
+//!   there is no partial mutation: either all edits land or none do.
 //!
 //! Aliased imports (`use m::x as y`) keep their local name: only the
 //! path's member segment rewrites, references through `y` are
@@ -46,28 +55,84 @@ pub struct RenameEdit {
     pub replace: String,
 }
 
-/// A validated rename: the edits and the revision they were
-/// computed against. Apply with [`Db::apply_rename`]; pass `revision`
-/// back over the wire for the stale guard.
+/// A validated rename. All fields are private: a plan is only
+/// constructible by [`Db::plan_rename`] after validation, so its
+/// candidate bytes can never be substituted and it can never be
+/// applied to a different database or source snapshot. Apply with
+/// [`Db::apply_rename`]; pass `revision` back over the wire for the
+/// stale guard.
 #[derive(Debug, Clone)]
 pub struct RenamePlan {
     /// The workspace root the plan was computed under.
-    pub root: usize,
+    root: usize,
     /// The symbol as written (`x` or `m::x`).
-    pub symbol: String,
+    symbol: String,
     /// The target's current name.
-    pub old_name: String,
+    old_name: String,
     /// The requested new name.
-    pub new_name: String,
+    new_name: String,
     /// Root-aware identity of the renamed definition.
-    pub target: DefKey,
+    target: DefKey,
     /// `Db::revision` at plan time — the apply-time stale guard.
-    pub revision: u64,
+    revision: u64,
+    /// Incarnation of the `Db` that produced this plan — a plan can
+    /// never cross database sessions.
+    db_id: u64,
+    /// Fingerprint of every registered file's module name and raw
+    /// source bytes at plan time — binds the plan to the exact
+    /// snapshot it validated.
+    workspace_fp: u64,
+    /// Fingerprint of `new_sources` — proves at apply time the
+    /// candidate payload is the one validation approved.
+    candidate_fp: u64,
     /// Every edit, sorted by `(file, span.start)` — the preview.
-    pub edits: Vec<RenameEdit>,
+    edits: Vec<RenameEdit>,
     /// `(file, post-edit text)` for every touched file — what apply
     /// installs atomically.
-    pub new_sources: Vec<(usize, String)>,
+    new_sources: Vec<(usize, String)>,
+}
+
+impl RenamePlan {
+    /// The workspace root the plan was computed under.
+    pub fn root(&self) -> usize {
+        self.root
+    }
+
+    /// The symbol as written (`x` or `m::x`).
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    /// The target's current name.
+    pub fn old_name(&self) -> &str {
+        &self.old_name
+    }
+
+    /// The requested new name.
+    pub fn new_name(&self) -> &str {
+        &self.new_name
+    }
+
+    /// Root-aware identity of the renamed definition.
+    pub fn target(&self) -> DefKey {
+        self.target
+    }
+
+    /// `Db::revision` at plan time — the apply-time stale guard.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Every edit, sorted by `(file, span.start)` — the preview.
+    pub fn edits(&self) -> &[RenameEdit] {
+        &self.edits
+    }
+
+    /// `(file, post-edit text)` for every touched file — what apply
+    /// installs atomically.
+    pub fn new_sources(&self) -> &[(usize, String)] {
+        &self.new_sources
+    }
 }
 
 /// What an applied rename reports back.
@@ -105,6 +170,15 @@ pub enum RenameError {
         /// Revision at apply time.
         current: u64,
     },
+    /// The workspace already reports error diagnostics — rename
+    /// requires a clean baseline (`E_BASELINE_ERRORS`).
+    BaselineErrors(Box<Diagnostic>),
+    /// The plan failed provenance checks at apply time: wrong
+    /// database, workspace fingerprint drift, a tampered candidate,
+    /// or unexpected bytes under an edit (`E_PLAN_MISMATCH`).
+    PlanMismatch(Box<Diagnostic>),
+    /// The symbol kind cannot be renamed (`E_UNSUPPORTED_TARGET`).
+    Unsupported(Box<Diagnostic>),
 }
 
 impl RenameError {
@@ -114,7 +188,10 @@ impl RenameError {
             RenameError::UnknownSymbol(d)
             | RenameError::AmbiguousSymbol(d)
             | RenameError::InvalidName(d)
-            | RenameError::Conflict(d) => vec![d.as_ref().clone()],
+            | RenameError::Conflict(d)
+            | RenameError::BaselineErrors(d)
+            | RenameError::PlanMismatch(d)
+            | RenameError::Unsupported(d) => vec![d.as_ref().clone()],
             RenameError::ValidationFailed(d, extra) => {
                 let mut v = vec![d.as_ref().clone()];
                 v.extend(extra.iter().cloned());
@@ -151,6 +228,35 @@ impl Db {
                 .subject(new_name.to_string()),
             )));
         }
+        // Baseline policy: rename requires an error-free workspace.
+        // Validation compares the candidate against "zero errors",
+        // so a dirty baseline would make the check meaningless —
+        // reject before planning anything.
+        let baseline = self.check(root).diags;
+        let errors: Vec<Diagnostic> = baseline
+            .iter()
+            .filter(|d| d.severity == ontixa_diagnostics::Severity::Error)
+            .cloned()
+            .collect();
+        if !errors.is_empty() {
+            let mut d = Diagnostic::error(
+                Code::BaselineErrors,
+                format!(
+                    "workspace has {} pre-existing error(s); \
+                     rename requires a clean baseline",
+                    errors.len()
+                ),
+            )
+            .subject(symbol.to_string());
+            for e in errors.iter().take(8) {
+                d = d.label(
+                    e.primary.unwrap_or(Span::new(0, 0)),
+                    format!("{}: {}", e.code.as_str(), e.message),
+                );
+            }
+            return Err(RenameError::BaselineErrors(Box::new(d)));
+        }
+
         let scope = self.scope(root);
         let target = resolve_target(&scope, &self.interner, root, symbol)?;
         let def_file = scope.def(target).file;
@@ -194,9 +300,9 @@ impl Db {
         new_sources.sort_by_key(|(f, _)| *f);
 
         // Shadow-compile: build a scratch Db from the edited sources
-        // and demand its diagnostics. Any error the original
-        // workspace did not already produce rejects the rename.
-        let baseline = error_signature(&self.check(root).diags);
+        // and demand its diagnostics. The baseline is error-free (the
+        // gate above), so *any* error diagnostic in the shadow is new —
+        // no signature multiset, no contains_key approximation.
         let mut scratch = Db::new();
         for i in 0..self.file_count() {
             let f = FileId::new(i as u32);
@@ -211,10 +317,7 @@ impl Db {
         let fresh: Vec<Diagnostic> = shadow
             .diags
             .iter()
-            .filter(|d| {
-                d.severity == ontixa_diagnostics::Severity::Error
-                    && !baseline.contains_key(&(d.code, d.file))
-            })
+            .filter(|d| d.severity == ontixa_diagnostics::Severity::Error)
             .cloned()
             .collect();
         if !fresh.is_empty() {
@@ -236,6 +339,7 @@ impl Db {
             return Err(RenameError::ValidationFailed(Box::new(d), fresh));
         }
 
+        let candidate_fp = sources_fingerprint(&new_sources);
         Ok(RenamePlan {
             root,
             symbol: symbol.to_string(),
@@ -243,21 +347,87 @@ impl Db {
             new_name: new_name.to_string(),
             target: scope.def_key(target),
             revision: self.revision,
+            db_id: self.id(),
+            workspace_fp: self.workspace_fingerprint(),
+            candidate_fp,
             edits,
             new_sources,
         })
     }
 
-    /// Applies a planned rename: stale-guard first, then all edited
-    /// files land in one revision. Validation ran at plan time —
-    /// a matching revision means the inputs are identical, so the
-    /// plan is still valid.
+    /// Applies a validated plan. Provenance is re-verified before any
+    /// mutation, in this order:
+    ///
+    /// 1. **database incarnation** — the plan must come from *this*
+    ///    `Db`; a plan cannot cross sessions, even between two
+    ///    databases at the same revision (`E_PLAN_MISMATCH`).
+    /// 2. **revision** — the workspace must not have changed since
+    ///    planning (`E_STALE_REVISION`).
+    /// 3. **workspace fingerprint** — the full registered-source
+    ///    snapshot must still match what was validated.
+    /// 4. **candidate fingerprint** — the `new_sources` payload must
+    ///    be byte-identical to the validated candidate.
+    /// 5. **expected bytes** — every edit's span must still cover
+    ///    exactly the old name in the live source.
+    ///
+    /// Only then do all edited files land in one `set_sources`
+    /// revision bump — rejection happens before any mutation.
     pub fn apply_rename(&mut self, plan: &RenamePlan) -> Result<RenameReport, RenameError> {
+        if plan.db_id != self.id() {
+            return Err(RenameError::PlanMismatch(Box::new(
+                Diagnostic::error(
+                    Code::PlanMismatch,
+                    "rename plan was produced by a different database \
+                     session; re-plan against this workspace",
+                )
+                .subject(plan.symbol.clone()),
+            )));
+        }
         if self.revision != plan.revision {
             return Err(RenameError::Stale {
                 planned: plan.revision,
                 current: self.revision,
             });
+        }
+        if self.workspace_fingerprint() != plan.workspace_fp {
+            return Err(RenameError::PlanMismatch(Box::new(
+                Diagnostic::error(
+                    Code::PlanMismatch,
+                    "workspace contents changed since the rename plan \
+                     was validated; re-plan and retry",
+                )
+                .subject(plan.symbol.clone()),
+            )));
+        }
+        if sources_fingerprint(&plan.new_sources) != plan.candidate_fp {
+            return Err(RenameError::PlanMismatch(Box::new(
+                Diagnostic::error(
+                    Code::PlanMismatch,
+                    "rename plan's candidate sources differ from the \
+                     validated payload; re-plan and retry",
+                )
+                .subject(plan.symbol.clone()),
+            )));
+        }
+        for e in &plan.edits {
+            let ok = self
+                .source(e.file.index())
+                .get(e.span.start as usize..e.span.end as usize)
+                .is_some_and(|s| s == plan.old_name);
+            if !ok {
+                return Err(RenameError::PlanMismatch(Box::new(
+                    Diagnostic::error(
+                        Code::PlanMismatch,
+                        format!(
+                            "edit site no longer covers `{}`; \
+                             the plan does not match this source",
+                            plan.old_name
+                        ),
+                    )
+                    .primary(e.span)
+                    .subject(plan.symbol.clone()),
+                )));
+            }
         }
         let files: Vec<usize> = plan.new_sources.iter().map(|(f, _)| *f).collect();
         let edits = plan.edits.len();
@@ -280,16 +450,23 @@ impl Db {
     }
 }
 
-/// `(code, file)` multiset of error diagnostics — what the
-/// shadow-compile must not grow.
-fn error_signature(diags: &Diagnostics) -> FxHashMap<(Code, Option<FileId>), usize> {
-    let mut sig = FxHashMap::default();
-    for d in diags {
-        if d.severity == ontixa_diagnostics::Severity::Error {
-            *sig.entry((d.code, d.file)).or_insert(0) += 1;
+/// FNV-1a-64 over the candidate `(file, text)` pairs — the
+/// fingerprint apply re-checks so a plan's payload can never be
+/// swapped after validation. Same constants as
+/// `Db::workspace_fingerprint`.
+fn sources_fingerprint(sources: &[(usize, String)]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |bytes: &[u8]| {
+        for b in bytes {
+            h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
         }
+    };
+    mix(&(sources.len() as u64).to_le_bytes());
+    for (f, text) in sources {
+        mix(&(*f as u64).to_le_bytes());
+        mix(text.as_bytes());
     }
-    sig
+    h
 }
 
 /// `new_name` must lex as exactly one identifier token — keywords

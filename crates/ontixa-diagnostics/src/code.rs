@@ -72,6 +72,16 @@ pub enum Code {
     /// A rename apply arrived with a plan revision older than the
     /// current workspace revision.
     StaleRevision,
+    /// A rename was requested on a workspace that already reports
+    /// error diagnostics — validation requires a clean baseline.
+    BaselineErrors,
+    /// A rename plan failed provenance checks at apply time: wrong
+    /// database/session, workspace fingerprint drift, or a candidate
+    /// payload that no longer matches the validated one.
+    PlanMismatch,
+    /// The requested symbol kind cannot be renamed (e.g. a module
+    /// name, which is the file stem — renaming it renames the file).
+    UnsupportedTarget,
     /// A non-unit function can complete without returning a value.
     MissingReturn,
     /// An integer literal does not fit its required type.
@@ -115,6 +125,9 @@ impl Code {
             Code::NameConflict => "E_NAME_CONFLICT",
             Code::RenameRejected => "E_RENAME_REJECTED",
             Code::StaleRevision => "E_STALE_REVISION",
+            Code::BaselineErrors => "E_BASELINE_ERRORS",
+            Code::PlanMismatch => "E_PLAN_MISMATCH",
+            Code::UnsupportedTarget => "E_UNSUPPORTED_TARGET",
             Code::MissingReturn => "E_MISSING_RETURN",
             Code::LiteralOverflow => "E_LITERAL_OVERFLOW",
             Code::UnsupportedOperation => "E_UNSUPPORTED_OP",

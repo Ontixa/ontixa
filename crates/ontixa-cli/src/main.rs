@@ -553,8 +553,8 @@ fn rename_cmd(
                 let code = emit_human_diags(&rep.diags, &sfs);
                 println!(
                     "renamed {} → {}: {} edit(s), {} file(s) written",
-                    plan.old_name,
-                    plan.new_name,
+                    plan.old_name(),
+                    plan.new_name(),
                     rep.edits,
                     rep.files.len(),
                 );

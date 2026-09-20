@@ -21,14 +21,14 @@ fn file_name(sfs: &[SourceFile], f: usize) -> String {
 /// The plan as a JSON payload: every edit with its file and span.
 pub fn plan_json(plan: &RenamePlan, sfs: &[SourceFile], applied: bool) -> Json {
     json!({
-        "symbol": plan.symbol,
-        "old_name": plan.old_name,
-        "new_name": plan.new_name,
-        "target": format!("{:?}", plan.target),
-        "revision": plan.revision,
+        "symbol": plan.symbol(),
+        "old_name": plan.old_name(),
+        "new_name": plan.new_name(),
+        "target": format!("{:?}", plan.target()),
+        "revision": plan.revision(),
         "applied": applied,
         "edits": plan
-            .edits
+            .edits()
             .iter()
             .map(|e| json!({
                 "file": file_name(sfs, e.file.index()),
@@ -37,7 +37,7 @@ pub fn plan_json(plan: &RenamePlan, sfs: &[SourceFile], applied: bool) -> Json {
             }))
             .collect::<Vec<_>>(),
         "files": plan
-            .new_sources
+            .new_sources()
             .iter()
             .map(|(f, _)| file_name(sfs, *f))
             .collect::<Vec<_>>(),
@@ -70,18 +70,32 @@ pub fn rejection_json(e: &RenameError, sfs: &[SourceFile]) -> Json {
 
 /// Persists every `new_sources` entry to its path on disk.
 ///
-/// All-or-nothing in effect: every original is captured *before*
+/// Stale-guard first: before any file is touched, each file's
+/// current disk bytes must match the source snapshot the plan was
+/// validated against — an external edit between load/plan and
+/// persist is a rejection, never a silent overwrite.
+///
+/// Then all-or-nothing in effect: every original is captured *before*
 /// the first write, so a mid-loop IO failure rolls the already
 /// written files back to their previous bytes — a rejected apply
 /// never leaves a half-renamed workspace on disk.
 pub fn persist(plan: &RenamePlan, sfs: &[SourceFile]) -> Result<(), String> {
-    let mut files = Vec::with_capacity(plan.new_sources.len());
-    for (f, text) in &plan.new_sources {
+    let mut files = Vec::with_capacity(plan.new_sources().len());
+    for (f, text) in plan.new_sources() {
         let Some(path) = sfs[*f].path() else {
             continue;
         };
         let original =
             std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        // The disk must still hold exactly the bytes the rename was
+        // validated against — raw-byte compare, no normalization.
+        if original != sfs[*f].text().as_bytes() {
+            return Err(format!(
+                "{} changed on disk since the rename was validated; \
+                 not overwriting external edits",
+                path.display()
+            ));
+        }
         files.push((path.to_path_buf(), original, text));
     }
     for (i, (path, _, text)) in files.iter().enumerate() {
@@ -101,12 +115,12 @@ pub fn persist(plan: &RenamePlan, sfs: &[SourceFile]) -> Result<(), String> {
 pub fn print_preview(plan: &RenamePlan, sfs: &[SourceFile]) {
     println!(
         "{} → {}: {} edit(s) in {} file(s)",
-        plan.symbol,
-        plan.new_name,
-        plan.edits.len(),
-        plan.new_sources.len(),
+        plan.symbol(),
+        plan.new_name(),
+        plan.edits().len(),
+        plan.new_sources().len(),
     );
-    for e in &plan.edits {
+    for e in plan.edits() {
         println!(
             "  {}:{}..{}  → {}",
             file_name(sfs, e.file.index()),

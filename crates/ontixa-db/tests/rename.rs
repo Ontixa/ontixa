@@ -18,7 +18,7 @@ fn ws(sources: &[(&str, &str)]) -> Db {
 /// Splice the plan's `new_sources` — the text apply would install.
 fn new_text(plan: &ontixa_db::RenamePlan, file: usize) -> &str {
     &plan
-        .new_sources
+        .new_sources()
         .iter()
         .find(|(f, _)| *f == file)
         .expect("file has new source")
@@ -44,12 +44,12 @@ fn preview_covers_decl_and_qualified_sites() {
     let mut db = ws(&[("main", MAIN), ("dep", DEP)]);
     let dep_src = db.source(1).to_string();
     let plan = db.plan_rename(0, "dep::double", "twice").unwrap();
-    assert_eq!(plan.old_name, "double");
+    assert_eq!(plan.old_name(), "double");
     // Two sites: the decl `fn double` in dep, the `double` segment
     // of `dep::double(...)` in main. `norm`/`Vec2` sites untouched.
-    assert_eq!(plan.edits.len(), 2);
+    assert_eq!(plan.edits().len(), 2);
     let dep_file = FileId::new(1);
-    let decl = plan.edits.iter().find(|e| e.file == dep_file).unwrap();
+    let decl = plan.edits().iter().find(|e| e.file == dep_file).unwrap();
     assert_eq!(
         &dep_src[decl.span.start as usize..decl.span.end as usize],
         "double"
@@ -72,7 +72,7 @@ fn unaliased_import_rebinds_references() {
     let plan = db.plan_rename(0, "dep::double", "twice").unwrap();
     // Three sites: decl, use-path segment, the bare `double` call —
     // `use dep::x` rebinds under the new name.
-    assert_eq!(plan.edits.len(), 3);
+    assert_eq!(plan.edits().len(), 3);
     assert!(new_text(&plan, 0).contains("use dep::twice;"));
     assert!(new_text(&plan, 0).contains("return twice(3);"));
 }
@@ -89,7 +89,7 @@ fn aliased_import_keeps_local_name() {
     let plan = db.plan_rename(0, "dep::double", "twice").unwrap();
     // Two sites only: decl + use-path member. The `dbl` alias and
     // every reference through it stay exactly as written.
-    assert_eq!(plan.edits.len(), 2);
+    assert_eq!(plan.edits().len(), 2);
     assert!(new_text(&plan, 0).contains("use dep::twice as dbl;"));
     assert!(new_text(&plan, 0).contains("return dbl(3);"));
     assert!(!new_text(&plan, 0).contains("twice(3)"));
@@ -105,7 +105,7 @@ fn module_alias_is_transparent() {
         ("dep", DEP),
     ]);
     let plan = db.plan_rename(0, "dep::double", "twice").unwrap();
-    assert_eq!(plan.edits.len(), 2);
+    assert_eq!(plan.edits().len(), 2);
     assert!(new_text(&plan, 0).contains("m::twice(3)"));
 }
 
@@ -116,7 +116,7 @@ fn data_rename_covers_type_and_literal_sites() {
     // `Vec2` sites: decl, `use dep::Vec2`, the struct literal,
     // `v: Vec2` param annotation, `-> ...` via `dep::Vec2` — every
     // one resolves to the data def.
-    assert!(plan.edits.len() >= 4, "edits: {:?}", plan.edits);
+    assert!(plan.edits().len() >= 4, "edits: {:?}", plan.edits());
     assert!(new_text(&plan, 1).contains("data Point {"));
     assert!(new_text(&plan, 0).contains("use dep::Point;"));
     assert!(new_text(&plan, 0).contains("Point { x: 3, y: 4 }"));
@@ -267,7 +267,7 @@ fn stale_plan_rejected_without_mutation() {
     let rev = db.revision();
     match db.apply_rename(&plan) {
         Err(RenameError::Stale { planned, current }) => {
-            assert_eq!(planned, plan.revision);
+            assert_eq!(planned, plan.revision());
             assert_eq!(current, rev);
         }
         _ => panic!("expected stale rejection"),

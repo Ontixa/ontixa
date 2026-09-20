@@ -15,6 +15,7 @@
 //! renumber or invalidate another function's cached work.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use ontixa_ast::AstModule;
@@ -109,11 +110,17 @@ struct FileSlot {
     module: String,
 }
 
+/// Process-unique counter giving each `Db` a distinct incarnation
+/// id. Rename plans bind to it, so a plan can never cross database
+/// sessions — even between two `Db`s at the same revision.
+static NEXT_DB_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Query-oriented compiler state. One `Db` is one workspace session:
 /// the memo table, the persistent [`Interner`], and the persistent
 /// [`OwnershipOracle`] all survive across `set_source` edits.
-#[derive(Default)]
 pub struct Db {
+    /// Incarnation id — unique per `Db` within the process.
+    id: u64,
     files: Vec<FileSlot>,
     /// Workspace root per file, installed by `Scope` discovery:
     /// `root_of(dep)` is the file whose `use`-walk reached `dep`.
@@ -137,10 +144,57 @@ pub struct Db {
     stats: QueryStats,
 }
 
+impl Default for Db {
+    fn default() -> Self {
+        Self {
+            id: NEXT_DB_ID.fetch_add(1, Ordering::Relaxed),
+            files: Vec::new(),
+            roots: FxHashMap::default(),
+            interner: Interner::default(),
+            revision: 0,
+            memo: FxHashMap::default(),
+            oracle: OwnershipOracle::default(),
+            frames: Vec::new(),
+            last_run: Vec::new(),
+            stats: QueryStats::default(),
+        }
+    }
+}
+
 impl Db {
     /// An empty database.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// This session's incarnation id — unique per `Db` in the
+    /// process. Rename plans carry it so a validated plan can never
+    /// be applied to a different database, even one at the same
+    /// revision.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// FNV-1a-64 over every registered file's module name and raw
+    /// source bytes. Binds a rename plan to the exact source snapshot
+    /// it validated: any file added, removed, renamed, or edited
+    /// changes the fingerprint. Raw bytes only — no CRLF/Unicode
+    /// normalization, no mtime/size shortcuts.
+    pub(crate) fn workspace_fingerprint(&self) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |bytes: &[u8]| {
+            for b in bytes {
+                h = (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        mix(&(self.files.len() as u64).to_le_bytes());
+        for f in &self.files {
+            mix(f.module.as_bytes());
+            mix(&[0]);
+            mix(f.text.as_bytes());
+            mix(&[0xff]);
+        }
+        h
     }
 
     /// Registers a source file; returns its index. The file provides
@@ -182,13 +236,23 @@ impl Db {
     /// entry keeps its `computed_at` — dependents stay fresh and the
     /// next `compile` is a pure verification pass.
     pub fn set_source(&mut self, file: usize, text: impl Into<String>) {
+        assert!(
+            file < self.files.len(),
+            "set_source: file index out of range"
+        );
         self.revision += 1;
         self.write_source(file, text.into().into());
     }
 
     /// Replaces several files' texts in a *single* revision bump —
-    /// the atomic apply underneath rename transactions.
+    /// the atomic apply underneath rename transactions. All file
+    /// indices are validated before the first write, so a bad index
+    /// can never leave a half-installed batch.
     pub fn set_sources(&mut self, edits: &[(usize, String)]) {
+        assert!(
+            edits.iter().all(|(f, _)| *f < self.files.len()),
+            "set_sources: file index out of range"
+        );
         self.revision += 1;
         for (file, text) in edits {
             self.write_source(*file, text.as_str().into());
