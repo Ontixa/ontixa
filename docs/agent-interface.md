@@ -47,13 +47,15 @@ per line, one schema-1 envelope per line.
 {"op":"set",     "path":"x.ixa", "text":"..."}    → the edit op (auto-opens)
 {"op":"check",   "path":"x.ixa"}                  → check envelope
 {"op":"explain", "path":"x.ixa", "symbol":"s"}    → explain envelope
+{"op":"rename",  "path":"x.ixa", "symbol":"m::s", "to":"new",
+                 "apply":true, "revision":R}      → preview or apply
 {"op":"stats"}                                   → counters + last_evaluated
 {"op":"close",   "path":"x.ixa"}
 {"op":"shutdown"}
 ```
 
 `check`/`explain` results carry `evaluated`: the query keys that
-actually ran this demand — e.g. `HirBody(DefKey(0:3))` after a
+actually ran this demand — e.g. `HirBody(DefKey(0:1:4))` after a
 body-local edit, `[]` on an unmodified recheck. `stats` adds
 cumulative `QueryStats` and oracle fact-reuse counters.
 
@@ -68,9 +70,39 @@ parameter node, carrying `position` and `behavior`. `borrow`/
 `move`/`escape` mean ownership transfers. Ownership flow is a graph
 query, not an inference task.
 
+## Workspaces + rename transactions (semantic-workspace)
+
+Files provide modules named by their stem; `use m;` / `use m::x [as
+y]` / `m::x` resolve through the workspace's per-file envs — never
+text matching. `check`/`explain`/`graph`/`run` on a root file follow
+`use` edges across `.ixa` siblings; diagnostics are file-tagged and
+render against their own `SourceFile`. `DefKey(root:file:name)` is
+the cross-revision symbol identity an agent should hold.
+
+Renames are transactions, not edits (ADR-0014):
+
+1. `ontixa rename main.ixa math::double twice` (or daemon `rename`
+   without `apply`) returns the **plan**: exact per-file spans,
+   post-edit sources, and the `revision` it was planned against —
+   the live `Db` is untouched.
+2. Validation happens before any apply: `E_INVALID_NAME`,
+   `E_UNKNOWN_SYMBOL`/`E_AMBIGUOUS_SYMBOL`, `E_NAME_CONFLICT`
+   (file-tagged), and a shadow compile that rejects with
+   `E_RENAME_REJECTED` if the edited sources introduce new errors.
+3. `apply` (CLI `--apply` / daemon `"apply":true,"revision":R`)
+   commits only if the workspace revision still matches —
+   `E_STALE_REVISION` otherwise, with zero mutation. On success all
+   files land in one revision bump; CLI writes roll back on mid-loop
+   IO failure.
+
+Alias semantics: `use m::x` rebinds, so bare `x` refs rewrite with
+the member segment; `use m::x as y` keeps `y` — only the member
+segment rewrites.
+
 ## Planned (roadmap)
 
 - Semantic patches: `apply` an AST-level edit, serialized as spans +
-  nodes, preserving untouched source exactly.
+  nodes, preserving untouched source exactly — the rename
+  transaction is the first instance of this shape.
 - Evidence-carrying diffs: a patch ships with the diagnostics it
   resolved and the contract deltas it caused.

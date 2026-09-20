@@ -22,7 +22,7 @@ as JSON; agents and tools consume it without parsing source.
 
 | kind       | represents                              |
 | ---------- | --------------------------------------- |
-| `module`   | the compilation unit root               |
+| `module`   | one workspace file's module (stem-named); the root node owns the workspace |
 | `function` | a `fn` definition                       |
 | `data`     | a `data` definition                     |
 | `param`    | a function parameter symbol (attrs: `behavior`, `position`, `escapes`, `evidence`) |

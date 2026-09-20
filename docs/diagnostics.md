@@ -45,7 +45,12 @@ Codes are a public contract. Never reuse; retire instead.
 | `E_MUTABLE_BORROW_OF_IMMUTABLE` | ownership | `borrow_mut` arg lacks `mut` authority |
 | `E_BORROW_CONFLICT`    | ownership | overlapping loans, at least one mutable |
 | `E_MOVE_WHILE_BORROWED` | ownership | move of a place under a live loan |
-| `E_AMBIGUOUS_SYMBOL`   | explain   | symbol query matched >1 symbol   |
+| `E_AMBIGUOUS_SYMBOL`   | explain/rename | symbol query matched >1 symbol |
+| `E_UNKNOWN_MODULE`     | resolve   | `use`/path names an unregistered module |
+| `E_INVALID_NAME`       | rename    | replacement is not a valid identifier |
+| `E_NAME_CONFLICT`      | rename    | new name collides with an existing binding |
+| `E_RENAME_REJECTED`    | rename    | shadow compile surfaced new errors |
+| `E_STALE_REVISION`     | rename    | workspace changed between plan and apply |
 | `E_MISSING_RETURN`     | types     | non-unit fn can fall through     |
 | `E_LITERAL_OVERFLOW`   | types     | literal exceeds its type         |
 | `E_UNSUPPORTED_OP`     | types     | op not defined for operand types |

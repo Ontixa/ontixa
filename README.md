@@ -11,21 +11,24 @@ semantics exposed as first-class data.
 
 ## Status
 
-`0.0.1-dev` — milestone 1: the end-to-end compiler vertical slice.
+`0.0.1-dev` — semantic workspace: multi-module compilation with
+incremental, per-definition semantics and rename transactions.
 
 What works today, end to end:
 
 ```text
-Ontixa source (.ixa)
+Ontixa sources (.ixa files — file stems are module names; use m / m::x)
     -> lexer + lossless CST (rowan)
     -> canonical AST
-    -> HIR (name resolution, lexical scopes)
+    -> HIR (workspace name resolution, per-file envs)
     -> type analysis
     -> ownership / borrow / move / escape inference
     -> Semantic Program Graph (JSON)
     -> typed MIR (CFG)
     -> reference interpreter
-    -> structured diagnostics (human + JSON)
+    -> structured diagnostics (human + JSON, file-tagged)
+    -> incremental query engine (per-DefKey early cutoff)
+    -> semantic rename transactions (plan -> preview -> apply)
 ```
 
 Concretely, this program compiles and runs:
@@ -92,7 +95,14 @@ $ ontixa ast file.ixa              # canonical AST (JSON)
 $ ontixa mir file.ixa              # typed MIR (JSON)
 $ ontixa graph file.ixa            # Semantic Program Graph (JSON)
 $ ontixa explain file.ixa          # inferred contracts + timings
+$ ontixa explain file.ixa m::sym   # a single symbol, qualified ok
+$ ontixa rename file.ixa m::old new         # preview edits
+$ ontixa rename file.ixa m::old new --apply # guarded atomic apply
 ```
+
+`ontixad` is the persistent daemon (NDJSON on stdio): `open`, `set`,
+`check`, `explain`, `rename`, `stats`, `close`, `shutdown` — see
+[docs/agent-interface.md](docs/agent-interface.md).
 
 Common flags: `--json` (machine-readable output), `--timings`
 (per-stage latency). Exit codes: `0` ok, `1` source errors, `2`
@@ -111,12 +121,12 @@ crates/
   ontixa-memory       ownership/borrow/move/escape inference
   ontixa-semantic     Semantic Program Graph
   ontixa-mir          typed CFG
-  ontixa-db           memoized compile database + stage timings
+  ontixa-db           incremental query engine + rename transactions
   ontixa-interpreter  reference executor (semantics oracle)
-  ontixa-cli          the `ontixa` tool
+  ontixa-cli          the `ontixa` tool + `ontixad` daemon
 docs/                 design documentation
 docs/adr/             architecture decision records
-examples/             runnable .ixa programs
+examples/             runnable .ixa programs (+ workspace/ multi-module)
 ```
 
 ## Design docs
@@ -129,6 +139,8 @@ examples/             runnable .ixa programs
 - [docs/diagnostics.md](docs/diagnostics.md) — codes and JSON schema
 - [docs/agent-interface.md](docs/agent-interface.md) — programming
   Ontixa programmatically
+- [docs/semantic-identity.md](docs/semantic-identity.md) — `DefKey`,
+  item-relative spans, incremental guarantees
 - [docs/roadmap.md](docs/roadmap.md) — where this is going
 - [docs/adr/](docs/adr/) — decision records
 
