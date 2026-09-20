@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ontixa-source.workspace = true
 ontixa-diagnostics.workspace = true
+ontixa-ast.workspace = true
 ontixa-hir.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true

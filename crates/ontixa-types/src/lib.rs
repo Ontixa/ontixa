@@ -28,8 +28,11 @@ pub fn check_src(
     ontixa_source::Interner,
     ontixa_diagnostics::Diagnostics,
 ) {
-    let (mut module, interner, mut diags) = ontixa_hir::parse_hir(src);
+    let (ast, mut module, interner, mut diags) = ontixa_hir::parse_hir_ast(src);
     let tables = check_module(&mut module, &interner, &mut diags);
+    // `check_body` emitted item-relative diagnostics tagged with
+    // their owning def — rebase to file-absolute for callers.
+    diags.rebase_tagged(|d| ast.items[d.index()].span().start);
     (module, tables, interner, diags)
 }
 

@@ -196,6 +196,7 @@ fn with_db<T>(
                 ],
                 subject: None,
                 details: Default::default(),
+                origin: None,
             };
             Err(CompileFailure::Ice(sf, Box::new(d)))
         }

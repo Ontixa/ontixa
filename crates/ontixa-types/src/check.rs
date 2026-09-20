@@ -77,13 +77,17 @@ pub fn check_module(
 }
 
 /// Type-checks one function body, filling its `Field.field` indices
-/// in place and appending diagnostics.
+/// in place and appending diagnostics. Diagnostics are emitted in
+/// the body's item-local coordinate space and tagged
+/// `origin = body.def` — callers rebase them (see
+/// [`Diagnostics::rebase_tagged`]).
 pub fn check_body(
     scope: &ModuleScope,
     body: &mut HirBody,
     interner: &Interner,
     diags: &mut Diagnostics,
 ) -> TypeTables {
+    let mark = diags.len();
     let mut exprs = std::mem::take(&mut body.exprs);
     let mut tables = TypeTables {
         expr_types: vec![Ty::Poison; exprs.len()],
@@ -102,6 +106,7 @@ pub fn check_body(
             ret: Ty::Unit,
         };
         ck.run_body(body);
+        ck.diags.tag_origin_from(mark, body.def);
     }
     body.exprs = exprs;
     tables

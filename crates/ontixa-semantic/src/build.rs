@@ -3,23 +3,29 @@
 use crate::graph::{EdgeKind, NodeId, NodeKind, SemanticGraph};
 use ontixa_hir::{DefKind, HirBody, HirExprKind, HirModule, HirStmt, SymbolKind};
 use ontixa_memory::{OwnershipTables, ParamBehavior};
-use ontixa_source::{DefId, ExprId, Interner, SymbolId};
+use ontixa_source::{DefId, ExprId, Interner, Span, SymbolId};
 use ontixa_types::{ModuleTypes, Ty, TypeTables};
 use rustc_hash::FxHashMap;
 use serde_json::json;
 
 /// Builds the semantic program graph for a fully analyzed module.
+///
+/// `bases[def]` is the absolute start offset of `def`'s source item —
+/// scope and body spans are item-relative, so node spans are
+/// translated back to file-absolute for consumers.
 pub fn build_graph(
     module: &HirModule,
     types: &ModuleTypes,
     ownership: &OwnershipTables,
     interner: &Interner,
+    bases: &[u32],
 ) -> SemanticGraph {
     let mut b = Builder {
         module,
         types,
         ownership,
         interner,
+        bases,
         g: SemanticGraph::new(),
         symbol_nodes: FxHashMap::default(),
         expr_nodes: FxHashMap::default(),
@@ -36,10 +42,20 @@ struct Builder<'a> {
     types: &'a ModuleTypes,
     ownership: &'a OwnershipTables,
     interner: &'a Interner,
+    /// `bases[def]` — absolute start of `def`'s item, for rebasing.
+    bases: &'a [u32],
     g: SemanticGraph,
     symbol_nodes: FxHashMap<(DefId, SymbolId), NodeId>,
     expr_nodes: FxHashMap<(DefId, ExprId), NodeId>,
     type_nodes: FxHashMap<Ty, NodeId>,
+}
+
+impl Builder<'_> {
+    /// Rebase an item-relative span belonging to `def` to
+    /// file-absolute.
+    fn abs(&self, def: DefId, span: Span) -> Span {
+        span.abs(self.bases.get(def.index()).copied().unwrap_or(0))
+    }
 }
 
 impl Builder<'_> {
@@ -59,7 +75,9 @@ impl Builder<'_> {
                 DefKind::Function(_) => (NodeKind::Function, self.sym_name(None, def.name)),
                 DefKind::Data(_) => (NodeKind::Data, self.sym_name(None, def.name)),
             };
-            let n = self.g.add_node(kind, label, Some(def.span));
+            let n = self
+                .g
+                .add_node(kind, label, Some(self.abs(def.id, def.span)));
             self.symbol_nodes.insert((def.id, def.name), n);
             self.g.add_edge(module_node, n, EdgeKind::Declares);
             self.g.set_attr(n, "def", json!(def.id.index()));
@@ -71,9 +89,11 @@ impl Builder<'_> {
                 continue; // already added as def nodes
             }
             let owner = sym.owner.unwrap_or(DefId::new(0));
-            let n = self
-                .g
-                .add_node(NodeKind::Field, self.sym_name(None, sym.id), Some(sym.span));
+            let n = self.g.add_node(
+                NodeKind::Field,
+                self.sym_name(None, sym.id),
+                Some(self.abs(owner, sym.span)),
+            );
             self.symbol_nodes.insert((owner, sym.id), n);
             self.g.set_attr(n, "symbol", json!(sym.id.index()));
         }
@@ -128,9 +148,11 @@ impl Builder<'_> {
             if self.symbol_nodes.contains_key(&(def, sym.id)) {
                 continue;
             }
-            let n = self
-                .g
-                .add_node(kind, self.sym_name(Some(body), sym.id), Some(sym.span));
+            let n = self.g.add_node(
+                kind,
+                self.sym_name(Some(body), sym.id),
+                Some(self.abs(def, sym.span)),
+            );
             self.symbol_nodes.insert((def, sym.id), n);
             self.g.set_attr(n, "symbol", json!(sym.id.index()));
         }
@@ -170,7 +192,7 @@ impl Builder<'_> {
                     let n = self.g.add_node(
                         NodeKind::Param,
                         self.interner.resolve(p.name).to_string(),
-                        Some(p.span),
+                        Some(self.abs(def, p.span)),
                     );
                     self.symbol_nodes.insert((def, p.symbol), n);
                     n
@@ -206,7 +228,10 @@ impl Builder<'_> {
                         json!(sum
                             .evidence
                             .iter()
-                            .map(|e| json!({"kind": e.kind.as_str(), "start": e.at.start, "end": e.at.end}))
+                            .map(|e| {
+                                let at = self.abs(def, e.at);
+                                json!({"kind": e.kind.as_str(), "start": at.start, "end": at.end})
+                            })
                             .collect::<Vec<_>>()),
                     );
                 }
@@ -233,7 +258,7 @@ impl Builder<'_> {
         let n = self.g.add_node(
             NodeKind::Param,
             self.interner.resolve(p.name).to_string(),
-            Some(p.span),
+            Some(self.abs(def, p.span)),
         );
         self.symbol_nodes.insert((def, sym), n);
         self.g.set_attr(n, "symbol", json!(sym.index()));
@@ -295,9 +320,11 @@ impl Builder<'_> {
             HirExprKind::StructLit { .. } => "struct_lit",
             HirExprKind::Poison => "poison",
         };
-        let n = self
-            .g
-            .add_node(NodeKind::Expr, kind_name.to_string(), Some(e.span));
+        let n = self.g.add_node(
+            NodeKind::Expr,
+            kind_name.to_string(),
+            Some(self.abs(body.def, e.span)),
+        );
         self.expr_nodes.insert((body.def, id), n);
         self.g.set_attr(n, "expr", json!(id.index()));
         self.g.set_attr(n, "expr_kind", json!(kind_name));
@@ -422,9 +449,11 @@ impl Builder<'_> {
             HirStmt::Expr { expr, .. } => ("expr_stmt", body.expr(*expr).span),
             HirStmt::Return { span, .. } => ("return", *span),
         };
-        let n = self
-            .g
-            .add_node(NodeKind::Stmt, kind_name.to_string(), Some(span));
+        let n = self.g.add_node(
+            NodeKind::Stmt,
+            kind_name.to_string(),
+            Some(self.abs(body.def, span)),
+        );
         self.g.set_attr(n, "stmt_kind", json!(kind_name));
         match stmt {
             HirStmt::Let { symbol, init, .. } => {

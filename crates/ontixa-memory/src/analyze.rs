@@ -254,6 +254,9 @@ pub fn infer_ownership(
         let Some(body) = module.body(def.id) else {
             continue;
         };
+        // Enforcement diagnostics carry the enforced body's
+        // item-relative spans — tag them so the collector can rebase.
+        let mark = diags.len();
         let mut e = Enforcer {
             scope: &module.scope,
             body,
@@ -276,6 +279,8 @@ pub fn infer_ownership(
             );
         }
         e.eval(body.root, Ctx::Move);
+        drop(e);
+        diags.tag_origin_from(mark, def.id);
     }
 
     OwnershipTables {

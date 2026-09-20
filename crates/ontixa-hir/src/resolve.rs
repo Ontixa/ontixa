@@ -59,6 +59,12 @@ impl Resolver<'_> {
         // Pass 1: allocate def symbols + check duplicates, so signatures
         // in any order can reference each other.
         for item in &ast.items {
+            // Spans stored in the scope are item-relative: an edit
+            // that only shifts an item's absolute offset leaves this
+            // `ModuleScope` value unchanged, so dependent queries cut
+            // off instead of re-running. Diagnostics emitted here use
+            // the AST's absolute spans directly.
+            let base = item.span().start;
             let (name_ident, span) = match item {
                 Item::Data(d) => (&d.name, d.span),
                 Item::Fn(f) => (&f.name, f.span),
@@ -74,7 +80,7 @@ impl Resolver<'_> {
                 kind,
                 mutable: false,
                 owner: None,
-                span: name_ident.span,
+                span: name_ident.span.rel(base),
             });
             let def_id = DefId::new(self.defs.len() as u32);
             match item {
@@ -110,29 +116,33 @@ impl Resolver<'_> {
                 },
                 // The *name* span, not the whole item: a body-only edit
                 // must leave the scope value equal so dependent query
-                // results cut off instead of re-running.
-                span: name_ident.span,
+                // results cut off instead of re-running. Item-relative,
+                // like every span stored in the scope.
+                span: name_ident.span.rel(base),
             });
         }
 
         // Pass 2: fill signatures and shapes, resolving type references.
         for (idx, item) in ast.items.iter().enumerate() {
             let def_id = DefId::new(idx as u32);
+            let base = item.span().start;
             match item {
                 Item::Data(d) => {
                     let mut fields: Vec<FieldDef> = Vec::new();
                     let mut field_index: FxHashMap<InternId, u32> = FxHashMap::default();
+                    // Absolute spans of already-seen field names — the
+                    // duplicate-field label must render file-absolute.
+                    let mut field_spans: FxHashMap<InternId, Span> = FxHashMap::default();
                     for f in &d.fields {
                         let fname = self.interner.intern(&f.name.name);
-                        if let Some(prev) = field_index.get(&fname) {
-                            let prev_span = fields[*prev as usize].symbol;
+                        if field_index.contains_key(&fname) {
                             self.diags.push(
                                 Diagnostic::error(
                                     Code::DuplicateField,
                                     format!("field `{}` is defined more than once", f.name.name),
                                 )
                                 .primary(f.name.span)
-                                .label(self.symbols.get(prev_span).span, "previous definition here")
+                                .label(field_spans[&fname], "previous definition here")
                                 .subject(f.name.name.clone()),
                             );
                             continue;
@@ -144,9 +154,10 @@ impl Resolver<'_> {
                             kind: SymbolKind::Field,
                             mutable: false,
                             owner: Some(def_id),
-                            span: f.name.span,
+                            span: f.name.span.rel(base),
                         });
                         field_index.insert(fname, fields.len() as u32);
+                        field_spans.insert(fname, f.name.span);
                         fields.push(FieldDef {
                             symbol,
                             ty,
@@ -160,6 +171,8 @@ impl Resolver<'_> {
                 }
                 Item::Fn(f) => {
                     let mut params = Vec::new();
+                    // Absolute spans of already-seen param names — the
+                    // duplicate-param label renders file-absolute.
                     let mut seen: FxHashMap<InternId, Span> = FxHashMap::default();
                     for (i, p) in f.params.iter().enumerate() {
                         let pname = self.interner.intern(&p.name.name);
@@ -189,7 +202,7 @@ impl Resolver<'_> {
                             name: pname,
                             mutable: p.mutable,
                             ty,
-                            span: p.span,
+                            span: p.span.rel(base),
                         });
                     }
                     let ret = f

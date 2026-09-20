@@ -240,6 +240,7 @@ dependencies = [
 name = "ontixa-memory"
 version = "0.0.1-dev"
 dependencies = [
+ "ontixa-ast",
  "ontixa-diagnostics",
  "ontixa-hir",
  "ontixa-source",
@@ -265,6 +266,7 @@ dependencies = [
 name = "ontixa-semantic"
 version = "0.0.1-dev"
 dependencies = [
+ "ontixa-ast",
  "ontixa-diagnostics",
  "ontixa-hir",
  "ontixa-memory",
@@ -298,6 +300,7 @@ dependencies = [
 name = "ontixa-types"
 version = "0.0.1-dev"
 dependencies = [
+ "ontixa-ast",
  "ontixa-diagnostics",
  "ontixa-hir",
  "ontixa-source",
