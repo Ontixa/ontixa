@@ -121,7 +121,9 @@ enum Cmd {
     Rename {
         /// The `.ixa` source file (workspace root).
         file: PathBuf,
-        /// The definition to rename (`name` or `module::name`).
+        /// What to rename: a top-level definition (`name` or
+        /// `module::name`), or `@<byte-offset>` to select the
+        /// parameter/`let` binding at that position.
         symbol: String,
         /// The new name — must be a valid identifier that does not
         /// collide with an existing binding.
@@ -514,10 +516,19 @@ fn rename_cmd(
     apply: bool,
     json: bool,
 ) -> ExitCode {
-    let (sfs, outcome) = match with_db(&file, |db, f| match db.plan_rename(f, &symbol, &new_name) {
-        Err(e) => Err(e),
-        Ok(plan) if apply => db.apply_rename(&plan).map(|r| (plan, Some(r))),
-        Ok(plan) => Ok((plan, None)),
+    // `@<byte-offset>` selects a body-local binding or parameter
+    // positionally; anything else resolves as a top-level symbol.
+    let at = symbol.strip_prefix('@').and_then(|s| s.parse::<u32>().ok());
+    let (sfs, outcome) = match with_db(&file, |db, f| {
+        let planned = match at {
+            Some(off) => db.plan_rename_at(f, f, off, &new_name),
+            None => db.plan_rename(f, &symbol, &new_name),
+        };
+        match planned {
+            Err(e) => Err(e),
+            Ok(plan) if apply => db.apply_rename(&plan).map(|r| (plan, Some(r))),
+            Ok(plan) => Ok((plan, None)),
+        }
     }) {
         Ok(x) => x,
         Err(f) => return emit_failure(f, "rename", json),

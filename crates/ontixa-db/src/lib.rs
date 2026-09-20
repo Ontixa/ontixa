@@ -23,7 +23,7 @@ mod rename;
 
 pub use db::{Artifacts, CheckReport, Db, StageTiming};
 pub use query::{CheckedBody, QueryKey, QueryStats};
-pub use rename::{RenameEdit, RenameError, RenamePlan, RenameReport};
+pub use rename::{RenameEdit, RenameError, RenamePlan, RenameReport, RenameTarget};
 
 #[cfg(test)]
 mod tests {

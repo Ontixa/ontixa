@@ -230,7 +230,8 @@ fn handle(s: &mut Session, req: &Json) -> Json {
         // edits plus the revision they were computed against; apply
         // requires that revision back as a stale guard. The daemon
         // updates its own sources only — persisting is the client's
-        // job (the response carries the new texts).
+        // job (the response carries the new texts). `at` selects a
+        // local binding by byte offset instead of `symbol`.
         "rename" => match s.ensure_workspace(path) {
             Err(msg) => Envelope::new("rename").error("io", msg, 2).into_parts().0,
             Ok(f) => {
@@ -252,7 +253,11 @@ fn handle(s: &mut Session, req: &Json) -> Json {
                         .into_parts()
                         .0
                 } else {
-                    match s.db.plan_rename(f, symbol, to) {
+                    let planned = match req["at"].as_u64() {
+                        Some(off) => s.db.plan_rename_at(f, f, off as u32, to),
+                        None => s.db.plan_rename(f, symbol, to),
+                    };
+                    match planned {
                         Err(e) => ontixa_cli::rename::rejection_json(&e, &s.source_files()),
                         Ok(plan) if apply => match s.db.apply_rename(&plan) {
                             Err(e) => ontixa_cli::rename::rejection_json(&e, &s.source_files()),
