@@ -19,9 +19,11 @@
 mod db;
 mod eval;
 mod query;
+mod rename;
 
 pub use db::{Artifacts, CheckReport, Db, StageTiming};
 pub use query::{CheckedBody, QueryKey, QueryStats};
+pub use rename::{RenameEdit, RenameError, RenamePlan, RenameReport};
 
 #[cfg(test)]
 mod tests {

@@ -62,6 +62,16 @@ pub enum Code {
     /// A name lookup (e.g. `explain <symbol>`) matched more than one
     /// semantic symbol.
     AmbiguousSymbol,
+    /// A rename's requested new name is not a valid identifier.
+    InvalidName,
+    /// A rename's new name is already bound in an affected file.
+    NameConflict,
+    /// A rename's validation (shadow-compile) produced diagnostics
+    /// the original workspace did not have — nothing was applied.
+    RenameRejected,
+    /// A rename apply arrived with a plan revision older than the
+    /// current workspace revision.
+    StaleRevision,
     /// A non-unit function can complete without returning a value.
     MissingReturn,
     /// An integer literal does not fit its required type.
@@ -101,6 +111,10 @@ impl Code {
             Code::BorrowConflict => "E_BORROW_CONFLICT",
             Code::MoveWhileBorrowed => "E_MOVE_WHILE_BORROWED",
             Code::AmbiguousSymbol => "E_AMBIGUOUS_SYMBOL",
+            Code::InvalidName => "E_INVALID_NAME",
+            Code::NameConflict => "E_NAME_CONFLICT",
+            Code::RenameRejected => "E_RENAME_REJECTED",
+            Code::StaleRevision => "E_STALE_REVISION",
             Code::MissingReturn => "E_MISSING_RETURN",
             Code::LiteralOverflow => "E_LITERAL_OVERFLOW",
             Code::UnsupportedOperation => "E_UNSUPPORTED_OP",

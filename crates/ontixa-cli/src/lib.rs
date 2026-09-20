@@ -3,4 +3,5 @@
 
 pub mod envelope;
 pub mod explain;
+pub mod rename;
 pub mod workspace;

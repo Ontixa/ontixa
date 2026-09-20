@@ -200,6 +200,68 @@ fn handle(s: &mut Session, req: &Json) -> Json {
                 e.into_parts().0
             }
         },
+        // `rename` is a transaction: preview returns the planned
+        // edits plus the revision they were computed against; apply
+        // requires that revision back as a stale guard. The daemon
+        // updates its own sources only — persisting is the client's
+        // job (the response carries the new texts).
+        "rename" => match s.ensure_workspace(path) {
+            Err(msg) => Envelope::new("rename").error("io", msg, 2).into_parts().0,
+            Ok(f) => {
+                let symbol = req["symbol"].as_str().unwrap_or("");
+                let to = req["to"].as_str().unwrap_or("");
+                let apply = req["apply"].as_bool().unwrap_or(false);
+                if apply && req["revision"].as_u64() != Some(s.db.revision()) {
+                    let d = ontixa_diagnostics::Diagnostic::error(
+                        ontixa_diagnostics::Code::StaleRevision,
+                        format!(
+                            "workspace changed since the rename was planned \
+                             (revision {} → {}); re-plan and retry",
+                            req["revision"].as_u64().unwrap_or(0),
+                            s.db.revision(),
+                        ),
+                    );
+                    Envelope::new("rename")
+                        .extra_diagnostic(&d, &s.source_files())
+                        .into_parts()
+                        .0
+                } else {
+                    match s.db.plan_rename(f, symbol, to) {
+                        Err(e) => ontixa_cli::rename::rejection_json(&e, &s.source_files()),
+                        Ok(plan) if apply => match s.db.apply_rename(&plan) {
+                            Err(e) => ontixa_cli::rename::rejection_json(&e, &s.source_files()),
+                            Ok(rep) => {
+                                let sfs = s.source_files();
+                                let mut result =
+                                    ontixa_cli::rename::applied_json(&plan, &rep, &sfs);
+                                result["new_sources"] = json!(
+                                    plan.new_sources
+                                        .iter()
+                                        .map(|(f, text)| json!({
+                                            "file": sfs[*f].name(),
+                                            "path": sfs[*f].path().map(|p| p.display().to_string()),
+                                            "text": text,
+                                        }))
+                                        .collect::<Vec<_>>()
+                                );
+                                Envelope::new("rename")
+                                    .diagnostics(&rep.diags, &sfs)
+                                    .result(result)
+                                    .into_parts()
+                                    .0
+                            }
+                        },
+                        Ok(plan) => {
+                            let sfs = s.source_files();
+                            Envelope::new("rename")
+                                .result(ontixa_cli::rename::plan_json(&plan, &sfs, false))
+                                .into_parts()
+                                .0
+                        }
+                    }
+                }
+            }
+        },
         "stats" => {
             Envelope::new("daemon")
                 .result(stats_result(&s.db))
