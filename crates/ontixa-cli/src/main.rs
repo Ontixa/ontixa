@@ -17,7 +17,7 @@ use ontixa_cli::envelope::{
     CompileFailure, Envelope, emit_failure, emit_human_diags, print_timings,
 };
 use ontixa_cli::explain;
-use ontixa_db::{Artifacts, Db};
+use ontixa_db::{Artifacts, CheckReport, Db};
 use ontixa_diagnostics::{Code, Diagnostic, Severity};
 use ontixa_interpreter::Value;
 use ontixa_source::{FileId, SourceFile, Span};
@@ -146,11 +146,14 @@ fn main() -> ExitCode {
 
 // ---------- shared plumbing ----------
 
-/// Reads a file, compiles it through `Db` inside `catch_unwind`, and
-/// returns the source file handle plus artifacts. Failures are values
-/// (`CompileFailure`), not printed side effects — the caller picks the
-/// rendering.
-fn compile(file: &Path) -> Result<(SourceFile, Artifacts), CompileFailure> {
+/// Reads a file, runs `work` on a fresh `Db` inside `catch_unwind`,
+/// and returns the source file handle plus `work`'s output. The ICE
+/// boundary lives here: any panic inside the pipeline becomes an
+/// `I_INTERNAL` diagnostic, never a bare crash.
+fn with_db<T>(
+    file: &Path,
+    work: impl FnOnce(&mut Db, usize) -> T,
+) -> Result<(SourceFile, T), CompileFailure> {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -166,12 +169,10 @@ fn compile(file: &Path) -> Result<(SourceFile, Artifacts), CompileFailure> {
         Some(file.to_path_buf()),
         text.clone(),
     );
-    // The ICE boundary: any panic inside the pipeline becomes an
-    // `I_INTERNAL` diagnostic, never a bare crash.
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut db = Db::new();
         let f = db.add_source(text);
-        db.compile_owned(f)
+        work(&mut db, f)
     }));
     match result {
         Ok(a) => Ok((sf, a)),
@@ -217,23 +218,42 @@ fn compiled(
     }
 }
 
+/// Compiles a file through `Db::compile` — the full artifact path
+/// (graph + MIR), for commands that consume them.
+fn compile(file: &Path) -> Result<(SourceFile, Artifacts), CompileFailure> {
+    with_db(file, |db, f| db.compile_owned(f))
+}
+
+/// Checks a file through `Db::check` — diagnostics only, no graph or
+/// MIR. The cheap path for `check`.
+fn checked(
+    file: &Path,
+    command: &'static str,
+    json: bool,
+) -> Result<(SourceFile, CheckReport), ExitCode> {
+    match with_db(file, |db, f| db.check(f)) {
+        Ok(x) => Ok(x),
+        Err(f) => Err(emit_failure(f, command, json)),
+    }
+}
+
 // ---------- commands ----------
 
 fn check(file: PathBuf, json: bool, timings: bool) -> ExitCode {
-    let (sf, a) = match compiled(&file, "check", json) {
+    let (sf, report) = match checked(&file, "check", json) {
         Ok(x) => x,
         Err(c) => return c,
     };
     if json {
-        let mut e = Envelope::new("check").diagnostics(&a.diags, &sf);
+        let mut e = Envelope::new("check").diagnostics(&report.diags, &sf);
         if timings {
-            e = e.timings(&a.timings);
+            e = e.timings(&report.timings);
         }
         return e.emit();
     }
-    let code = emit_human_diags(&a, &sf);
+    let code = emit_human_diags(&report.diags, &sf);
     if timings {
-        print_timings(&a);
+        print_timings(&report.timings);
     }
     if code == ExitCode::SUCCESS {
         eprintln!("{}: ok", file.display());
@@ -254,7 +274,7 @@ fn run(file: PathBuf, entry: String, json: bool, timings: bool) -> ExitCode {
             }
             e.emit()
         } else {
-            emit_human_diags(&a, &sf)
+            emit_human_diags(&a.diags, &sf)
         };
     }
     let interp = ontixa_interpreter::Interp::new(&a.mir, &a.module, &a.interner);
@@ -275,7 +295,7 @@ fn run(file: PathBuf, entry: String, json: bool, timings: bool) -> ExitCode {
             } else {
                 println!("{}", interp.show(&v));
                 if timings {
-                    print_timings(&a);
+                    print_timings(&a.timings);
                 }
                 ExitCode::SUCCESS
             }
@@ -421,7 +441,7 @@ fn dump(file: PathBuf, json: bool, what: &'static str) -> ExitCode {
             .result(Json::Object(res))
             .emit();
     }
-    let code = emit_human_diags(&a, &sf);
+    let code = emit_human_diags(&a.diags, &sf);
     println!("{}", serde_json::to_string_pretty(&payload).unwrap());
     code
 }

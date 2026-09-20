@@ -17,9 +17,8 @@ use ontixa_mir::{MirBody, MirModule};
 use ontixa_semantic::SemanticGraph;
 use ontixa_source::{DefKey, FileId, InternId};
 use ontixa_types::ModuleTypes;
-use rustc_hash::FxHashMap;
 
-use crate::db::{Artifacts, Db, StageTiming};
+use crate::db::{Artifacts, Db};
 use crate::query::{CheckedBody, QueryKey, Value};
 
 /// Evaluates `key`, returning its value plus the diagnostics emitted
@@ -314,25 +313,7 @@ fn compile(db: &mut Db, f: FileId) -> Arc<Artifacts> {
         diags.push(d);
     }
     diags.sort();
-    // Aggregate per-query timings into per-stage timings (multiple
-    // `hir`/`types`/`mir` query evals sum into one stage entry).
-    let mut order = Vec::new();
-    let mut agg: FxHashMap<&'static str, u64> = FxHashMap::default();
-    for (k, nanos) in db.take_last_run() {
-        if let Some(v) = agg.get_mut(k.name()) {
-            *v += nanos;
-        } else {
-            agg.insert(k.name(), nanos);
-            order.push(k.name());
-        }
-    }
-    let timings = order
-        .into_iter()
-        .map(|stage| StageTiming {
-            stage,
-            nanos: agg[stage],
-        })
-        .collect();
+    let timings = db.stage_timings();
     Arc::new(Artifacts {
         built_revision: db.revision,
         ast: (*module_ast).clone(),

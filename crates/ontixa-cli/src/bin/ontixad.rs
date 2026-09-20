@@ -134,9 +134,11 @@ fn handle(s: &mut Session, req: &Json) -> Json {
             Err(msg) => Envelope::new("check").error("io", msg, 2).into_parts().0,
             Ok(f) => {
                 let sf = s.source_file(path, f);
-                let (a, ev) = compile(s, f);
+                // Check-only demand: diagnostics without graph/MIR.
+                let report = s.db.check(f);
+                let ev = evaluated(&s.db);
                 Envelope::new("check")
-                    .diagnostics(&a.diags, &sf)
+                    .diagnostics(&report.diags, &sf)
                     .result(json!({"evaluated": ev}))
                     .into_parts()
                     .0
