@@ -253,6 +253,124 @@ fn sink(p: P) -> i32 { return p.x; }";
         }
     }
 
+    // ---- item-relative spans ---------------------------------------
+
+    fn ast_item_key(k: &QueryKey) -> Option<DefKey> {
+        match k {
+            QueryKey::AstItem(k) => Some(*k),
+            _ => None,
+        }
+    }
+
+    /// An edit that only *shifts* an item's absolute offset — here a
+    /// comment inserted before `g` — recomputes its `AstItem` to an
+    /// equal (item-relative) value, so the whole per-definition chain
+    /// (HIR → types → MIR) and the ownership fixpoint stay memoized.
+    /// With file-absolute spans this edit rebuilt `g` and `main`.
+    #[test]
+    fn offset_shift_reuses_shifted_bodies() {
+        let mut db = Db::new();
+        let f = db.add_source(THREE_FN);
+        assert!(db.compile(f).is_valid());
+        db.set_source(f, THREE_FN.replace("fn g(q", "// shifted\nfn g(q"));
+        assert!(db.compile(f).is_valid());
+        // AstItems re-verified (their Ast dep changed) but recomputed
+        // equal — that's exactly the early-cutoff boundary.
+        assert_eq!(evald_defs(&db, ast_item_key), ["f", "g", "main"]);
+        assert!(evald_defs(&db, hir_key).is_empty());
+        assert!(evald_defs(&db, types_key).is_empty());
+        assert!(evald_defs(&db, mir_key).is_empty());
+        assert!(
+            !db.last_evaluated()
+                .contains(&QueryKey::Ownership(FileId::new(0)))
+        );
+    }
+
+    /// Tagged item-relative diagnostics are rebased with the
+    /// *current* item bases at collection time — a shifted function's
+    /// diagnostic lands on its new absolute offset, identical to what
+    /// a fresh compile of the shifted source produces.
+    #[test]
+    fn diagnostics_track_shifted_offsets() {
+        let bad = "fn ok() -> i32 { return 0; }\nfn tail() -> i32 { return nope; }";
+        let mut db = Db::new();
+        let f = db.add_source(bad);
+        let report = db.check(f);
+        assert!(report.diags.iter().all(|d| d.origin.is_none()));
+        let before: Vec<_> = report.diags.iter().map(|d| (d.code, d.primary)).collect();
+        assert!(!before.is_empty());
+        let prefix = "// shifted\n";
+        let shifted = format!("{prefix}{bad}");
+        db.set_source(f, shifted.clone());
+        let after: Vec<_> = db
+            .check(f)
+            .diags
+            .iter()
+            .map(|d| (d.code, d.primary))
+            .collect();
+        let bump = prefix.len() as u32;
+        let expected: Vec<_> = before
+            .iter()
+            .map(|&(c, p)| (c, p.map(|s| s.abs(bump))))
+            .collect();
+        assert_eq!(expected, after);
+        // Incremental result equals a from-scratch compile of the
+        // shifted source — rebasing can't drift.
+        let mut db2 = Db::new();
+        let f2 = db2.add_source(shifted);
+        let fresh: Vec<_> = db2
+            .check(f2)
+            .diags
+            .iter()
+            .map(|d| (d.code, d.primary))
+            .collect();
+        assert_eq!(after, fresh);
+    }
+
+    /// Secondary labels rebase with the same base: the "value moved
+    /// here" label must land on the shifted move site.
+    #[test]
+    fn diagnostic_labels_track_shifted_offsets() {
+        let src = "data P { x: i32; } fn main() -> i32 { let q = P { x: 1 }; let r = q; return q.x + r.x; }";
+        let mut db = Db::new();
+        let f = db.add_source(src);
+        let before: Vec<Span> = db
+            .check(f)
+            .diags
+            .iter()
+            .flat_map(|d| d.labels.iter().map(|l| l.span))
+            .collect();
+        assert!(!before.is_empty());
+        let prefix = "// pad pad\n";
+        db.set_source(f, format!("{prefix}{src}"));
+        let after: Vec<Span> = db
+            .check(f)
+            .diags
+            .iter()
+            .flat_map(|d| d.labels.iter().map(|l| l.span))
+            .collect();
+        let bump = prefix.len() as u32;
+        let expected: Vec<Span> = before.iter().map(|s| s.abs(bump)).collect();
+        assert_eq!(expected, after);
+    }
+
+    /// The graph's node spans are file-absolute for consumers —
+    /// they must track a shift too.
+    #[test]
+    fn graph_spans_track_shifted_offsets() {
+        let prefix = "// shifted\n";
+        let mut db = Db::new();
+        let f = db.add_source(THREE_FN);
+        let before: Vec<Option<Span>> = db.compile(f).graph.nodes.iter().map(|n| n.span).collect();
+        db.set_source(f, format!("{prefix}{THREE_FN}"));
+        let after: Vec<Option<Span>> = db.compile(f).graph.nodes.iter().map(|n| n.span).collect();
+        assert_eq!(before.len(), after.len());
+        let bump = prefix.len() as u32;
+        for (b, a) in before.iter().zip(&after) {
+            assert_eq!(*a, b.map(|s| s.abs(bump)), "node span");
+        }
+    }
+
     /// Multi-file: editing file B touches nothing in file A.
     #[test]
     fn files_are_independent() {
@@ -367,5 +485,5 @@ fn main() -> i32 { let x = 1; x = 2; return nope; let q = y; }";
         assert_eq!(first, second);
     }
 
-    use ontixa_source::{DefKey, FileId};
+    use ontixa_source::{DefKey, FileId, Span};
 }

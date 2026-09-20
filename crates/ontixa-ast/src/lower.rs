@@ -90,7 +90,7 @@ impl Lowerer<'_> {
         DataDecl {
             name,
             fields,
-            span: node.text_range().into(),
+            span: decl_span(node),
         }
     }
 
@@ -127,14 +127,14 @@ impl Lowerer<'_> {
             .unwrap_or_else(|| Block {
                 stmts: Vec::new(),
                 tail: None,
-                span: node.text_range().into(),
+                span: decl_span(node),
             });
         FnDecl {
             name,
             params,
             ret,
             body,
-            span: node.text_range().into(),
+            span: decl_span(node),
         }
     }
 
@@ -553,6 +553,20 @@ fn split_field_expr(node: &SyntaxNode) -> Option<(SyntaxNode, SyntaxNode)> {
 /// expression in value position (a variable reference).
 fn is_value_node(kind: SyntaxKind) -> bool {
     is_expr_kind(kind) || kind == SyntaxKind::NAME_REF
+}
+
+/// A declaration's span starting at its first non-trivia token (the
+/// `fn`/`data` keyword), not at the rowan node's leading trivia.
+/// Item-relative span rebasing depends on this: a comment inserted
+/// before an item must not move the item's coordinate base.
+fn decl_span(node: &SyntaxNode) -> Span {
+    let start = node
+        .children_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .find(|t| !t.kind().is_trivia())
+        .map(|t| t.text_range().start())
+        .unwrap_or_else(|| node.text_range().start());
+    Span::new(start.into(), node.text_range().end().into())
 }
 
 /// Whether a node has a direct child token of `kind` (e.g. `mut`).

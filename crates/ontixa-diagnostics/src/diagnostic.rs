@@ -1,7 +1,7 @@
 //! The [`Diagnostic`] record.
 
 use crate::code::Code;
-use ontixa_source::Span;
+use ontixa_source::{DefId, Span};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// How bad the finding is. Errors reject the program; warnings allow
@@ -51,6 +51,12 @@ pub struct Diagnostic {
     pub subject: Option<String>,
     /// Structured extras (stable keys), e.g. `moved_at`, `reason`.
     pub details: JsonMap<String, JsonValue>,
+    /// The definition this diagnostic's spans are relative to:
+    /// `Some(d)` means `primary`/`labels`/span-shaped `details` are
+    /// in `d`'s item-local coordinates; `None` means file-absolute.
+    /// Internal pipeline metadata — `Diagnostics(file)` rebases
+    /// tagged diagnostics and clears the tag before they surface.
+    pub origin: Option<DefId>,
 }
 
 impl Diagnostic {
@@ -66,6 +72,7 @@ impl Diagnostic {
             help: Vec::new(),
             subject: None,
             details: JsonMap::new(),
+            origin: None,
         }
     }
 
@@ -121,6 +128,34 @@ impl Diagnostic {
             key,
             serde_json::json!({"start": span.start, "end": span.end}),
         )
+    }
+
+    /// A copy with every span shifted right by `base` — rebasing
+    /// item-relative coordinates back to file-absolute. The result's
+    /// `origin` is cleared: an absolute diagnostic has no home item.
+    pub fn rebased(&self, base: u32) -> Self {
+        let mut d = self.clone();
+        d.primary = d.primary.map(|s| s.abs(base));
+        for l in &mut d.labels {
+            l.span = l.span.abs(base);
+        }
+        for v in d.details.values_mut() {
+            if let JsonValue::Object(o) = v {
+                let shifted = match (o.get("start"), o.get("end")) {
+                    (Some(s), Some(e)) => match (s.as_u64(), e.as_u64()) {
+                        (Some(s), Some(e)) => Some((s + u64::from(base), e + u64::from(base))),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((s, e)) = shifted {
+                    o.insert("start".into(), JsonValue::from(s));
+                    o.insert("end".into(), JsonValue::from(e));
+                }
+            }
+        }
+        d.origin = None;
+        d
     }
 }
 
@@ -195,6 +230,27 @@ impl Diagnostics {
     pub fn extend(&mut self, other: Diagnostics) {
         self.items.extend(other.items);
     }
+
+    /// Tags `origin = def` on diagnostics pushed at or after `mark`
+    /// that don't already carry one. Per-definition passes call this
+    /// so a collector can rebase item-relative spans to absolute.
+    pub fn tag_origin_from(&mut self, mark: usize, def: DefId) {
+        for d in &mut self.items[mark..] {
+            d.origin.get_or_insert(def);
+        }
+    }
+
+    /// Rebases every `origin`-tagged diagnostic to file-absolute via
+    /// `base_of` (def → its item's absolute start), clearing tags.
+    /// Used by whole-module convenience paths; the database's
+    /// `Diagnostics(file)` query does the same during collection.
+    pub fn rebase_tagged(&mut self, base_of: impl Fn(DefId) -> u32) {
+        for d in &mut self.items {
+            if let Some(def) = d.origin {
+                *d = d.rebased(base_of(def));
+            }
+        }
+    }
 }
 
 impl IntoIterator for Diagnostics {
@@ -210,5 +266,47 @@ impl<'a> IntoIterator for &'a Diagnostics {
     type IntoIter = std::slice::Iter<'a, Diagnostic>;
     fn into_iter(self) -> Self::IntoIter {
         self.items.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `rebased` shifts primary, labels, and `{"start","end"}`
+    /// detail objects by the item base — and clears `origin`, so a
+    /// rebased diagnostic can never be rebased twice.
+    #[test]
+    fn rebased_shifts_spans_and_details() {
+        let mut d = Diagnostic::error(Code::UseAfterMove, "moved")
+            .primary(Span::new(10, 12))
+            .label(Span::new(4, 5), "moved here")
+            .detail("moved_at", serde_json::json!({"start": 4, "end": 5}));
+        d.origin = Some(DefId::new(0));
+        let r = d.rebased(100);
+        assert_eq!(r.primary, Some(Span::new(110, 112)));
+        assert_eq!(r.labels[0].span, Span::new(104, 105));
+        assert_eq!(r.details["moved_at"]["start"], 104);
+        assert_eq!(r.details["moved_at"]["end"], 105);
+        assert!(r.origin.is_none());
+    }
+
+    /// `rebase_tagged` touches only `origin`-tagged diagnostics and
+    /// resolves each tag through the supplied base lookup.
+    #[test]
+    fn rebase_tagged_shifts_only_tagged() {
+        let mut ds = Diagnostics::new();
+        ds.push(Diagnostic::error(Code::Parse, "abs").primary(Span::new(1, 2)));
+        let mut tagged = Diagnostic::error(Code::UnknownType, "rel").primary(Span::new(3, 4));
+        tagged.origin = Some(DefId::new(1));
+        ds.push(tagged);
+        ds.rebase_tagged(|d| {
+            assert_eq!(d, DefId::new(1));
+            50
+        });
+        let v: Vec<_> = ds.iter().collect();
+        assert_eq!(v[0].primary, Some(Span::new(1, 2)));
+        assert_eq!(v[1].primary, Some(Span::new(53, 54)));
+        assert!(v.iter().all(|d| d.origin.is_none()));
     }
 }

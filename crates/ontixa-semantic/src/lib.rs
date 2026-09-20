@@ -28,8 +28,21 @@ pub fn graph_src(
     ontixa_source::Interner,
     ontixa_diagnostics::Diagnostics,
 ) {
-    let (module, tables, ownership, interner, diags) = ontixa_memory::analyze_src(src);
-    let graph = build_graph(&module, &tables, &ownership, &interner);
+    let (ast, mut module, interner, mut diags) = ontixa_hir::parse_hir_ast(src);
+    let tables = ontixa_types::check_module(&mut module, &interner, &mut diags);
+    let ownership = ontixa_memory::infer_ownership(
+        &module,
+        &tables,
+        &interner,
+        &mut diags,
+        None,
+        &mut ontixa_memory::OwnershipOracle::default(),
+    );
+    // Rebase item-relative diagnostics to file-absolute, then derive
+    // each def's item base for the graph's absolute node spans.
+    diags.rebase_tagged(|d| ast.items[d.index()].span().start);
+    let bases: Vec<u32> = ast.items.iter().map(|i| i.span().start).collect();
+    let graph = build_graph(&module, &tables, &ownership, &interner, &bases);
     (graph, module, tables, ownership, interner, diags)
 }
 

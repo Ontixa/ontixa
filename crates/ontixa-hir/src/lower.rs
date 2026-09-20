@@ -36,12 +36,23 @@ pub fn lower_bodies(
     for (idx, item) in ast.items.iter().enumerate() {
         let Item::Fn(f) = item else { continue };
         let def = DefId::new(idx as u32);
-        bodies[idx] = Some(lower_body(f, def, &scope, interner, diags));
+        // Lower from the item-relative copy, matching the database's
+        // `AstItem` query — `Scope` spans and body spans share the
+        // item-local coordinate space.
+        let Item::Fn(rel) = ontixa_ast::rebase_item(item, f.span.start) else {
+            unreachable!()
+        };
+        bodies[idx] = Some(lower_body(&rel, def, &scope, interner, diags));
     }
     HirModule { scope, bodies }
 }
 
 /// Lowers one function body against the resolved module `scope`.
+///
+/// `f`'s spans must be **item-relative** (see
+/// [`ontixa_ast::rebase_item`]) — the returned body's spans and the
+/// diagnostics emitted here are item-local, and diagnostics are
+/// tagged `origin = def` so a collector can rebase them.
 ///
 /// The scope is borrowed immutably: everything the body declares —
 /// its params and its `let` bindings — lives in the returned
@@ -53,6 +64,7 @@ pub fn lower_body(
     interner: &mut Interner,
     diags: &mut Diagnostics,
 ) -> HirBody {
+    let mark = diags.len();
     let mut b = BodyLowerer {
         def,
         scope,
@@ -78,11 +90,20 @@ pub fn lower_body(
         b.scopes[0].insert(interned, id);
     }
     let root = b.block(&f.body);
+    // Recover the moved-out `diags` handle to tag this body's
+    // diagnostics before returning.
+    let BodyLowerer {
+        exprs,
+        local_symbols,
+        diags,
+        ..
+    } = b;
+    diags.tag_origin_from(mark, def);
     HirBody {
         def,
         root,
-        exprs: b.exprs,
-        local_symbols: b.local_symbols,
+        exprs,
+        local_symbols,
     }
 }
 

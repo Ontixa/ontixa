@@ -12,12 +12,14 @@
 
 mod ast;
 mod lower;
+mod rebase;
 
 pub use ast::{
     AstModule, BinOp, Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Literal, Param,
     Place, Stmt, TypeExpr, UnOp,
 };
 pub use lower::lower_module;
+pub use rebase::rebase_item;
 
 /// Parses `src` end-to-end (lex → parse → lower) and returns the AST
 /// plus all diagnostics gathered along the way.

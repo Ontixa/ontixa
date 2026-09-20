@@ -37,13 +37,21 @@ pub use resolve::resolve_module;
 
 /// Lowers an [`ontixa_ast::AstModule`] to a fully resolved
 /// [`HirModule`], appending name-resolution diagnostics to `diags`.
+///
+/// Per-definition passes emit item-relative diagnostics tagged with
+/// their owning def; this whole-module path rebases them to
+/// file-absolute before returning, matching what the database's
+/// `Diagnostics(file)` query produces.
 pub fn lower_hir(
     ast: &ontixa_ast::AstModule,
     interner: &mut ontixa_source::Interner,
     diags: &mut ontixa_diagnostics::Diagnostics,
 ) -> HirModule {
     let scope = resolve_module(ast, interner, diags);
-    lower_bodies(ast, scope, interner, diags)
+    let module = lower_bodies(ast, scope, interner, diags);
+    // `DefId` indexes `ast.items` — defs are allocated in item order.
+    diags.rebase_tagged(|d| ast.items[d.index()].span().start);
+    module
 }
 
 /// Parses and lowers `src` end-to-end (lex → parse → AST → HIR),
@@ -57,10 +65,26 @@ pub fn parse_hir(
     ontixa_source::Interner,
     ontixa_diagnostics::Diagnostics,
 ) {
+    let (_, module, interner, diags) = parse_hir_ast(src);
+    (module, interner, diags)
+}
+
+/// Same as [`parse_hir`] but also returns the parsed AST. Downstream
+/// convenience pipelines (`check_src`, `analyze_src`) keep it alive
+/// so they can rebase item-relative diagnostics emitted by the
+/// per-definition passes.
+pub fn parse_hir_ast(
+    src: &str,
+) -> (
+    ontixa_ast::AstModule,
+    HirModule,
+    ontixa_source::Interner,
+    ontixa_diagnostics::Diagnostics,
+) {
     let (ast, mut diags) = ontixa_ast::parse_ast(src);
     let mut interner = ontixa_source::Interner::new();
     let module = lower_hir(&ast, &mut interner, &mut diags);
-    (module, interner, diags)
+    (ast, module, interner, diags)
 }
 
 #[cfg(test)]

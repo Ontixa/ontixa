@@ -35,7 +35,8 @@ pub fn analyze_src(
     ontixa_source::Interner,
     ontixa_diagnostics::Diagnostics,
 ) {
-    let (module, tables, interner, mut diags) = ontixa_types::check_src(src);
+    let (ast, mut module, interner, mut diags) = ontixa_hir::parse_hir_ast(src);
+    let tables = ontixa_types::check_module(&mut module, &interner, &mut diags);
     let ownership = infer_ownership(
         &module,
         &tables,
@@ -44,6 +45,9 @@ pub fn analyze_src(
         None,
         &mut OwnershipOracle::default(),
     );
+    // Per-definition passes tagged their item-relative diagnostics —
+    // rebase to file-absolute for callers.
+    diags.rebase_tagged(|d| ast.items[d.index()].span().start);
     (module, tables, ownership, interner, diags)
 }
 

@@ -55,7 +55,12 @@ pub(crate) fn eval(db: &mut Db, key: QueryKey) -> (Value, Vec<Diagnostic>) {
                     Item::Fn(f) => &f.name.name,
                     Item::Data(d) => &d.name.name,
                 };
-                (db.interner.intern(name) == k.name).then(|| i.clone())
+                // The stored value is item-relative: an edit that
+                // only shifts the item's absolute offset recomputes
+                // an equal value and cuts off, so `hir_body` and
+                // everything below it never re-evaluates.
+                (db.interner.intern(name) == k.name)
+                    .then(|| ontixa_ast::rebase_item(i, i.span().start))
             });
             Value::Item(item)
         }
@@ -258,19 +263,26 @@ fn mir_body(db: &mut Db, key: DefKey) -> Option<MirBody> {
     Some(ontixa_mir::lower_fn(&scope, &c.body, &c.tables, &own))
 }
 
-/// The file's semantic program graph.
+/// The file's semantic program graph. Node spans are file-absolute
+/// for consumers — `bases` translates item-relative body/scope spans
+/// by each def's item start (`DefId` indexes `items`, since defs are
+/// allocated in item order).
 fn graph(db: &mut Db, f: FileId) -> SemanticGraph {
+    let module_ast = ast(db, f);
     let scope = scope(db, f);
     let (module, types) = assemble(db, f, &scope);
     let own = ownership_t(db, f);
-    ontixa_semantic::build_graph(&module, &types, &own, &db.interner)
+    let bases: Vec<u32> = module_ast.items.iter().map(|i| i.span().start).collect();
+    ontixa_semantic::build_graph(&module, &types, &own, &db.interner, &bases)
 }
 
 /// Every diagnostic emitted anywhere in this file's pipeline,
-/// collected from dependency entries in demand order.
+/// collected from dependency entries in demand order. Item-relative
+/// diagnostics (`origin`-tagged) are rebased to file-absolute here —
+/// the file's current `AstModule` supplies each def's item base.
 fn diagnostics(db: &mut Db, f: FileId) -> Vec<Diagnostic> {
     let _ = db.demand(QueryKey::Parse(f));
-    let _ = ast(db, f);
+    let module_ast = ast(db, f);
     let sc = scope(db, f);
     for def in &sc.defs {
         if sc.fn_sig(def.id).is_some() {
@@ -280,12 +292,17 @@ fn diagnostics(db: &mut Db, f: FileId) -> Vec<Diagnostic> {
     let _ = ownership_t(db, f);
     // Entries store transitive diagnostics, so each dep's diags may
     // repeat an earlier dep's — dedupe by value, keeping first-seen
-    // (pipeline) order.
+    // (pipeline) order. Rebasing happens before dedupe so two defs'
+    // identical item-relative diagnostics don't collapse.
     let mut out: Vec<Diagnostic> = Vec::new();
     for dep in db.deps_so_far().to_vec() {
         for d in db.entry_diags(dep) {
-            if !out.contains(d) {
-                out.push(d.clone());
+            let d = match d.origin {
+                Some(def) => d.rebased(module_ast.items[def.index()].span().start),
+                None => d.clone(),
+            };
+            if !out.contains(&d) {
+                out.push(d);
             }
         }
     }

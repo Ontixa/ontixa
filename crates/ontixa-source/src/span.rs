@@ -43,6 +43,22 @@ impl Span {
         offset >= self.start && offset < self.end
     }
 
+    /// This span relative to `base`: `start - base .. end - base`.
+    /// Item-local coordinates — per-definition query results carry
+    /// relative spans so an edit that shifts an item's absolute
+    /// offset leaves its memoized values unchanged. `base` is the
+    /// item's absolute start; `self` must lie at or after it.
+    pub const fn rel(self, base: u32) -> Self {
+        debug_assert!(self.start >= base, "span lies before its item base");
+        Self::new(self.start - base, self.end - base)
+    }
+
+    /// Inverse of [`Span::rel`]: shifts an item-relative span right
+    /// by `base` to file-absolute coordinates.
+    pub const fn abs(self, base: u32) -> Self {
+        Self::new(self.start + base, self.end + base)
+    }
+
     /// The smallest span covering both inputs.
     pub const fn covering(self, other: Span) -> Span {
         Span::new(

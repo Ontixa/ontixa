@@ -148,6 +148,13 @@ fn resolve_symbol(a: &Artifacts, name: &str) -> Resolved {
     }
 }
 
+/// The absolute start offset of `def`'s source item — the base for
+/// converting its item-relative symbol/evidence spans to
+/// file-absolute for output.
+fn item_base(a: &Artifacts, def: DefId) -> u32 {
+    a.ast.items[def.index()].span().start
+}
+
 /// Builds the ambiguity diagnostic: one label per candidate so both
 /// humans and machines see every match.
 fn ambiguous(a: &Artifacts, name: &str, cands: &[(DefId, SymbolId)]) -> Diagnostic {
@@ -161,11 +168,12 @@ fn ambiguous(a: &Artifacts, name: &str, cands: &[(DefId, SymbolId)]) -> Diagnost
         let s = sym_of(&a.module, owner, sym);
         let owner_name = def_name(&a.module, &a.interner, owner);
         let desc = describe_symbol(&a.module, &a.interner, s);
-        d = d.label(s.span, desc.clone());
+        let abs = s.span.abs(item_base(a, owner));
+        d = d.label(abs, desc.clone());
         cand_json.push(json!({
             "kind": kind_str(s.kind),
             "owner": owner_name,
-            "span": {"start": s.span.start, "end": s.span.end},
+            "span": {"start": abs.start, "end": abs.end},
             "description": desc,
         }));
     }
@@ -249,7 +257,7 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
                             );
                         }
                         if !sum.evidence.is_empty() {
-                            param["evidence"] = evidence_json(sum);
+                            param["evidence"] = evidence_json(sum, item_base(a, def));
                         }
                     }
                     param
@@ -291,12 +299,14 @@ fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
         .and_then(|t| t.as_ref())
         .and_then(|t| t.local_types.get(&sym))
         .copied();
+    let base = item_base(a, owner);
+    let span = s.span.abs(base);
     let mut obj = json!({
         "kind": kind_str(s.kind),
         "name": name,
         "mutable": s.mutable,
         "owner": def_name(m, &a.interner, owner),
-        "span": {"start": s.span.start, "end": s.span.end},
+        "span": {"start": span.start, "end": span.end},
     });
     if let Some(t) = ty {
         obj["type"] = json!(ty_name(m, &a.interner, t));
@@ -314,7 +324,7 @@ fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
                     );
                 }
                 if !sum.evidence.is_empty() {
-                    obj["evidence"] = evidence_json(sum);
+                    obj["evidence"] = evidence_json(sum, base);
                 }
             }
             if ty.is_none() {
@@ -332,14 +342,17 @@ fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
     obj
 }
 
-fn evidence_json(s: &ontixa_memory::ParamSummary) -> Json {
+fn evidence_json(s: &ontixa_memory::ParamSummary, base: u32) -> Json {
     json!(
         s.evidence
             .iter()
-            .map(|e| json!({
-                "kind": e.kind.as_str(),
-                "span": {"start": e.at.start, "end": e.at.end},
-            }))
+            .map(|e| {
+                let at = e.at.abs(base);
+                json!({
+                    "kind": e.kind.as_str(),
+                    "span": {"start": at.start, "end": at.end},
+                })
+            })
             .collect::<Vec<_>>()
     )
 }
