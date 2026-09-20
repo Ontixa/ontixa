@@ -687,3 +687,43 @@ fn daemon_rename_previews_applies_and_guards_stale() {
     let math = std::fs::read_to_string(main.parent().unwrap().join("math.ixa")).unwrap();
     assert!(math.contains("fn double("), "{math}");
 }
+
+/// The daemon `rename` op with `"at"` selects a body-local binding
+/// positionally — same transaction core, same guards.
+#[test]
+fn daemon_rename_at_selects_local_positionally() {
+    let main = ws_fixture(
+        "daemonat",
+        "fn main() -> i32 { let count = 2; return count * 2; }",
+        "fn double(x: i32) -> i32 { return x * 2; }",
+    );
+    let p = main.to_str().unwrap();
+    let src = std::fs::read_to_string(&main).unwrap();
+    let off = src.find("count").unwrap() as u64;
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "rename", "path": p, "at": off, "to": "total"}),
+    ]);
+    assert_eq!(rs[1]["success"], true, "{:?}", rs[1]);
+    assert_eq!(rs[1]["result"]["applied"], false);
+    // decl + use — local rename found both through HIR identity.
+    assert_eq!(rs[1]["result"]["edits"].as_array().unwrap().len(), 2);
+    let rev = rs[1]["result"]["revision"].as_u64().unwrap();
+
+    // Same fixture → same revision; apply with the planned rev.
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "rename", "path": p, "at": off, "to": "total", "apply": true, "revision": rev}),
+    ]);
+    assert_eq!(rs[1]["success"], true, "{:?}", rs[1]);
+    assert_eq!(rs[1]["result"]["applied"], true);
+    let new_src = rs[1]["result"]["new_sources"][0]["text"].as_str().unwrap();
+    assert!(new_src.contains("let total"), "{new_src}");
+    assert!(new_src.contains("return total * 2"), "{new_src}");
+    // Disk untouched — the daemon only mutates memory.
+    assert!(
+        std::fs::read_to_string(&main)
+            .unwrap()
+            .contains("let count")
+    );
+}

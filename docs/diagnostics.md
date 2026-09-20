@@ -49,8 +49,11 @@ Codes are a public contract. Never reuse; retire instead.
 | `E_UNKNOWN_MODULE`     | resolve   | `use`/path names an unregistered module |
 | `E_INVALID_NAME`       | rename    | replacement is not a valid identifier |
 | `E_NAME_CONFLICT`      | rename    | new name collides with an existing binding |
-| `E_RENAME_REJECTED`    | rename    | shadow compile surfaced new errors |
+| `E_RENAME_REJECTED`    | rename    | shadow compile surfaced new errors, or a reference rebinds |
 | `E_STALE_REVISION`     | rename    | workspace changed between plan and apply |
+| `E_BASELINE_ERRORS`    | rename    | workspace already has errors; rename needs a clean baseline |
+| `E_PLAN_MISMATCH`      | rename    | plan provenance violated (wrong Db, snapshot, or payload) |
+| `E_UNSUPPORTED_TARGET` | rename    | selected target is not a renameable binding |
 | `E_MISSING_RETURN`     | types     | non-unit fn can fall through     |
 | `E_LITERAL_OVERFLOW`   | types     | literal exceeds its type         |
 | `E_UNSUPPORTED_OP`     | types     | op not defined for operand types |

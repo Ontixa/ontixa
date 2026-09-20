@@ -272,9 +272,18 @@ pub fn persist_tx_hooks(
 
     // --- Prepare: verify every destination against the snapshot.
     //    Nothing is written in this phase, so a rejection here can
-    //    never leave a partial state.
+    //    never leave a partial state. Paths are canonicalized for
+    //    the root check — `main.ixa` vs `./math.ixa` vs absolute
+    //    spellings of the same file must compare equal.
+    let root_canon = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     for f in files {
-        if !f.path.starts_with(root) {
+        let path_canon = fs::canonicalize(&f.path).map_err(|e| {
+            PersistError::new(
+                Phase::Prepare,
+                format!("cannot resolve {}: {e}", f.path.display()),
+            )
+        })?;
+        if !path_canon.starts_with(&root_canon) {
             return Err(PersistError::new(
                 Phase::Prepare,
                 format!("{} is outside the workspace root", f.path.display()),

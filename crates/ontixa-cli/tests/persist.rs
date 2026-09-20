@@ -324,6 +324,30 @@ fn staged_but_never_swapped_recovers_as_rollback() {
     assert_clean(&dir);
 }
 
+/// A pending journal blocks any new transaction on the tree until
+/// recovery resolves it — fail closed, never write past it.
+#[test]
+fn pending_journal_blocks_new_transactions() {
+    let dir = ws_dir("pending");
+    let (a, b, files) = tx(&dir);
+    persist_tx_hooks(&dir, &files, Some(FailPoint::StageDie(1))).unwrap_err();
+
+    let err = persist_tx(&dir, &files).unwrap_err();
+    assert_eq!(err.phase, Phase::Prepare);
+    assert!(err.to_string().contains("recovery"), "err: {err}");
+    // Nothing moved while blocked.
+    assert_eq!(bytes(&a), b"fn a() -> i32 { return 1; }\n");
+    assert_eq!(bytes(&b), b"fn b() -> i32 { return 2; }\n");
+
+    // After recovery the tree is writable again.
+    let out = recover(&dir);
+    assert!(matches!(out[0], RecoveryOutcome::RolledBack { .. }));
+    persist_tx(&dir, &files).unwrap();
+    assert_eq!(bytes(&a), b"fn aa() -> i32 { return 1; }\n");
+    assert_eq!(bytes(&b), b"fn bb() -> i32 { return 2; }\n");
+    assert_clean(&dir);
+}
+
 /// A real child process dies mid-commit; the parent recovers the
 /// half-swapped transaction forward — both files hold `after`.
 #[test]

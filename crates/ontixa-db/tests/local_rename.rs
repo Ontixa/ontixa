@@ -275,6 +275,24 @@ fn offset_outside_items_is_unknown() {
     ));
 }
 
+#[test]
+fn offset_inside_multibyte_char_is_clean_rejection() {
+    // `é` is two bytes — an offset inside it must reject cleanly,
+    // never panic or mis-select a neighboring token.
+    let src = "// café x\nfn f() -> i32 { let x = 1; return x; }\n";
+    let mut db = db(src);
+    let e_start = src.find('é').unwrap();
+    for off in [e_start, e_start + 1] {
+        assert!(
+            matches!(
+                db.plan_rename_at(0, 0, off as u32, "n"),
+                Err(RenameError::UnknownSymbol(_))
+            ),
+            "offset {off} must reject cleanly"
+        );
+    }
+}
+
 // ---------- the def path also verifies correspondence ----------
 
 #[test]

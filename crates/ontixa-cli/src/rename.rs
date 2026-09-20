@@ -105,10 +105,14 @@ pub fn persist(plan: &RenamePlan, sfs: &[SourceFile]) -> Result<(), String> {
     crate::persist::persist_tx(&root, &files).map_err(|e| e.to_string())
 }
 
+/// The directory a file lives in — `.` for bare filenames (an
+/// empty parent would make `read_dir` fail silently and every
+/// `starts_with` check vacuous).
 fn parent_or_root(p: &std::path::Path) -> PathBuf {
-    p.parent()
-        .map(|d| d.to_path_buf())
-        .unwrap_or_else(|| p.to_path_buf())
+    match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
 }
 
 fn common_ancestor(a: &std::path::Path, b: &std::path::Path) -> PathBuf {
