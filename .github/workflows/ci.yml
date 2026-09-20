@@ -66,8 +66,11 @@ jobs:
 
       - name: move-error.ixa reports E_USE_AFTER_MOVE
         run: |
-          ./target/debug/ontixa check examples/move-error.ixa --json \
-            | grep -q '"E_USE_AFTER_MOVE"'
+          # `check` exits 1 when it reports error diagnostics — correct
+          # semantics, but under `bash -eo pipefail` it would fail the
+          # pipeline even when grep matches. Capture instead of piping.
+          out=$(./target/debug/ontixa check examples/move-error.ixa --json || true)
+          echo "$out" | grep -q '"E_USE_AFTER_MOVE"'
 
       - name: graph exposes inferred behaviors
         run: |
