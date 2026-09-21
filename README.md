@@ -4,15 +4,58 @@ Ontixa is a semantic-first systems programming language and
 software-construction platform, designed from the start for both human
 programmers and autonomous machine programmers.
 
-It is **not** a toy language, a syntax experiment, a weekend
-interpreter, or "Rust with easier syntax". The repository is the
-canonical implementation: a real compiler pipeline with structured
-semantics exposed as first-class data.
+The compiler exposes types, inferred ownership contracts, and program
+relationships as structured data that tools and agents can inspect.
 
 ## Status
 
 `0.0.1-dev` — semantic workspace: multi-module compilation with
 incremental, per-definition semantics and rename transactions.
+
+This is an experimental, pre-release implementation. Programs run in a
+reference interpreter; native code generation, a standard library, and
+a package manager are not available. Syntax and APIs may change.
+
+## Quickstart from source
+
+You need Git and a stable Rust toolchain with Cargo (Rust 1.85 or newer),
+plus the native linker required by your Rust installation. On Windows,
+the default MSVC toolchain needs the Visual Studio C++ build tools. The
+repository's `rust-toolchain.toml` selects stable Rust.
+
+If Windows reports `link.exe` missing, install the C++ build tools and
+run from their developer shell. If you already use Rust's GNU toolchain
+with MinGW-w64 installed, replace `cargo` in these commands with
+`cargo +stable-x86_64-pc-windows-gnu`.
+
+These commands work in PowerShell, Bash, and Zsh:
+
+```sh
+git clone https://github.com/Ontixa/ontixa.git
+cd ontixa
+cargo build --workspace --locked
+cargo run --quiet --locked -p ontixa-cli --bin ontixa -- run examples/hello.ixa
+```
+
+The last command prints `42`. From the same directory, inspect inferred
+ownership contracts and get machine-readable compiler diagnostics:
+
+```sh
+cargo run --quiet --locked -p ontixa-cli --bin ontixa -- explain examples/borrow-inference.ixa
+cargo run --quiet --locked -p ontixa-cli --bin ontixa -- check examples/hello.ixa --json
+```
+
+`explain` shows `borrow`, `borrow_mut`, `move`, `escape`, and `copy`
+parameter behavior. `check --json` emits one JSON document with
+`"schema": 1`, `"success": true`, and an empty `diagnostics` array.
+
+Commands later in this README use the shorter `ontixa` spelling. You
+can always replace it with `cargo run --quiet --locked -p ontixa-cli
+--bin ontixa --` from the repository root; no global installation is
+required. See [the agent interface](docs/agent-interface.md) for JSON
+responses, the persistent daemon, and transactional renames.
+
+## Implemented pipeline
 
 What works today, end to end:
 
