@@ -150,8 +150,8 @@ $ ontixa recover dir/                       # resolve a transaction journal afte
 [docs/agent-interface.md](docs/agent-interface.md).
 
 Common flags: `--json` (machine-readable output), `--timings`
-(per-stage latency). Exit codes: `0` ok, `1` source errors, `2`
-runtime trap, `3` internal compiler error.
+(per-stage latency). Exit codes: `0` ok, `1` source errors or recovery
+conflict, `2` runtime trap/unreadable input, `3` internal compiler error.
 
 ## Layout
 

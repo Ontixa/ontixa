@@ -24,7 +24,7 @@
 //!   Kept out by default so output is deterministic.
 //! - `error` — `{kind, message}` for non-diagnostic failures:
 //!   `io` (unreadable file), `runtime` (trap / missing entry),
-//!   `internal` (ICE).
+//!   `internal` (ICE), `conflict` (unresolved recovery conflict).
 
 use ontixa_db::StageTiming;
 use ontixa_diagnostics::{Diagnostic, Diagnostics, diagnostic_json_in};
@@ -87,7 +87,8 @@ impl Envelope {
     }
 
     /// Marks the command failed for a non-diagnostic reason. `code`
-    /// is the process exit code (2 = io/runtime, 3 = internal).
+    /// is the process exit code (1 = recovery conflict, 2 = io/runtime,
+    /// 3 = internal).
     pub fn error(mut self, kind: &str, message: impl Into<String>, code: u8) -> Self {
         self.error = Some((
             code,
