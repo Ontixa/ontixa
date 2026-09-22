@@ -4,7 +4,7 @@
 //! `explain`. Exit codes are part of the tool contract:
 //!
 //! - `0` — success (diagnostics, if any, are warnings)
-//! - `1` — the source produced error diagnostics
+//! - `1` — source error diagnostics or an unresolved recovery conflict
 //! - `2` — runtime trap, missing entry function, or unreadable input
 //! - `3` — internal compiler error (ICE); never the user's fault
 //!
@@ -622,10 +622,13 @@ fn recover_cmd(dir: PathBuf, json: bool) -> ExitCode {
                 }),
             })
             .collect();
-        let code = Envelope::new("recover")
-            .result(serde_json::json!({ "outcomes": docs }))
-            .emit();
-        return if conflict { ExitCode::from(1) } else { code };
+        let env = Envelope::new("recover").result(serde_json::json!({ "outcomes": docs }));
+        return if conflict {
+            env.error("conflict", "recovery has unresolved conflicts", 1)
+                .emit()
+        } else {
+            env.emit()
+        };
     }
     for o in &outcomes {
         match o {

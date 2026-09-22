@@ -93,8 +93,18 @@ stdout — never concatenated documents, never bare logs:
   `graph`, `symbol`, or a `run` value); `null` when none.
 - `timings` is `[]` unless `--timings` was passed (timings are
   nondeterministic and opt-in).
-- `error` is `{ "kind": "io"|"runtime"|"internal", "message": ... }`
+- `error` is `{ "kind": "io"|"runtime"|"internal"|"conflict", "message": ... }`
   for non-diagnostic failures, else `null`.
 
 Agents should key off `code` + `details`, never off rendered text.
-Exit codes: `0` ok, `1` error diagnostics, `2` io/runtime, `3` ICE.
+Exit codes: `0` ok, `1` error diagnostics or recovery conflict, `2` io/runtime, `3` ICE.
+
+`recover --json` keeps schema 1 and all per-journal `result.outcomes`. If any
+outcome is `conflict`, the envelope now has `success: false`,
+`error.kind: "conflict"`, and the stable message `recovery has unresolved conflicts`;
+the process exits 1, matching human mode. Previously the JSON incorrectly said
+`success: true` despite exit 1. Consumers must accept the additive `conflict`
+error kind. Clean or fully successful recovery still returns success with exit 0.
+Mixed results remain visible: another journal can be committed or rolled back
+while a conflicting journal is preserved. This does not change persistence or
+promise an all-journal rollback on conflict.

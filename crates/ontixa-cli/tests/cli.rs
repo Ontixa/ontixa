@@ -621,14 +621,84 @@ fn rename_apply_io_failure_leaves_no_partial_writes() {
     // (exit 1) and preserves it — it never guesses.
     let out = ontixa(&["recover", dir.to_str().unwrap(), "--json"]);
     let d = envelope(&out);
-    assert_eq!(d["success"], true, "{d}");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(d["schema"], 1);
+    assert_eq!(d["success"], false, "{d}");
+    assert_eq!(d["error"]["kind"], "conflict");
+    assert_eq!(d["error"]["message"], "recovery has unresolved conflicts");
     assert_eq!(d["result"]["outcomes"][0]["status"], "conflict", "{d}");
-    assert!(journal.exists());
+    assert_eq!(std::fs::read(&journal).unwrap(), b"{ not valid json");
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), main_before);
+    assert_eq!(std::fs::read_to_string(&math_path).unwrap(), math_before);
+    let human = ontixa(&["recover", dir.to_str().unwrap()]);
+    assert_eq!(human.status.code(), Some(1));
+    assert_eq!(std::fs::read(&journal).unwrap(), b"{ not valid json");
 
     // With the journal removed, recovery is a clean no-op.
     std::fs::remove_file(&journal).unwrap();
+    let clean = ontixa(&["recover", dir.to_str().unwrap(), "--json"]);
+    let d = envelope(&clean);
+    assert_eq!(clean.status.code(), Some(0));
+    assert_eq!(d["success"], true);
+    assert!(d["error"].is_null());
+    assert_eq!(d["result"]["outcomes"][0]["status"], "clean");
     let out = ontixa(&["recover", dir.to_str().unwrap()]);
     assert!(out.status.success(), "{out:?}");
+}
+
+#[test]
+fn recover_json_mixed_outcomes_fail_without_discarding_successful_results() {
+    use ontixa_cli::persist::{FailPoint, TxFile, persist_tx_hooks};
+    for (tag, fail, expected) in [
+        (
+            "recover_mixed_rollback",
+            FailPoint::StageDie(0),
+            "rolled_back",
+        ),
+        ("recover_mixed_commit", FailPoint::Die(0), "committed"),
+    ] {
+        let before = b"fn main() -> i32 { return 1; }\r\n";
+        let after = b"fn main() -> i32 { return 2; }\r\n";
+        let main = ws_fixture(tag, std::str::from_utf8(before).unwrap(), "// unchanged\n");
+        let dir = main.parent().unwrap();
+        let tx = [TxFile {
+            path: main.clone(),
+            before: before.to_vec(),
+            after: after.to_vec(),
+        }];
+        let err = persist_tx_hooks(dir, &tx, Some(fail)).unwrap_err();
+        let recoverable = err.journal.unwrap();
+        let conflict = dir.join(".ontixa-tx-corrupt.journal");
+        let evidence = b"{ invalid fixture journal\r\n";
+        std::fs::write(&conflict, evidence).unwrap();
+        let out = ontixa(&["recover", dir.to_str().unwrap(), "--json"]);
+        let d = envelope(&out);
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(d["schema"], 1);
+        assert_eq!(d["success"], false);
+        assert_eq!(d["error"]["kind"], "conflict");
+        let outcomes = d["result"]["outcomes"].as_array().unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().any(|o| o["status"] == expected));
+        assert!(outcomes.iter().any(|o| o["status"] == "conflict"));
+        assert_eq!(std::fs::read(&conflict).unwrap(), evidence);
+        assert_eq!(
+            std::fs::read(&main).unwrap(),
+            if expected == "committed" {
+                after
+            } else {
+                before
+            }
+        );
+        assert_eq!(
+            std::fs::read(dir.join("math.ixa")).unwrap(),
+            b"// unchanged\n"
+        );
+        assert!(
+            !recoverable.exists(),
+            "successful recovery finalizes its own journal"
+        );
+    }
 }
 
 /// The daemon `rename` op: preview carries the planned revision,

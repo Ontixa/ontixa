@@ -2,7 +2,7 @@
 
 Direction, not promise. Order reflects dependency, not calendar.
 
-## M1 — vertical slice (current)
+## M1 — vertical slice (done)
 
 Done: lossless parsing, canonical AST, HIR + resolution, total type
 checking, ownership inference, SPG, typed MIR, interpreter, CLI,
@@ -22,7 +22,7 @@ structured diagnostics, memoized DB.
   mutability; interpreter contract oracle
 - evidence: `docs/milestones/m2-report.md`, `benchmarks/README.md`
 
-## M3 — language breadth + modules
+## M3 — language breadth + modules (in progress)
 
 Shipped (semantic-workspace campaign, PRs #3–#5):
 
