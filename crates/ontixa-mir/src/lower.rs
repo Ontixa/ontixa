@@ -317,6 +317,36 @@ impl FnLowerer<'_> {
                 });
                 Operand::Place(t)
             }
+            HirExprKind::StrLen { base } => {
+                let b = self.eval(base);
+                let t = self.temp(self.ty_of(id));
+                self.emit(MirStmt::Assign {
+                    dst: t.clone(),
+                    val: Rvalue::StrLen { base: b },
+                });
+                Operand::Place(t)
+            }
+            HirExprKind::Index { base, index } => {
+                let b = self.eval(base);
+                let i = self.eval(index);
+                let t = self.temp(self.ty_of(id));
+                self.emit(MirStmt::Assign {
+                    dst: t.clone(),
+                    val: Rvalue::Index { base: b, index: i },
+                });
+                Operand::Place(t)
+            }
+            HirExprKind::Slice { base, lo, hi } => {
+                let b = self.eval(base);
+                let lo = lo.map(|l| self.eval(l));
+                let hi = hi.map(|h| self.eval(h));
+                let t = self.temp(self.ty_of(id));
+                self.emit(MirStmt::Assign {
+                    dst: t.clone(),
+                    val: Rvalue::Slice { base: b, lo, hi },
+                });
+                Operand::Place(t)
+            }
             HirExprKind::Call { def, args } => {
                 let ops: Vec<Operand> = args.iter().map(|a| self.eval(*a)).collect();
                 let t = self.temp(self.ty_of(id));

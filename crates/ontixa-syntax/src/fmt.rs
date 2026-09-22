@@ -17,9 +17,10 @@
 //! * `} else {` stays joined; empty brace pairs glue to `{}`;
 //! * exactly one blank line between top-level items, except `use`
 //!   declarations which group without blank lines;
-//! * no space before `(` `[` `)` `]` `,` `;` `:` `::` `.` — except
-//!   `(`/`[` after a keyword (`if (x)` keeps its space); no space
-//!   after `(` `[` `::` `.` or a prefix `-`/`!`; `:` spaces after;
+//! * no space before `(` `[` `)` `]` `,` `;` `:` `::` `.` `..` —
+//!   except `(`/`[` after a keyword (`if (x)` keeps its space); no
+//!   space after `(` `[` `::` `.` `..` or a prefix `-`/`!`; `:` spaces
+//!   after;
 //!   everything else is separated by a single space;
 //! * comments are preserved verbatim: a comment sharing a line with
 //!   code stays trailing (one space), an own-line comment keeps its
@@ -252,10 +253,15 @@ fn separator(prev: &SyntaxToken, cur: &SyntaxToken, src: &str) -> Sep {
             | SyntaxKind::COLON
             | SyntaxKind::COLON2
             | SyntaxKind::DOT
+            | SyntaxKind::DOT2
     ) || (matches!(ck, SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET) && !pk.is_keyword())
         || matches!(
             pk,
-            SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET | SyntaxKind::DOT | SyntaxKind::COLON2
+            SyntaxKind::L_PAREN
+                | SyntaxKind::L_BRACKET
+                | SyntaxKind::DOT
+                | SyntaxKind::DOT2
+                | SyntaxKind::COLON2
         )
         || is_prefix_op(prev)
     {
@@ -410,6 +416,16 @@ mod tests {
         );
     }
 
+    /// Indexing and slicing glue: `s [ i ]` → `s[i]`, `a .. b` →
+    /// `a..b`, and open bounds stay tight (`s[..]`, `s[i..]`).
+    #[test]
+    fn index_and_range_glue() {
+        let src = "fn f(s: str) -> str { return s[ 0 ] + s[ 1 .. 3 ] + s[ 2 .. ] + s[ .. 4 ] + s[ .. ]; }";
+        let want =
+            "fn f(s: str) -> str {\n    return s[0] + s[1..3] + s[2..] + s[..4] + s[..];\n}\n";
+        assert_eq!(fmt(src), want);
+    }
+
     /// A file that doesn't parse is refused with the parser's own
     /// diagnostics — tokens inside ERROR nodes are never re-laid-out.
     #[test]
@@ -436,6 +452,7 @@ mod tests {
             "data P{x:i32;}fn f(p:P)->i32{return p.x;}",
             "fn f()->i32{return if 1<2{3}else{4}+5;}",
             "fn f(){let mut q=P{x:1,y:2};q.x=q.x+1;}",
+            "fn f(s: str) -> str { return s[1] + s[0..s.len]; }",
         ] {
             let once = fmt(src);
             let toks = |s: &str| {

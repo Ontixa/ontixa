@@ -95,6 +95,47 @@ mod tests {
     }
 
     #[test]
+    fn lowers_string_ops_to_typed_rvalues() {
+        let (mir, m, mut interner) = mir(
+            "fn main() -> i32 { let s = \"abc\"; let c = s[0]; let t = s[..s.len]; return c.len + t.len; }",
+        );
+        let main = m.scope.root_env().fns[&interner.intern("main")];
+        let body = mir.body(main).expect("body");
+        let rvalues: Vec<&Rvalue> = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.stmts)
+            .map(|s| match s {
+                MirStmt::Assign { val, .. } | MirStmt::Eval { val } => val,
+            })
+            .collect();
+        assert!(
+            rvalues.iter().any(|r| matches!(r, Rvalue::Index { .. })),
+            "no Index rvalue in {rvalues:?}"
+        );
+        // `s[..s.len]`: a Slice with no lo and a StrLen-computed hi.
+        assert!(
+            rvalues.iter().any(|r| matches!(
+                r,
+                Rvalue::Slice {
+                    lo: None,
+                    hi: Some(_),
+                    ..
+                }
+            )),
+            "no open-lo Slice rvalue in {rvalues:?}"
+        );
+        assert_eq!(
+            rvalues
+                .iter()
+                .filter(|r| matches!(r, Rvalue::StrLen { .. }))
+                .count(),
+            3,
+            "expected three StrLen rvalues in {rvalues:?}"
+        );
+    }
+
+    #[test]
     fn locals_carry_source_mutability() {
         let (mir, m, mut interner) = mir(
             "fn f(mut a: i32, b: i32) -> i32 { let mut x = a; let y = b; x = x + y; return x; }",

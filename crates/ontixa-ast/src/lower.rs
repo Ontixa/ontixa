@@ -399,6 +399,7 @@ impl Lowerer<'_> {
                     span,
                 }
             }
+            SyntaxKind::INDEX_EXPR => self.index_expr(node)?,
             SyntaxKind::BIN_EXPR => self.bin_expr(node)?,
             SyntaxKind::PREFIX_EXPR => {
                 let mut elems = node.children_with_tokens();
@@ -466,6 +467,56 @@ impl Lowerer<'_> {
             args,
             span: node.text_range().into(),
         })
+    }
+
+    /// INDEX_EXPR children: `<base>` `[` (`RANGE` | `<index>`) `]`.
+    /// A `RANGE` child holds zero, one, or two bound expressions; no
+    /// `RANGE` means plain indexing. Empty brackets already carry a
+    /// parse diagnostic, so they lower to `Expr::Error`.
+    fn index_expr(&mut self, node: &SyntaxNode) -> Option<Expr> {
+        let span: Span = node.text_range().into();
+        let mut children = node
+            .children()
+            .filter(|n| is_value_node(n.kind()) || n.kind() == SyntaxKind::RANGE);
+        let base = self.expr(&children.next()?)?;
+        match children.next() {
+            None => Some(Expr::Error { span }),
+            Some(n) if n.kind() == SyntaxKind::RANGE => {
+                // Bound positions are relative to the `..` token: a
+                // bound *before* it is `lo`, one *after* is `hi`
+                // (`lo..hi`, `..hi`, `lo..`, `..`).
+                let mut lo = None;
+                let mut hi = None;
+                let mut after_dots = false;
+                for elem in n.children_with_tokens() {
+                    match elem {
+                        SyntaxElement::Token(t) if t.kind() == SyntaxKind::DOT2 => {
+                            after_dots = true;
+                        }
+                        SyntaxElement::Node(c) if is_value_node(c.kind()) => {
+                            let e = self.expr(&c).map(Box::new);
+                            if after_dots {
+                                hi = e;
+                            } else {
+                                lo = e;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some(Expr::Slice {
+                    base: Box::new(base),
+                    lo,
+                    hi,
+                    span,
+                })
+            }
+            Some(n) => Some(Expr::Index {
+                base: Box::new(base),
+                index: Box::new(self.expr(&n)?),
+                span,
+            }),
+        }
     }
 
     fn bin_expr(&mut self, node: &SyntaxNode) -> Option<Expr> {
@@ -669,6 +720,7 @@ fn is_expr_kind(kind: SyntaxKind) -> bool {
         SyntaxKind::LITERAL
             | SyntaxKind::CALL_EXPR
             | SyntaxKind::FIELD_EXPR
+            | SyntaxKind::INDEX_EXPR
             | SyntaxKind::PATH_EXPR
             | SyntaxKind::BIN_EXPR
             | SyntaxKind::PREFIX_EXPR

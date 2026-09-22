@@ -332,6 +332,9 @@ impl Builder<'_> {
             HirExprKind::Var(_) => "var",
             HirExprKind::Call { .. } => "call",
             HirExprKind::Field { .. } => "field",
+            HirExprKind::StrLen { .. } => "strlen",
+            HirExprKind::Index { .. } => "index",
+            HirExprKind::Slice { .. } => "slice",
             HirExprKind::Binary { .. } => "binary",
             HirExprKind::Unary { .. } => "unary",
             HirExprKind::If { .. } => "if",
@@ -401,6 +404,33 @@ impl Builder<'_> {
                             }
                         }
                     }
+                }
+            }
+            HirExprKind::StrLen { base } => {
+                let bn = self.expr_node(body, tables, base);
+                self.g.add_edge(n, bn, EdgeKind::Contains);
+            }
+            HirExprKind::Index { base, index } => {
+                let bn = self.expr_node(body, tables, base);
+                self.g
+                    .add_edge_attr(n, bn, EdgeKind::Contains, "position", json!(0));
+                let ix = self.expr_node(body, tables, index);
+                self.g
+                    .add_edge_attr(n, ix, EdgeKind::Contains, "position", json!(1));
+            }
+            HirExprKind::Slice { base, lo, hi } => {
+                let bn = self.expr_node(body, tables, base);
+                self.g
+                    .add_edge_attr(n, bn, EdgeKind::Contains, "position", json!(0));
+                if let Some(l) = lo {
+                    let ln = self.expr_node(body, tables, l);
+                    self.g
+                        .add_edge_attr(n, ln, EdgeKind::Contains, "role", json!("lo"));
+                }
+                if let Some(h) = hi {
+                    let hn = self.expr_node(body, tables, h);
+                    self.g
+                        .add_edge_attr(n, hn, EdgeKind::Contains, "role", json!("hi"));
                 }
             }
             HirExprKind::Binary { op, lhs, rhs } => {

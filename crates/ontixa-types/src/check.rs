@@ -356,6 +356,19 @@ impl Checker<'_> {
     fn field_ty(&mut self, ty: Ty, name: InternId, span: Span) -> Option<Ty> {
         match ty {
             Ty::Poison => None,
+            // `s.len` reads fine as an expression (the Field arm
+            // intercepts it), but it is not a place — `s.len = n`
+            // must fail here rather than as a generic field error.
+            Ty::Str if self.interner.resolve(name) == "len" => {
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::UnsupportedOperation,
+                        "`str.len` is a read-only property; cannot assign to it",
+                    )
+                    .primary(span),
+                );
+                None
+            }
             Ty::Struct(def) => {
                 let shape = self.scope.data_shape(def).expect("Struct Ty of a data def");
                 match shape.field_index.get(&name) {
@@ -415,18 +428,48 @@ impl Checker<'_> {
             HirExprKind::Call { def, args } => self.call_ty(def, &args, span),
             HirExprKind::Field { base, name, .. } => {
                 let base_ty = self.expr_ty(base, None);
-                match self.field_ty(base_ty, name.id, name.span) {
-                    Some(t) => {
-                        // Record the resolved field index for MIR.
-                        let idx = self.field_index_of(base_ty, name.id);
-                        if let HirExprKind::Field { field, .. } = &mut self.exprs[id.index()].kind {
-                            *field = idx;
+                if base_ty == Ty::Str && self.interner.resolve(name.id) == "len" {
+                    // `str.len` is a built-in property, not a field —
+                    // rewrite the node so MIR and ownership analysis
+                    // never treat it as a projection.
+                    self.exprs[id.index()].kind = HirExprKind::StrLen { base };
+                    Ty::I32
+                } else {
+                    match self.field_ty(base_ty, name.id, name.span) {
+                        Some(t) => {
+                            // Record the resolved field index for MIR.
+                            let idx = self.field_index_of(base_ty, name.id);
+                            if let HirExprKind::Field { field, .. } =
+                                &mut self.exprs[id.index()].kind
+                            {
+                                *field = idx;
+                            }
+                            t
                         }
-                        t
+                        None => Ty::Poison,
                     }
-                    None => Ty::Poison,
                 }
             }
+            HirExprKind::StrLen { base } => {
+                // Only the checker creates `StrLen`, and only for `str`
+                // bases — any other base means an internal gap.
+                match self.expr_ty(base, None) {
+                    Ty::Str => Ty::I32,
+                    Ty::Poison => Ty::Poison,
+                    other => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::Internal,
+                                format!("`len` property on {}", self.show(other)),
+                            )
+                            .primary(span),
+                        );
+                        Ty::Poison
+                    }
+                }
+            }
+            HirExprKind::Index { base, index } => self.index_ty(base, index),
+            HirExprKind::Slice { base, lo, hi } => self.slice_ty(base, lo, hi),
             HirExprKind::Binary { op, lhs, rhs } => self.binary_ty(op, lhs, rhs, span),
             HirExprKind::Unary { op, expr } => self.unary_ty(op, expr, span),
             HirExprKind::If { cond, then, else_ } => self.if_ty(cond, then, else_, expected, span),
@@ -512,6 +555,78 @@ impl Checker<'_> {
         ret
     }
 
+    /// `base[index]`: only `str` indexes, only by integer position;
+    /// the result is a one-character `str`.
+    fn index_ty(&mut self, base: ExprId, index: ExprId) -> Ty {
+        let b = self.expr_ty(base, None);
+        let i = self.expr_ty(index, None);
+        let mut ok = true;
+        if b != Ty::Str && b != Ty::Poison {
+            let bspan = self.node(base).span;
+            self.diags.push(
+                Diagnostic::error(
+                    Code::UnsupportedOperation,
+                    format!("cannot index {}", self.show(b)),
+                )
+                .primary(bspan),
+            );
+            ok = false;
+        }
+        if !i.is_integer() && i != Ty::Poison {
+            let ispan = self.node(index).span;
+            self.diags.push(
+                Diagnostic::error(
+                    Code::TypeMismatch,
+                    format!("string index must be an integer, found {}", self.show(i)),
+                )
+                .primary(ispan),
+            );
+            ok = false;
+        }
+        if ok && b == Ty::Str {
+            Ty::Str
+        } else {
+            Ty::Poison
+        }
+    }
+
+    /// `base[lo..hi]`: only `str` slices; present bounds must be
+    /// integers; the result is a `str`.
+    fn slice_ty(&mut self, base: ExprId, lo: Option<ExprId>, hi: Option<ExprId>) -> Ty {
+        let b = self.expr_ty(base, None);
+        let mut ok = true;
+        if b != Ty::Str && b != Ty::Poison {
+            let bspan = self.node(base).span;
+            self.diags.push(
+                Diagnostic::error(
+                    Code::UnsupportedOperation,
+                    format!("cannot slice {}", self.show(b)),
+                )
+                .primary(bspan),
+            );
+            ok = false;
+        }
+        for bound in [lo, hi].into_iter().flatten() {
+            let t = self.expr_ty(bound, None);
+            if !t.is_integer() && t != Ty::Poison {
+                let bspan = self.node(bound).span;
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::TypeMismatch,
+                        format!("slice bound must be an integer, found {}", self.show(t)),
+                    )
+                    .primary(bspan),
+                );
+                ok = false;
+            }
+        }
+        if ok && b == Ty::Str {
+            Ty::Str
+        } else {
+            Ty::Poison
+        }
+    }
+
     fn binary_ty(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, span: Span) -> Ty {
         let l = self.expr_ty(lhs, None);
         let r = self.expr_ty(rhs, Some(l));
@@ -519,6 +634,9 @@ impl Checker<'_> {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 if l.is_numeric() && l.compatible(r) {
                     l
+                } else if op == BinOp::Add && l == Ty::Str && r == Ty::Str {
+                    // String concatenation.
+                    Ty::Str
                 } else if l == Ty::Poison || r == Ty::Poison {
                     Ty::Poison
                 } else {
@@ -565,7 +683,8 @@ impl Checker<'_> {
                 }
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                if l.is_numeric() && l.compatible(r) {
+                if (l.is_numeric() || l == Ty::Str) && l.compatible(r) {
+                    // Numeric ordering, or lexicographic `str` ordering.
                     Ty::Bool
                 } else if l == Ty::Poison || r == Ty::Poison {
                     Ty::Poison

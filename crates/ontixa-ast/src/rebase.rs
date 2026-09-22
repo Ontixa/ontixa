@@ -157,6 +157,26 @@ fn expr(e: &Expr, base: u32) -> Expr {
             name: ident(name, base),
             span: rel(*span, base),
         },
+        Expr::Index {
+            base: b,
+            index,
+            span,
+        } => Expr::Index {
+            base: Box::new(expr(b, base)),
+            index: Box::new(expr(index, base)),
+            span: rel(*span, base),
+        },
+        Expr::Slice {
+            base: b,
+            lo,
+            hi,
+            span,
+        } => Expr::Slice {
+            base: Box::new(expr(b, base)),
+            lo: lo.as_deref().map(|e| Box::new(expr(e, base))),
+            hi: hi.as_deref().map(|e| Box::new(expr(e, base))),
+            span: rel(*span, base),
+        },
         Expr::Binary { op, lhs, rhs, span } => Expr::Binary {
             op: *op,
             lhs: Box::new(expr(lhs, base)),

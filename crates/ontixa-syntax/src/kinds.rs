@@ -173,6 +173,10 @@ pub enum SyntaxKind {
     STRUCT_LIT,
     /// `name: expr` inside a struct literal.
     STRUCT_LIT_FIELD,
+    /// `base[i]` or `base[lo..hi]` — string indexing and slicing.
+    INDEX_EXPR,
+    /// `lo .. hi` inside brackets — either bound may be absent.
+    RANGE,
     /// Parser error recovery node; wraps skipped tokens.
     ERROR,
     /// End of input marker used by the parser internally.
@@ -499,6 +503,8 @@ static KIND_TABLE: &[SyntaxKind] = &[
     SyntaxKind::LITERAL,
     SyntaxKind::STRUCT_LIT,
     SyntaxKind::STRUCT_LIT_FIELD,
+    SyntaxKind::INDEX_EXPR,
+    SyntaxKind::RANGE,
     SyntaxKind::ERROR,
     SyntaxKind::EOF,
 ];

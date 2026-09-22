@@ -197,6 +197,17 @@ impl<'a> Interp<'a> {
         Ok(c)
     }
 
+    /// Reads an integer operand — a slice bound. Non-integers are a
+    /// trap, not a silent coercion (type checking prevents them).
+    fn int_operand(&self, locals: &[Cell], op: &Operand) -> Result<i128, RuntimeError> {
+        match self.operand(locals, op)? {
+            Value::Int(i) => Ok(i),
+            v => Err(RuntimeError::Trap(format!(
+                "non-integer string bound {v:?}"
+            ))),
+        }
+    }
+
     /// Reads an operand's value (place contents are copied out).
     fn operand(&self, locals: &[Cell], op: &Operand) -> Result<Value, RuntimeError> {
         match op {
@@ -236,6 +247,57 @@ impl<'a> Interp<'a> {
                 let l = self.operand(locals, lhs)?;
                 let r = self.operand(locals, rhs)?;
                 binary(*op, l, r)
+            }
+            Rvalue::StrLen { base } => match self.operand(locals, base)? {
+                // `str.len` counts characters (Unicode scalars), not
+                // bytes — indexing and slicing share the same unit.
+                Value::Str(s) => Ok(Value::Int(s.chars().count() as i128)),
+                v => Err(RuntimeError::Trap(format!("`len` on non-string {v:?}"))),
+            },
+            Rvalue::Index { base, index } => {
+                let s = self.operand(locals, base)?;
+                let i = self.operand(locals, index)?;
+                match (s, i) {
+                    (Value::Str(s), Value::Int(i)) => {
+                        let len = s.chars().count();
+                        if i < 0 || i >= len as i128 {
+                            return Err(RuntimeError::Trap(format!(
+                                "string index {i} out of bounds (length {len})"
+                            )));
+                        }
+                        let c = s.chars().nth(i as usize).expect("index checked");
+                        Ok(Value::Str(Rc::from(c.to_string().as_str())))
+                    }
+                    (s, i) => Err(RuntimeError::Trap(format!("bad index {i:?} into {s:?}"))),
+                }
+            }
+            Rvalue::Slice { base, lo, hi } => {
+                let s = match self.operand(locals, base)? {
+                    Value::Str(s) => s,
+                    v => {
+                        return Err(RuntimeError::Trap(format!("cannot slice {v:?}")));
+                    }
+                };
+                let len = s.chars().count() as i128;
+                let lo = match lo {
+                    Some(op) => self.int_operand(locals, op)?,
+                    None => 0,
+                };
+                let hi = match hi {
+                    Some(op) => self.int_operand(locals, op)?,
+                    None => len,
+                };
+                if lo < 0 || hi < lo || hi > len {
+                    return Err(RuntimeError::Trap(format!(
+                        "string slice {lo}..{hi} out of bounds (length {len})"
+                    )));
+                }
+                let out: String = s
+                    .chars()
+                    .skip(lo as usize)
+                    .take((hi - lo) as usize)
+                    .collect();
+                Ok(Value::Str(Rc::from(out.as_str())))
             }
             Rvalue::StructLit { def, fields } => {
                 let n = self
@@ -351,12 +413,16 @@ fn binary(op: BinOp, l: Value, r: Value) -> Result<Value, RuntimeError> {
         (BinOp::Ne, a, b) => Bool(!values_eq(&a, &b)),
         (BinOp::Lt, Int(a), Int(b)) => Bool(a < b),
         (BinOp::Lt, Float(a), Float(b)) => Bool(a < b),
+        (BinOp::Lt, Str(a), Str(b)) => Bool(a < b),
         (BinOp::Le, Int(a), Int(b)) => Bool(a <= b),
         (BinOp::Le, Float(a), Float(b)) => Bool(a <= b),
+        (BinOp::Le, Str(a), Str(b)) => Bool(a <= b),
         (BinOp::Gt, Int(a), Int(b)) => Bool(a > b),
         (BinOp::Gt, Float(a), Float(b)) => Bool(a > b),
+        (BinOp::Gt, Str(a), Str(b)) => Bool(a > b),
         (BinOp::Ge, Int(a), Int(b)) => Bool(a >= b),
         (BinOp::Ge, Float(a), Float(b)) => Bool(a >= b),
+        (BinOp::Ge, Str(a), Str(b)) => Bool(a >= b),
         (BinOp::And, Bool(a), Bool(b)) => Bool(a && b),
         (BinOp::Or, Bool(a), Bool(b)) => Bool(a || b),
         (BinOp::Add, Str(a), Str(b)) => Str(Rc::from(format!("{a}{b}").as_str())),

@@ -174,6 +174,31 @@ mod tests {
     }
 
     #[test]
+    fn string_ops_have_graph_nodes() {
+        let (g, _, _, _, _, diags) =
+            graph_src("fn main() -> i32 { let s = \"abc\"; return s[0].len + s[1..].len; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        fn kind(n: &SpgNode) -> &str {
+            n.attrs
+                .get("expr_kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+        }
+        assert!(g.nodes.iter().any(|n| kind(n) == "index"));
+        assert!(g.nodes.iter().any(|n| kind(n) == "slice"));
+        assert_eq!(g.nodes.iter().filter(|n| kind(n) == "strlen").count(), 2);
+        // The slice's `lo` bound edge is role-tagged.
+        let slice = g
+            .nodes
+            .iter()
+            .find(|n| kind(n) == "slice")
+            .expect("slice node");
+        assert!(g.edges.iter().any(|e| {
+            e.from == slice.id && e.attrs.get("role").and_then(|v| v.as_str()) == Some("lo")
+        }));
+    }
+
+    #[test]
     fn type_nodes_are_deduplicated() {
         let (g, _, _, _, _, diags) = graph_src(
             "fn f(a: i32, b: i32) -> i32 { return a + b; } fn main() -> i32 { return f(1, 2); }",

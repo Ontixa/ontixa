@@ -494,7 +494,16 @@ fn callees_of(body: &HirBody) -> FxHashSet<DefId> {
                 out.insert(*def);
                 stack.extend(args.iter().copied());
             }
-            HirExprKind::Field { base, .. } => stack.push(*base),
+            HirExprKind::Field { base, .. } | HirExprKind::StrLen { base } => stack.push(*base),
+            HirExprKind::Index { base, index } => {
+                stack.push(*base);
+                stack.push(*index);
+            }
+            HirExprKind::Slice { base, lo, hi } => {
+                stack.push(*base);
+                stack.extend(*lo);
+                stack.extend(*hi);
+            }
             HirExprKind::Binary { lhs, rhs, .. } => {
                 stack.push(*lhs);
                 stack.push(*rhs);
@@ -725,6 +734,45 @@ impl FactCollector<'_, '_> {
                     Carriers::default()
                 } else {
                     self.eval(base, ctx)
+                }
+            }
+            HirExprKind::StrLen { base } => {
+                self.eval(base, Ctx::Read);
+                Carriers::default()
+            }
+            HirExprKind::Index { base, index } => {
+                // Indexing yields a fresh value; `str` results are
+                // copy-typed so the base is only read. Bounds are
+                // always evaluated (read).
+                if self.tables.ty_of(id).is_copy() {
+                    self.eval(base, Ctx::Read);
+                    self.eval(index, Ctx::Read);
+                    Carriers::default()
+                } else {
+                    let out = self.eval(base, ctx);
+                    self.eval(index, Ctx::Read);
+                    out
+                }
+            }
+            HirExprKind::Slice { base, lo, hi } => {
+                if self.tables.ty_of(id).is_copy() {
+                    self.eval(base, Ctx::Read);
+                    if let Some(l) = lo {
+                        self.eval(l, Ctx::Read);
+                    }
+                    if let Some(h) = hi {
+                        self.eval(h, Ctx::Read);
+                    }
+                    Carriers::default()
+                } else {
+                    let out = self.eval(base, ctx);
+                    if let Some(l) = lo {
+                        self.eval(l, Ctx::Read);
+                    }
+                    if let Some(h) = hi {
+                        self.eval(h, Ctx::Read);
+                    }
+                    out
                 }
             }
             HirExprKind::Call { def, args } => {
@@ -968,6 +1016,28 @@ impl Enforcer<'_> {
                     self.eval(base, Ctx::Read);
                 } else {
                     self.eval(base, ctx);
+                }
+            }
+            HirExprKind::StrLen { base } => self.eval(base, Ctx::Read),
+            HirExprKind::Index { base, index } => {
+                if self.tables.ty_of(id).is_copy() {
+                    self.eval(base, Ctx::Read);
+                } else {
+                    self.eval(base, ctx);
+                }
+                self.eval(index, Ctx::Read);
+            }
+            HirExprKind::Slice { base, lo, hi } => {
+                if self.tables.ty_of(id).is_copy() {
+                    self.eval(base, Ctx::Read);
+                } else {
+                    self.eval(base, ctx);
+                }
+                if let Some(l) = lo {
+                    self.eval(l, Ctx::Read);
+                }
+                if let Some(h) = hi {
+                    self.eval(h, Ctx::Read);
                 }
             }
             HirExprKind::Call { def, args } => {

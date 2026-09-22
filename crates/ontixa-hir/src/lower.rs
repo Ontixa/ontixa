@@ -438,6 +438,17 @@ impl BodyLowerer<'_> {
                     span,
                 )
             }
+            Expr::Index { base, index, .. } => {
+                let base = self.expr(base)?;
+                let index = self.expr(index)?;
+                self.alloc_expr(HirExprKind::Index { base, index }, span)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                let base = self.expr(base)?;
+                let lo = lo.as_deref().and_then(|e| self.expr(e));
+                let hi = hi.as_deref().and_then(|e| self.expr(e));
+                self.alloc_expr(HirExprKind::Slice { base, lo, hi }, span)
+            }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let lhs = self.expr(lhs)?;
                 let rhs = self.expr(rhs)?;

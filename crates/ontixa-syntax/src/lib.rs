@@ -88,6 +88,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_string_index_and_slices() {
+        let root =
+            parse_ok("fn f(s: str) -> str { return s[0] + s[1..3] + s[2..] + s[..4] + s[..]; }");
+        // One index + four range forms share the INDEX_EXPR node;
+        // each `..` range is a RANGE child.
+        assert_eq!(
+            root.descendants()
+                .filter(|n| n.kind() == SyntaxKind::INDEX_EXPR)
+                .count(),
+            5
+        );
+        assert_eq!(
+            root.descendants()
+                .filter(|n| n.kind() == SyntaxKind::RANGE)
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn index_binds_tighter_than_infix() {
+        // `s[0] == "a"` — the bracket is a postfix op on `s`, then
+        // `==` compares the result.
+        let root = parse_ok("fn f(s: str) -> bool { return s[0] == \"a\"; }");
+        let bin = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::BIN_EXPR)
+            .expect("binary expr");
+        assert!(bin.children().any(|n| n.kind() == SyntaxKind::INDEX_EXPR));
+    }
+
+    #[test]
+    fn empty_brackets_report() {
+        let (_, diags) = parse_file("fn f(s: str) -> str { return s[]; }");
+        assert!(diags.has_errors());
+    }
+
+    #[test]
     fn recovers_from_garbage() {
         let (root, diags) = parse_file("fn f( { return 1; } fn g() {}");
         assert!(diags.has_errors());
@@ -113,6 +151,9 @@ mod tests {
             "data D { x }",
             "\u{0}\u{0}\u{0}",
             "fn f() { x = = = ; }",
+            "fn f(s: str) { s[]; }",
+            "fn f(s: str) { s[; }",
+            "fn f(s: str) { s[.. ..]; }",
         ] {
             let _ = parse_file(src); // must not panic
         }
