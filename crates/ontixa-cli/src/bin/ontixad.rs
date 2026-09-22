@@ -13,6 +13,7 @@
 //! {"op":"set",     "path":"x.ixa", "text":"..."}    → updates source (opens if new)
 //! {"op":"check",   "path":"x.ixa"}                  → check envelope; result.evaluated lists re-run queries
 //! {"op":"explain", "path":"x.ixa", "symbol":"s"}    → explain envelope (symbol optional)
+//! {"op":"fmt",     "path":"x.ixa"}                  → fmt envelope: canonical text, no mutation
 //! {"op":"stats"}                                   → result {queries, oracle, last_evaluated}
 //! {"op":"close",   "path":"x.ixa"}                  → drops the path mapping
 //! {"op":"shutdown"}                                → exits 0
@@ -289,6 +290,37 @@ fn handle(s: &mut Session, req: &Json) -> Json {
                                 .into_parts()
                                 .0
                         }
+                    }
+                }
+            }
+        },
+        // `fmt` formats the bound source without mutating it — the
+        // canonical text comes back in `result.formatted`; a client
+        // that wants it installed issues a `set` with that text
+        // (same split as `rename`, which returns `new_sources`).
+        // Formatting is syntactic and per-file, so `open` alone —
+        // no workspace load — is enough.
+        "fmt" => match s.open(path) {
+            Err(msg) => Envelope::new("fmt").error("io", msg, 2).into_parts().0,
+            Ok(f) => {
+                let text = s.db.source(f).to_string();
+                match ontixa_syntax::format_file(&text) {
+                    Ok(formatted) => {
+                        Envelope::new("fmt")
+                            .result(json!({
+                                "file": path,
+                                "changed": formatted != text,
+                                "formatted": formatted,
+                            }))
+                            .into_parts()
+                            .0
+                    }
+                    Err(mut diags) => {
+                        diags.tag_file_from(0, FileId::new(f as u32));
+                        Envelope::new("fmt")
+                            .diagnostics(&diags, &s.source_files())
+                            .into_parts()
+                            .0
                     }
                 }
             }

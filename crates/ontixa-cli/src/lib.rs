@@ -3,6 +3,7 @@
 
 pub mod envelope;
 pub mod explain;
+pub mod fmt;
 pub mod persist;
 pub mod rename;
 pub mod workspace;

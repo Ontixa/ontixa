@@ -758,6 +758,143 @@ fn daemon_rename_previews_applies_and_guards_stale() {
     assert!(math.contains("fn double("), "{math}");
 }
 
+// ---------- canonical formatting ----------
+
+const MESSY: &str = "fn f( x:i32)->i32{return x;}";
+const TIDY: &str = "fn f(x: i32) -> i32 {\n    return x;\n}\n";
+
+/// `fmt` with no flags is the preview: canonical text on stdout,
+/// nothing written — the same dry-run shape as `rename`.
+#[test]
+fn fmt_preview_prints_canonical_source_and_writes_nothing() {
+    let f = src_file("fmtprev", MESSY);
+    let before = std::fs::read_to_string(&f).unwrap();
+    let out = ontixa(&["fmt", f.to_str().unwrap()]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(stdout_str(&out), TIDY);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), before);
+}
+
+#[test]
+fn fmt_json_envelope_reports_would_change() {
+    let f = src_file("fmtjson", MESSY);
+    let out = ontixa(&["fmt", f.to_str().unwrap(), "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["command"], "fmt");
+    assert_eq!(d["success"], true);
+    assert_eq!(d["result"]["would_change"], true);
+    let file = &d["result"]["files"][0];
+    assert_eq!(file["changed"], true);
+    assert_eq!(file["formatted"], TIDY);
+    assert_eq!(file["written"], false);
+}
+
+/// `--check` is the CI gate: exit 1 plus the offending paths on
+/// stdout, nothing written; an already-canonical file exits 0.
+#[test]
+fn fmt_check_exits_nonzero_without_writing() {
+    let f = src_file("fmtcheck", MESSY);
+    let before = std::fs::read_to_string(&f).unwrap();
+    let out = ontixa(&["fmt", f.to_str().unwrap(), "--check"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout_str(&out).trim(), f.to_str().unwrap());
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), before);
+    std::fs::write(&f, TIDY).unwrap();
+    let out = ontixa(&["fmt", f.to_str().unwrap(), "--check"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(stdout_str(&out).trim().is_empty());
+}
+
+/// In JSON mode a failed `--check` is a verdict, not a command
+/// error: `success` stays true, `would_change` carries it, the exit
+/// code still gates.
+#[test]
+fn fmt_check_json_keeps_success_but_exits_1() {
+    let f = src_file("fmtcheckjson", MESSY);
+    let out = ontixa(&["fmt", f.to_str().unwrap(), "--check", "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true);
+    assert_eq!(d["result"]["would_change"], true);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+/// `--write` persists the canonical form (staged + journaled like
+/// `rename --apply`), the formatted program still runs to the same
+/// value, and a second `--write` is a no-op — idempotence at the
+/// command level.
+#[test]
+fn fmt_write_persists_and_output_still_runs() {
+    let f = src_file(
+        "fmtwrite",
+        "data P{x:i32;}fn f(p:P)->i32{return p.x;}fn main()->i32{return f(P{x:7});}",
+    );
+    let out = ontixa(&["fmt", f.to_str().unwrap(), "--write"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let written = std::fs::read_to_string(&f).unwrap();
+    assert!(written.contains("data P {"), "{written}");
+    let run = ontixa(&["run", f.to_str().unwrap(), "--json"]);
+    assert_eq!(envelope(&run)["result"]["value"], 7);
+    let again = ontixa(&["fmt", f.to_str().unwrap(), "--write", "--json"]);
+    let d = envelope(&again);
+    assert_eq!(d["result"]["would_change"], false);
+    assert_eq!(d["result"]["files"][0]["written"], false);
+}
+
+/// A file that doesn't parse is never rewritten — its diagnostics
+/// surface in the envelope and the file is skipped.
+#[test]
+fn fmt_refuses_parse_errors() {
+    let f = src_file("fmterr", "fn f( { return 1; }");
+    let before = std::fs::read_to_string(&f).unwrap();
+    let out = ontixa(&["fmt", f.to_str().unwrap(), "--write", "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], false);
+    assert!(!d["diagnostics"].as_array().unwrap().is_empty());
+    assert!(d["result"]["files"][0]["formatted"].is_null());
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), before);
+}
+
+/// Multiple files format independently — one envelope, one entry
+/// per input file.
+#[test]
+fn fmt_multiple_files_report_per_file() {
+    let a = src_file("fmtmulti_a", MESSY);
+    let b = src_file("fmtmulti_b", TIDY);
+    let out = ontixa(&[
+        "fmt",
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        "--check",
+        "--json",
+    ]);
+    let d = envelope(&out);
+    let files = d["result"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["changed"], true);
+    assert_eq!(files[1]["changed"], false);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+/// The daemon `fmt` op returns the canonical text of the bound
+/// source without mutating it — the client installs it via `set`.
+#[test]
+fn daemon_fmt_returns_canonical_text_without_mutating() {
+    let f = src_file("daemonfmt", MESSY);
+    let p = f.to_str().unwrap();
+    let rs = daemon(&[
+        serde_json::json!({"op": "set", "path": p, "text": MESSY}),
+        serde_json::json!({"op": "fmt", "path": p}),
+        serde_json::json!({"op": "fmt", "path": p}),
+    ]);
+    assert_eq!(rs[1]["command"], "fmt");
+    assert_eq!(rs[1]["success"], true);
+    assert_eq!(rs[1]["result"]["changed"], true);
+    assert_eq!(rs[1]["result"]["formatted"], TIDY);
+    // Not mutated: the second demand still reports `changed`.
+    assert_eq!(rs[2]["result"]["changed"], true);
+}
+
 /// The daemon `rename` op with `"at"` selects a body-local binding
 /// positionally — same transaction core, same guards.
 #[test]
