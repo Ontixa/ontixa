@@ -40,14 +40,18 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   re-emission that preserves comments, idempotent; CLI
   preview/`--check`/`--write` + daemon `fmt` op (formats bound
   sources without mutating)
+- string ops + `str` slices: `s + t` concatenation, `s.len` (a
+  read-only `i32` property), `s[i]` character indexing, `s[lo..hi]`
+  / `s[lo..]` / `s[..hi]` / `s[..]` slicing, lexicographic ordering.
+  Indices count Unicode scalars; out-of-bounds traps. Demo:
+  `examples/strings.ixa`
 
 Remaining:
 
 - arrays/slices + `for` loops
 - `match`-like selection over `data` variants (enum data)
 - `return`-less tail returns everywhere (blocks already tail-expr)
-- string ops + `str` slices
-- more primitives (`u*`, `f32`, `char`)
+- more primitives (`char` — `u*`/`f32`/`f64`/`str` already resolve)
 - semantic patches beyond rename (structured apply of arbitrary
   edits — the transaction shape exists; generality doesn't)
 - finer-grained file-level queries (per-item parse, incremental

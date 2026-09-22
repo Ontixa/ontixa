@@ -58,6 +58,16 @@ mod tests {
         }
     }
 
+    /// Runs `main` and extracts a string result.
+    fn eval_str(src: &str) -> String {
+        let (v, _m, _h, _i, diags) = run_src(src, "main").expect("run");
+        assert!(diags.is_empty(), "{diags:?}");
+        match v {
+            Value::Str(s) => s.to_string(),
+            other => panic!("expected str, got {other:?}"),
+        }
+    }
+
     #[test]
     fn runs_literal_return() {
         assert_eq!(eval_int("fn main() -> i32 { return 42; }"), 42);
@@ -153,6 +163,72 @@ mod tests {
         match err {
             RuntimeError::Trap(m) => assert!(m.contains("division")),
             other => panic!("expected trap, got {other:?}"),
+        }
+    }
+
+    // ---- strings -----------------------------------------------------
+
+    #[test]
+    fn runs_string_concat_len_and_order() {
+        assert_eq!(
+            eval_str("fn main() -> str { return \"ab\" + \"cd\"; }"),
+            "abcd"
+        );
+        assert_eq!(eval_int("fn main() -> i32 { return \"héllo\".len; }"), 5);
+        // Lexicographic order on Unicode scalars.
+        assert_eq!(
+            eval_int("fn main() -> i32 { return if \"abc\" < \"abd\" { 1 } else { 0 }; }"),
+            1
+        );
+        assert_eq!(
+            eval_int("fn main() -> i32 { return if \"b\" >= \"a\" { 1 } else { 0 }; }"),
+            1
+        );
+    }
+
+    #[test]
+    fn runs_string_index_and_slice() {
+        assert_eq!(eval_str("fn main() -> str { return \"héllo\"[1]; }"), "é");
+        assert_eq!(
+            eval_str("fn main() -> str { return \"abcdef\"[1..4]; }"),
+            "bcd"
+        );
+        assert_eq!(
+            eval_str("fn main() -> str { return \"abcdef\"[3..]; }"),
+            "def"
+        );
+        assert_eq!(
+            eval_str("fn main() -> str { return \"abcdef\"[..2]; }"),
+            "ab"
+        );
+        assert_eq!(eval_str("fn main() -> str { return \"abc\"[..]; }"), "abc");
+        // Empty ranges are valid.
+        assert_eq!(eval_str("fn main() -> str { return \"abc\"[1..1]; }"), "");
+    }
+
+    #[test]
+    fn string_index_out_of_bounds_traps() {
+        let err = run_src("fn main() -> str { return \"ab\"[2]; }", "main").unwrap_err();
+        match err {
+            RuntimeError::Trap(m) => assert!(m.contains("out of bounds"), "{m}"),
+            other => panic!("expected trap, got {other:?}"),
+        }
+        let err = run_src("fn main() -> str { return \"ab\"[0 - 1]; }", "main").unwrap_err();
+        match err {
+            RuntimeError::Trap(m) => assert!(m.contains("out of bounds"), "{m}"),
+            other => panic!("expected trap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_slice_out_of_bounds_traps() {
+        for slice in ["1..9", "2..1", "0 - 1..2"] {
+            let src = format!("fn main() -> str {{ return \"abc\"[{slice}]; }}");
+            let err = run_src(&src, "main").unwrap_err();
+            match err {
+                RuntimeError::Trap(m) => assert!(m.contains("out of bounds"), "{m}"),
+                other => panic!("expected trap, got {other:?}"),
+            }
         }
     }
 

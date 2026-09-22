@@ -146,6 +146,98 @@ mod tests {
     }
 
     #[test]
+    fn lowers_index_and_slice() {
+        let m = module("fn f(s: str) -> str { return s[0] + s[1..3] + s[2..] + s[..4] + s[..]; }");
+        match &m.items[0] {
+            Item::Fn(f) => match &f.body.stmts[0] {
+                Stmt::Return {
+                    value: Some(Expr::Binary { lhs, .. }),
+                    ..
+                } => {
+                    // Leftmost operand of the `+` chain is `s[0]`.
+                    let mut cur: &Expr = lhs;
+                    loop {
+                        match cur {
+                            Expr::Index { base, index, .. } => {
+                                assert!(matches!(**base, Expr::Var { .. }));
+                                assert!(matches!(
+                                    **index,
+                                    Expr::Literal {
+                                        value: Literal::Int(0),
+                                        ..
+                                    }
+                                ));
+                                break;
+                            }
+                            Expr::Binary { lhs: l, .. } => cur = l,
+                            other => panic!("expected index, got {other:?}"),
+                        }
+                    }
+                }
+                other => panic!("expected return, got {other:?}"),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn lowers_slice_bounds() {
+        // `a + b + c` is `(a + b) + c`.
+        let m = module("fn f(s: str) -> str { return s[1..] + s[..2] + s[..]; }");
+        match &m.items[0] {
+            Item::Fn(f) => match &f.body.stmts[0] {
+                Stmt::Return {
+                    value: Some(Expr::Binary { lhs, rhs, .. }),
+                    ..
+                } => {
+                    // rhs: `s[..]` — both bounds absent.
+                    assert!(matches!(
+                        **rhs,
+                        Expr::Slice {
+                            lo: None,
+                            hi: None,
+                            ..
+                        }
+                    ));
+                    match &**lhs {
+                        Expr::Binary {
+                            lhs: l2, rhs: r2, ..
+                        } => {
+                            // `s[1..]`: lower only.
+                            assert!(matches!(
+                                **l2,
+                                Expr::Slice {
+                                    lo: Some(_),
+                                    hi: None,
+                                    ..
+                                }
+                            ));
+                            // `s[..2]`: upper only.
+                            assert!(matches!(
+                                **r2,
+                                Expr::Slice {
+                                    lo: None,
+                                    hi: Some(_),
+                                    ..
+                                }
+                            ));
+                        }
+                        other => panic!("expected binary, got {other:?}"),
+                    }
+                }
+                other => panic!("expected return, got {other:?}"),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn index_is_not_assignment_target() {
+        let (_, diags) = parse_ast("fn f(s: str) { s[0] = \"x\"; }");
+        assert!(diags.has_errors());
+    }
+
+    #[test]
     fn serializes_to_json() {
         let m = module("fn main() -> i32 { return 42; }");
         let json = serde_json::to_value(&m).expect("serialize");

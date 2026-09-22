@@ -103,6 +103,28 @@ pub enum Rvalue {
         /// Operand.
         operand: Operand,
     },
+    /// `base.len` — a `str`'s length in characters (`i32`).
+    StrLen {
+        /// The string operand.
+        base: Operand,
+    },
+    /// `base[index]` — character indexing into a `str`; yields a
+    /// one-character `str`.
+    Index {
+        /// The string operand.
+        base: Operand,
+        /// The character index operand (integer).
+        index: Operand,
+    },
+    /// `base[lo..hi]` — a `str` slice; a `None` bound is open.
+    Slice {
+        /// The string operand.
+        base: Operand,
+        /// Lower bound (inclusive), when present.
+        lo: Option<Operand>,
+        /// Upper bound (exclusive), when present.
+        hi: Option<Operand>,
+    },
     /// Direct call; callee contract comes from `param_behaviors`.
     Call {
         /// Callee definition.

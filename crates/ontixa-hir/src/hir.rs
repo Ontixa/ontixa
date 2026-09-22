@@ -384,6 +384,30 @@ pub enum HirExprKind {
         /// Field position index, filled by type checking.
         field: Option<u32>,
     },
+    /// `base.len` on a `str` — a built-in read-only property. The
+    /// type checker rewrites a `Field` node into this kind so
+    /// downstream passes never mistake it for a data projection.
+    StrLen {
+        /// The string expression.
+        base: ExprId,
+    },
+    /// Indexing (`base[index]`); for `str` the index is a character
+    /// position and the result is a one-character `str`.
+    Index {
+        /// Indexed expression.
+        base: ExprId,
+        /// Index expression.
+        index: ExprId,
+    },
+    /// Slicing (`base[lo..hi]`); either bound may be absent.
+    Slice {
+        /// Sliced expression.
+        base: ExprId,
+        /// Optional lower bound.
+        lo: Option<ExprId>,
+        /// Optional upper bound.
+        hi: Option<ExprId>,
+    },
     /// Infix operation.
     Binary {
         /// Operator.

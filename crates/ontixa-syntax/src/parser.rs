@@ -536,6 +536,13 @@ impl Parser<'_> {
                     self.name_ref();
                     self.finish();
                 }
+                SyntaxKind::L_BRACKET => {
+                    self.start_at(cp, SyntaxKind::INDEX_EXPR);
+                    self.bump(); // [
+                    self.index_content();
+                    self.expect(SyntaxKind::R_BRACKET, "to close the index");
+                    self.finish();
+                }
                 _ => break,
             }
         }
@@ -624,6 +631,38 @@ impl Parser<'_> {
                     self.finish();
                 }
             }
+        }
+    }
+
+    /// Inside `s[...]`: an index (`i`), a range (`lo..hi`, `lo..`,
+    /// `..hi`, `..`), or an error (empty brackets). `..` is not an
+    /// infix operator, so a leading expression stops before it.
+    fn index_content(&mut self) {
+        if self.at(SyntaxKind::DOT2) {
+            self.start(SyntaxKind::RANGE);
+            self.bump(); // ..
+            if Self::can_start_expr(self.current()) {
+                self.expr(0, true);
+            }
+            self.finish();
+            return;
+        }
+        if !Self::can_start_expr(self.current()) {
+            self.error(format!(
+                "expected an index or `..` range, found {}",
+                self.current().describe()
+            ));
+            return;
+        }
+        let cp = self.checkpoint();
+        self.expr(0, true);
+        if self.at(SyntaxKind::DOT2) {
+            self.start_at(cp, SyntaxKind::RANGE);
+            self.bump(); // ..
+            if Self::can_start_expr(self.current()) {
+                self.expr(0, true);
+            }
+            self.finish();
         }
     }
 

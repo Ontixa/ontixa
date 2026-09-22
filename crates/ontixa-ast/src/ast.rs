@@ -268,6 +268,27 @@ pub enum Expr {
         /// Expression span.
         span: Span,
     },
+    /// `base[index]` — for `str`, `index` is a character position and
+    /// the result is a one-character `str`.
+    Index {
+        /// The indexed expression.
+        base: Box<Expr>,
+        /// The index expression.
+        index: Box<Expr>,
+        /// Expression span.
+        span: Span,
+    },
+    /// `base[lo..hi]` — a slice; either bound may be omitted.
+    Slice {
+        /// The sliced expression.
+        base: Box<Expr>,
+        /// Optional lower bound (`lo` in `base[lo..]`).
+        lo: Option<Box<Expr>>,
+        /// Optional upper bound (`hi` in `base[..hi]`).
+        hi: Option<Box<Expr>>,
+        /// Expression span.
+        span: Span,
+    },
     /// `lhs op rhs`.
     Binary {
         /// Operator.
@@ -337,6 +358,8 @@ impl Expr {
             Expr::Literal { span, .. }
             | Expr::Call { span, .. }
             | Expr::Field { span, .. }
+            | Expr::Index { span, .. }
+            | Expr::Slice { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Unary { span, .. }
             | Expr::If { span, .. }

@@ -178,6 +178,28 @@ mod tests {
     }
 
     #[test]
+    fn lowers_index_and_slice_exprs() {
+        let (m, mut interner, diags) = parse_hir("fn f(s: str) -> str { return s[0] + s[1..]; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        let f = fn_def(&m, "f", &mut interner);
+        let body = m.body(f).expect("body");
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
+            panic!()
+        };
+        let HirStmt::Return { value: Some(v), .. } = &stmts[0] else {
+            panic!("expected return")
+        };
+        let HirExprKind::Binary { lhs, rhs, .. } = &body.expr(*v).kind else {
+            panic!("expected binary")
+        };
+        assert!(matches!(body.expr(*lhs).kind, HirExprKind::Index { .. }));
+        let HirExprKind::Slice { lo, hi, .. } = &body.expr(*rhs).kind else {
+            panic!("expected slice")
+        };
+        assert!(lo.is_some() && hi.is_none());
+    }
+
+    #[test]
     fn reports_unknown_binding() {
         let (_, _, diags) = parse_hir("fn main() -> i32 { return nope; }");
         assert_eq!(diags.iter().count(), 1);

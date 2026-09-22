@@ -1281,6 +1281,19 @@ impl<'a> Scan<'a> {
             }
             Expr::Path { path } => self.site(path),
             Expr::Field { base, .. } => self.expr(base),
+            Expr::Index { base, index, .. } => {
+                self.expr(base);
+                self.expr(index);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.expr(base);
+                if let Some(l) = lo {
+                    self.expr(l);
+                }
+                if let Some(h) = hi {
+                    self.expr(h);
+                }
+            }
             Expr::Binary { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);

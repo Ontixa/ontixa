@@ -1,0 +1,27 @@
+// String operations and `str` slices (M3).
+//
+//   s + t        concatenation
+//   s.len        length in characters (i32)
+//   s[i]         the i-th character, as a one-character str
+//   s[lo..hi]    character slice; either bound may be omitted
+//   s < t        lexicographic ordering (== and != also work)
+//
+// Indices count Unicode scalar values, not bytes — `"héllo".len` is 5
+// even though it occupies 6 UTF-8 bytes. Out-of-bounds indices trap.
+//
+// `ontixa run examples/strings.ixa` prints 42.
+fn main() -> i32 {
+    let greeting = "héllo" + " world"; // 11 characters
+    let first = greeting[0]; // "h", a one-character str
+    let rest = greeting[1..]; // "éllo world"
+    let head = greeting[..5]; // "héllo"
+    let mid = greeting[1..4]; // "éll"
+    let whole = greeting[..]; // every character
+    let ordered = if first < rest {
+        1
+    } else {
+        0
+    };
+    // 11 + 1 + 10 + 5 + 3 + 11 + 1
+    return greeting.len + first.len + rest.len + head.len + mid.len + whole.len + ordered;
+}
