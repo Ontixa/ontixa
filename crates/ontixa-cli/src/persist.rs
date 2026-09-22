@@ -47,6 +47,37 @@ fn fp(bytes: &[u8]) -> u64 {
     h
 }
 
+/// The directory a file lives in — `.` for bare filenames (an
+/// empty parent would make `read_dir` fail silently and every
+/// `starts_with` check vacuous).
+pub fn parent_or_root(p: &std::path::Path) -> PathBuf {
+    match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// The longest common ancestor of two paths — the transaction root
+/// for a multi-directory write.
+pub fn common_ancestor(a: &std::path::Path, b: &std::path::Path) -> PathBuf {
+    let mut cur = a.to_path_buf();
+    while !b.starts_with(&cur) {
+        if !cur.pop() {
+            break;
+        }
+    }
+    cur
+}
+
+/// The directory that should hold the journal for a write touching
+/// `paths` — the common ancestor of every file's parent.
+pub fn tx_root<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Option<PathBuf> {
+    paths
+        .into_iter()
+        .map(parent_or_root)
+        .reduce(|a, b| common_ancestor(&a, &b))
+}
+
 /// One file in a persistence transaction.
 pub struct TxFile {
     /// Destination path — must live under the workspace root.

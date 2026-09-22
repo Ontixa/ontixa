@@ -95,34 +95,14 @@ pub fn persist(plan: &RenamePlan, sfs: &[SourceFile]) -> Result<(), String> {
             after: text.clone().into_bytes(),
         });
         root = Some(match root {
-            None => parent_or_root(path),
-            Some(r) => common_ancestor(&r, &parent_or_root(path)),
+            None => crate::persist::parent_or_root(path),
+            Some(r) => crate::persist::common_ancestor(&r, &crate::persist::parent_or_root(path)),
         });
     }
     let Some(root) = root else {
         return Ok(());
     };
     crate::persist::persist_tx(&root, &files).map_err(|e| e.to_string())
-}
-
-/// The directory a file lives in — `.` for bare filenames (an
-/// empty parent would make `read_dir` fail silently and every
-/// `starts_with` check vacuous).
-fn parent_or_root(p: &std::path::Path) -> PathBuf {
-    match p.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
-        _ => PathBuf::from("."),
-    }
-}
-
-fn common_ancestor(a: &std::path::Path, b: &std::path::Path) -> PathBuf {
-    let mut cur = a.to_path_buf();
-    while !b.starts_with(&cur) {
-        if !cur.pop() {
-            break;
-        }
-    }
-    cur
 }
 
 /// Human preview of a plan: one line per edit, stable order.

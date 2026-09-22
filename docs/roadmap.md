@@ -36,6 +36,10 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   (ADR-0014); demo: `examples/workspace/demo.sh`
 - incremental engine fix: `verified_at` freshness (a changed dep no
   longer forces permanent re-eval of equal-valued dependents)
+- `ontixa fmt` over the lossless CST: canonical whitespace/indent
+  re-emission that preserves comments, idempotent; CLI
+  preview/`--check`/`--write` + daemon `fmt` op (formats bound
+  sources without mutating)
 
 Remaining:
 
@@ -44,7 +48,6 @@ Remaining:
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - string ops + `str` slices
 - more primitives (`u*`, `f32`, `char`)
-- `ontixa fmt` over the lossless CST
 - semantic patches beyond rename (structured apply of arbitrary
   edits — the transaction shape exists; generality doesn't)
 - finer-grained file-level queries (per-item parse, incremental

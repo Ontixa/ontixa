@@ -1,7 +1,8 @@
 //! `ontixa` — the Ontixa developer tool.
 //!
 //! Commands: `check`, `run`, `tokens`, `ast`, `mir`, `graph`,
-//! `explain`. Exit codes are part of the tool contract:
+//! `explain`, `rename`, `recover`, `fmt`. Exit codes are part of the
+//! tool contract:
 //!
 //! - `0` — success (diagnostics, if any, are warnings)
 //! - `1` — source error diagnostics or an unresolved recovery conflict
@@ -18,7 +19,7 @@ use ontixa_cli::envelope::{
 };
 use ontixa_cli::explain;
 use ontixa_db::{Artifacts, CheckReport, Db};
-use ontixa_diagnostics::{Code, Diagnostic, Severity};
+use ontixa_diagnostics::{Code, Diagnostic, Diagnostics, Severity};
 use ontixa_interpreter::Value;
 use ontixa_source::{FileId, SourceFile, Span};
 use serde_json::{Value as Json, json};
@@ -147,6 +148,27 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Format `.ixa` files canonically — a transform over the
+    /// lossless CST, so comments are preserved and the result is
+    /// idempotent. Without flags, prints each file's canonical form
+    /// (the preview — nothing is written); `--write` overwrites in
+    /// place through the staged transaction engine; `--check`
+    /// reports which files would change and exits non-zero.
+    Fmt {
+        /// The `.ixa` source files.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Report files whose canonical form differs (one path per
+        /// line) and exit non-zero; never writes.
+        #[arg(long, conflicts_with = "write")]
+        check: bool,
+        /// Write the canonical form back to each changed file.
+        #[arg(long)]
+        write: bool,
+        /// Emit machine-readable JSON (one envelope document).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// What `main` returns: the process exit code.
@@ -182,6 +204,12 @@ fn main() -> ExitCode {
             json,
         } => rename_cmd(file, symbol, new_name, apply, json),
         Cmd::Recover { dir, json } => recover_cmd(dir, json),
+        Cmd::Fmt {
+            files,
+            check,
+            write,
+            json,
+        } => fmt_cmd(files, check, write, json),
     }
 }
 
@@ -233,38 +261,43 @@ fn with_db<T>(
     }));
     match result {
         Ok(a) => Ok(a),
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic".into());
-            let sf = SourceFile::new(
-                FileId::new(0),
-                file.display().to_string(),
-                Some(file.to_path_buf()),
-                text,
-            );
-            let d = Diagnostic {
-                code: Code::Internal,
-                severity: Severity::Error,
-                message: format!("internal compiler error: {msg}"),
-                primary: Some(Span::empty(0)),
-                labels: Vec::new(),
-                notes: Vec::new(),
-                help: vec![
-                    "this is a compiler bug — please report it at \
-                     https://github.com/Ontixa/ontixa/issues"
-                        .to_string(),
-                ],
-                subject: None,
-                details: Default::default(),
-                origin: None,
-                file: None,
-            };
-            Err(CompileFailure::Ice(sf, Box::new(d)))
-        }
+        Err(payload) => Err(ice_failure(file, text, &payload)),
     }
+}
+
+/// The `I_INTERNAL` diagnostic for a panic that crossed the compile
+/// boundary, packaged as a [`CompileFailure::Ice`] (exit 3). `file`
+/// and `text` identify the input being processed when it panicked.
+fn ice_failure(file: &Path, text: String, payload: &(dyn std::any::Any + Send)) -> CompileFailure {
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into());
+    let sf = SourceFile::new(
+        FileId::new(0),
+        file.display().to_string(),
+        Some(file.to_path_buf()),
+        text,
+    );
+    let d = Diagnostic {
+        code: Code::Internal,
+        severity: Severity::Error,
+        message: format!("internal compiler error: {msg}"),
+        primary: Some(Span::empty(0)),
+        labels: Vec::new(),
+        notes: Vec::new(),
+        help: vec![
+            "this is a compiler bug — please report it at \
+             https://github.com/Ontixa/ontixa/issues"
+                .to_string(),
+        ],
+        subject: None,
+        details: Default::default(),
+        origin: None,
+        file: None,
+    };
+    CompileFailure::Ice(sf, Box::new(d))
 }
 
 /// Compiles, or emits the failure in the active mode and returns its
@@ -653,4 +686,138 @@ fn recover_cmd(dir: PathBuf, json: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// `ontixa fmt <files...>` — canonical formatting over the lossless
+/// CST ([`ontixa_syntax::format_file`]). Formatting is per-file and
+/// syntactic — no workspace is loaded.
+///
+/// * default: each file's canonical form goes to stdout — the
+///   preview; nothing is written;
+/// * `--check`: paths that would change go to stdout (one per line)
+///   and the exit code is 1 — the file gate for CI;
+/// * `--write`: changed files persist in one staged, journaled
+///   transaction ([`ontixa_cli::persist`]) — the disk stale guard
+///   refuses to overwrite external edits.
+///
+/// A file with parse diagnostics is never rewritten: its diagnostics
+/// surface tagged with the file and the command exits 1. `--check`'s
+/// "would change" verdict is `result.would_change` in JSON — the
+/// envelope stays `success: true` (the command ran) while the exit
+/// code carries the gate result.
+fn fmt_cmd(files: Vec<PathBuf>, check: bool, write: bool, json: bool) -> ExitCode {
+    let mut sfs: Vec<SourceFile> = Vec::new();
+    let mut diags = Diagnostics::new();
+    let mut results = Vec::with_capacity(files.len());
+    for path in &files {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                return emit_failure(
+                    CompileFailure::Io(format!("cannot read {}: {e}", path.display())),
+                    "fmt",
+                    json,
+                );
+            }
+        };
+        let fid = FileId::new(sfs.len() as u32);
+        // The formatter sits behind the same ICE boundary as the
+        // pipeline: a panic becomes I_INTERNAL, never a bare crash.
+        let parsed = match catch_unwind(AssertUnwindSafe(|| ontixa_syntax::format_file(&text))) {
+            Ok(r) => r,
+            Err(payload) => return emit_failure(ice_failure(path, text, &payload), "fmt", json),
+        };
+        sfs.push(SourceFile::new(
+            fid,
+            path.display().to_string(),
+            Some(path.clone()),
+            text.clone(),
+        ));
+        match parsed {
+            Ok(formatted) => results.push(ontixa_cli::fmt::FileResult {
+                file: path.display().to_string(),
+                changed: Some(formatted != text),
+                formatted: Some(formatted),
+                written: false,
+            }),
+            Err(d) => {
+                let mark = diags.len();
+                diags.extend(d);
+                diags.tag_file_from(mark, fid);
+                results.push(ontixa_cli::fmt::FileResult {
+                    file: path.display().to_string(),
+                    changed: None,
+                    formatted: None,
+                    written: false,
+                });
+            }
+        }
+    }
+    let would_change = results.iter().any(|r| r.changed == Some(true));
+
+    // `--write` commits every changed file in one staged transaction;
+    // files that failed to parse are simply absent from it.
+    if write {
+        let tx_files: Vec<ontixa_cli::persist::TxFile> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.changed == Some(true))
+            .map(|(i, r)| ontixa_cli::persist::TxFile {
+                path: files[i].clone(),
+                before: sfs[i].text().as_bytes().to_vec(),
+                after: r.formatted.clone().unwrap().into_bytes(),
+            })
+            .collect();
+        if !tx_files.is_empty() {
+            let root = ontixa_cli::persist::tx_root(tx_files.iter().map(|t| t.path.as_path()))
+                .unwrap_or_else(|| PathBuf::from("."));
+            if let Err(e) = ontixa_cli::persist::persist_tx(&root, &tx_files) {
+                return emit_failure(CompileFailure::Io(e.to_string()), "fmt", json);
+            }
+            for r in &mut results {
+                if r.changed == Some(true) {
+                    r.written = true;
+                }
+            }
+        }
+    }
+
+    if json {
+        let env = Envelope::new("fmt")
+            .diagnostics(&diags, &sfs)
+            .result(ontixa_cli::fmt::result_json(&results));
+        let (doc, code) = env.into_parts();
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+        // `--check` failing is a verdict, not a command error — the
+        // envelope keeps `success: true`; the exit code gates CI.
+        let code = if code == 0 && check && would_change {
+            1
+        } else {
+            code
+        };
+        return ExitCode::from(code);
+    }
+
+    let mut code = emit_human_diags(&diags, &sfs);
+    if check {
+        for r in results.iter().filter(|r| r.changed == Some(true)) {
+            println!("{}", r.file);
+        }
+        if would_change && code == ExitCode::SUCCESS {
+            code = ExitCode::from(1);
+        }
+        return code;
+    }
+    if write {
+        for r in results.iter().filter(|r| r.written) {
+            eprintln!("{}: formatted", r.file);
+        }
+        return code;
+    }
+    for r in &results {
+        if let Some(text) = &r.formatted {
+            print!("{text}");
+        }
+    }
+    code
 }

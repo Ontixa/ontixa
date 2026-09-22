@@ -11,10 +11,12 @@
 //! Comments and precise byte ranges therefore survive parsing, which is
 //! what `ontixa fmt`, future IDE support, and semantic patches require.
 
+mod fmt;
 mod kinds;
 mod lexer;
 mod parser;
 
+pub use fmt::format_file;
 pub use kinds::{OntixaLanguage, SyntaxKind, keyword_kind};
 pub use lexer::{Token, lex, token_text};
 pub use parser::{Parse, parse};

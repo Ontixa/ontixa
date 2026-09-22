@@ -49,6 +49,8 @@ per line, one schema-1 envelope per line.
 {"op":"explain", "path":"x.ixa", "symbol":"s"}    → explain envelope
 {"op":"rename",  "path":"x.ixa", "symbol":"m::s", "to":"new",
                  "apply":true, "revision":R}      → preview or apply
+{"op":"fmt",     "path":"x.ixa"}                  → fmt envelope: canonical
+                                                  text, no mutation
 {"op":"stats"}                                   → counters + last_evaluated
 {"op":"close",   "path":"x.ixa"}
 {"op":"shutdown"}
@@ -58,6 +60,12 @@ per line, one schema-1 envelope per line.
 actually ran this demand — e.g. `HirBody(DefKey(0:1:4))` after a
 body-local edit, `[]` on an unmodified recheck. `stats` adds
 cumulative `QueryStats` and oracle fact-reuse counters.
+
+`fmt` returns `result.formatted` — the bound source in canonical
+layout — plus `changed`. It is syntactic and per-file (no workspace
+load, no evaluated keys), it never mutates the session — installing
+the result is an explicit `set` — and a file with parse errors
+surfaces them as diagnostics instead of a rewrite.
 
 Parameter contracts now carry `evidence` — the `(kind, span)` sites
 that produced each flag — and `escapes` (`return`, `call \`f\``), so

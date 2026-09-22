@@ -72,6 +72,7 @@ Ontixa sources (.ixa files — file stems are module names; use m / m::x)
     -> structured diagnostics (human + JSON, file-tagged)
     -> incremental query engine (per-DefKey early cutoff)
     -> semantic rename transactions (plan -> preview -> apply)
+    -> canonical formatting over the lossless CST (`ontixa fmt`)
 ```
 
 Concretely, this program compiles and runs:
@@ -143,10 +144,13 @@ $ ontixa rename file.ixa m::old new         # preview edits
 $ ontixa rename file.ixa @138 new           # local/param rename by byte offset
 $ ontixa rename file.ixa m::old new --apply # guarded apply; staged+journaled to disk
 $ ontixa recover dir/                       # resolve a transaction journal after a crash
+$ ontixa fmt file.ixa                       # canonical format to stdout (CST-driven, keeps comments)
+$ ontixa fmt file.ixa --check               # exit 1 if the file would change — CI gate
+$ ontixa fmt file.ixa --write               # overwrite in place (staged+journaled)
 ```
 
 `ontixad` is the persistent daemon (NDJSON on stdio): `open`, `set`,
-`check`, `explain`, `rename`, `stats`, `close`, `shutdown` — see
+`check`, `explain`, `rename`, `fmt`, `stats`, `close`, `shutdown` — see
 [docs/agent-interface.md](docs/agent-interface.md).
 
 Common flags: `--json` (machine-readable output), `--timings`
