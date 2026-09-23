@@ -30,6 +30,7 @@
 //! is small but real, and a power loss can leave artifacts the next
 //! [`recover`] call must clean up.
 
+use ontixa_source::SourceFile;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fs;
@@ -561,6 +562,43 @@ pub fn persist_tx_hooks(
         });
     }
     Ok(())
+}
+
+/// Stages a transaction plan's `new_sources` — `(file index,
+/// post-edit text)` pairs — to disk under the journal protocol
+/// above. This is the shared disk commit for every transaction
+/// kind (rename, patch):
+///
+/// * each destination's disk bytes must equal `sfs[f]` — the source
+///   snapshot the plan validated — or nothing is written;
+/// * files without a disk path (in-memory sessions) are skipped;
+/// * a plan that touches no path-bearing file is a no-op.
+pub fn persist_sources(
+    new_sources: &[(usize, String)],
+    sfs: &[SourceFile],
+) -> Result<(), PersistError> {
+    let mut files = Vec::with_capacity(new_sources.len());
+    let mut root: Option<PathBuf> = None;
+    for (f, text) in new_sources {
+        let Some(path) = sfs[*f].path() else {
+            continue;
+        };
+        // `before` is the validated snapshot — the disk stale guard
+        // compares live bytes against exactly this.
+        files.push(TxFile {
+            path: path.clone(),
+            before: sfs[*f].text().as_bytes().to_vec(),
+            after: text.clone().into_bytes(),
+        });
+        root = Some(match root {
+            None => parent_or_root(path),
+            Some(r) => common_ancestor(&r, &parent_or_root(path)),
+        });
+    }
+    let Some(root) = root else {
+        return Ok(());
+    };
+    persist_tx(&root, &files)
 }
 
 // ---------------- recovery ----------------

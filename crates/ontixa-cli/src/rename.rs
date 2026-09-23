@@ -10,7 +10,6 @@ use crate::envelope::Envelope;
 use ontixa_db::{RenameError, RenamePlan, RenameReport};
 use ontixa_source::SourceFile;
 use serde_json::{Value as Json, json};
-use std::path::PathBuf;
 
 /// The display name of file `f` in `sfs` (indexed by `FileId`).
 fn file_name(sfs: &[SourceFile], f: usize) -> String {
@@ -81,28 +80,7 @@ pub fn rejection_json(e: &RenameError, sfs: &[SourceFile]) -> Json {
 ///   restores every swapped file, and a rollback failure leaves the
 ///   journal for [`crate::persist::recover`].
 pub fn persist(plan: &RenamePlan, sfs: &[SourceFile]) -> Result<(), String> {
-    let mut files = Vec::with_capacity(plan.new_sources().len());
-    let mut root: Option<PathBuf> = None;
-    for (f, text) in plan.new_sources() {
-        let Some(path) = sfs[*f].path() else {
-            continue;
-        };
-        // `before` is the validated snapshot — the disk stale guard
-        // compares live bytes against exactly this.
-        files.push(crate::persist::TxFile {
-            path: path.clone(),
-            before: sfs[*f].text().as_bytes().to_vec(),
-            after: text.clone().into_bytes(),
-        });
-        root = Some(match root {
-            None => crate::persist::parent_or_root(path),
-            Some(r) => crate::persist::common_ancestor(&r, &crate::persist::parent_or_root(path)),
-        });
-    }
-    let Some(root) = root else {
-        return Ok(());
-    };
-    crate::persist::persist_tx(&root, &files).map_err(|e| e.to_string())
+    crate::persist::persist_sources(plan.new_sources(), sfs).map_err(|e| e.to_string())
 }
 
 /// Human preview of a plan: one line per edit, stable order.

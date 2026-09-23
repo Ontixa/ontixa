@@ -259,7 +259,8 @@ impl Db {
                 .subject(new_name.to_string()),
             )));
         }
-        self.check_baseline(root, symbol)?;
+        self.check_baseline(root, symbol, "rename")
+            .map_err(RenameError::BaselineErrors)?;
 
         let scope = self.scope(root);
         let target = resolve_target(&scope, &self.interner, root, symbol)?;
@@ -343,7 +344,8 @@ impl Db {
                 .subject(new_name.to_string()),
             )));
         }
-        self.check_baseline(root, &sel)?;
+        self.check_baseline(root, &sel, "rename")
+            .map_err(RenameError::BaselineErrors)?;
 
         let scope = self.scope(root);
         let file_id = FileId::new(file as u32);
@@ -471,11 +473,17 @@ impl Db {
         }))
     }
 
-    /// Baseline policy: rename requires an error-free workspace —
-    /// validation compares the candidate against "zero errors", so a
-    /// dirty baseline would make the check meaningless. Warnings do
-    /// not block.
-    fn check_baseline(&mut self, root: usize, subject: &str) -> Result<(), RenameError> {
+    /// Baseline policy shared by every source transaction: the
+    /// workspace must be error-free — validation compares the
+    /// candidate against "zero errors", so a dirty baseline would
+    /// make the check meaningless. Warnings do not block. `op` names
+    /// the transaction kind in the message ("rename", "patch").
+    pub(crate) fn check_baseline(
+        &mut self,
+        root: usize,
+        subject: &str,
+        op: &str,
+    ) -> Result<(), Box<Diagnostic>> {
         let baseline = self.check(root).diags;
         let errors: Vec<Diagnostic> = baseline
             .iter()
@@ -489,7 +497,7 @@ impl Db {
             Code::BaselineErrors,
             format!(
                 "workspace has {} pre-existing error(s); \
-                 rename requires a clean baseline",
+                 {op} requires a clean baseline",
                 errors.len()
             ),
         )
@@ -500,12 +508,12 @@ impl Db {
                 format!("{}: {}", e.code.as_str(), e.message),
             );
         }
-        Err(RenameError::BaselineErrors(Box::new(d)))
+        Err(Box::new(d))
     }
 
     /// Splices `edits` into `(file, post-edit text)` pairs — spans
     /// descending per file so earlier offsets stay valid.
-    fn splice_sources(&self, edits: &[RenameEdit]) -> Vec<(usize, String)> {
+    pub(crate) fn splice_sources(&self, edits: &[RenameEdit]) -> Vec<(usize, String)> {
         let mut by_file: FxHashMap<FileId, Vec<&RenameEdit>> = FxHashMap::default();
         for e in edits {
             by_file.entry(e.file).or_default().push(e);
@@ -563,16 +571,7 @@ impl Db {
         label: &str,
         subject: &str,
     ) -> Result<(), RenameError> {
-        let mut scratch = Db::new();
-        for i in 0..self.file_count() {
-            let f = FileId::new(i as u32);
-            let text = new_sources
-                .iter()
-                .find(|(ef, _)| *ef == f.index())
-                .map(|(_, t)| t.clone())
-                .unwrap_or_else(|| self.source(f.index()).to_string());
-            scratch.add_source_named(self.file_module(f).to_string(), text);
-        }
+        let mut scratch = self.shadow_db(new_sources);
         let shadow = scratch.check(root);
         let fresh: Vec<Diagnostic> = shadow
             .diags
@@ -741,8 +740,25 @@ impl Db {
         })
     }
 
+    /// Builds a scratch `Db` over the candidate sources — the shadow
+    /// workspace every source transaction validates against before
+    /// any live mutation. Shared by rename and patch planning.
+    pub(crate) fn shadow_db(&self, new_sources: &[(usize, String)]) -> Db {
+        let mut scratch = Db::new();
+        for i in 0..self.file_count() {
+            let f = FileId::new(i as u32);
+            let text = new_sources
+                .iter()
+                .find(|(ef, _)| *ef == f.index())
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| self.source(f.index()).to_string());
+            scratch.add_source_named(self.file_module(f).to_string(), text);
+        }
+        scratch
+    }
+
     /// A file's AST via the memoized `Ast` query.
-    fn ast_of(&mut self, f: FileId) -> Arc<AstModule> {
+    pub(crate) fn ast_of(&mut self, f: FileId) -> Arc<AstModule> {
         match self.demand(QueryKey::Ast(f)) {
             Value::Ast(a) => a,
             _ => unreachable!("Ast produced wrong value"),
@@ -840,7 +856,7 @@ fn local_target(body: &HirBody, rel: u32, interner: &Interner) -> Option<SymbolI
 /// fingerprint apply re-checks so a plan's payload can never be
 /// swapped after validation. Same constants as
 /// `Db::workspace_fingerprint`.
-fn sources_fingerprint(sources: &[(usize, String)]) -> u64 {
+pub(crate) fn sources_fingerprint(sources: &[(usize, String)]) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut mix = |bytes: &[u8]| {
         for b in bytes {
@@ -868,21 +884,40 @@ fn is_ident(name: &str) -> bool {
             && t.end as usize == name.len())
 }
 
-/// Resolves the rename target through the workspace scope. `m::x`
-/// selects module `m`'s own member `x`; a bare `x` resolves through
-/// the root file's env (own defs, then imports), falling back to a
-/// workspace-wide def search that reports ambiguity.
+/// Resolves the rename target through the workspace scope — wraps
+/// [`resolve_target_diag`] in the rename error variants.
 fn resolve_target(
     scope: &ModuleScope,
     interner: &Interner,
     root: usize,
     symbol: &str,
 ) -> Result<DefId, RenameError> {
+    resolve_target_diag(scope, interner, root, symbol).map_err(|d| {
+        if d.code == Code::AmbiguousSymbol {
+            RenameError::AmbiguousSymbol(d)
+        } else {
+            RenameError::UnknownSymbol(d)
+        }
+    })
+}
+
+/// Resolves a top-level def through the workspace scope. `m::x`
+/// selects module `m`'s own member `x`; a bare `x` resolves through
+/// the root file's env (own defs, then imports), falling back to a
+/// workspace-wide def search that reports ambiguity. Shared by
+/// rename and patch target selection; the bare `Diagnostic` lets
+/// each transaction wrap it in its own error type.
+pub(crate) fn resolve_target_diag(
+    scope: &ModuleScope,
+    interner: &Interner,
+    root: usize,
+    symbol: &str,
+) -> Result<DefId, Box<Diagnostic>> {
     let unknown = || {
-        RenameError::UnknownSymbol(Box::new(
+        Box::new(
             Diagnostic::error(Code::UnknownSymbol, format!("no symbol named `{symbol}`"))
                 .subject(symbol.to_string()),
-        ))
+        )
     };
     if let Some((m, member)) = symbol.split_once("::") {
         let mi = interner.get(m).ok_or_else(unknown)?;
@@ -950,7 +985,7 @@ fn resolve_target(
             for n in &names {
                 d = d.label(Span::new(0, 0), n.clone());
             }
-            Err(RenameError::AmbiguousSymbol(Box::new(d)))
+            Err(Box::new(d))
         }
     }
 }
@@ -1073,8 +1108,14 @@ fn use_targets(
 }
 
 /// The file providing module `name` in this workspace — the same
-/// resolution `use` declarations use (file stems).
-fn module_file_of(scope: &ModuleScope, interner: &Interner, name: &str) -> Option<FileId> {
+/// resolution `use` declarations use (file stems). Only reachable
+/// files are in `scope.files`, so a module that is registered but
+/// never `use`d resolves to `None`.
+pub(crate) fn module_file_of(
+    scope: &ModuleScope,
+    interner: &Interner,
+    name: &str,
+) -> Option<FileId> {
     let id = interner.get(name)?;
     scope
         .files
