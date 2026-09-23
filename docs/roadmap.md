@@ -50,7 +50,16 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   transaction pipeline — plan → preview → shadow-compile →
   revision-guarded atomic apply; CLI `patch` + daemon `patch` op
   (ADR-0016). Compile integrity, not semantic preservation; no
-  `use` edits, reordering, comments, or file create/delete.
+  reordering, comments, or file create/delete.
+- wider patch ops on the same pipeline (ADR-0016 addendum):
+  signature edits (`rename_param`, `set_param_type`,
+  `set_ret_type` — name and body preserved), `use` management
+  (`add_use`, `remove_use` — whole-declaration splices following
+  the file's line conventions), and `data` field edits
+  (`add_field`, `remove_field`, `rename_field`, `set_field_type` —
+  `rename_field` rewrites decl + every resolved access/literal/
+  assign site). Still out: reordering items, comment edits, file
+  create/delete, and arbitrary non-item text.
 - arrays/slices + `for` loops: homogeneous `[e, ...]` literals with
   inferred element types (`[T]` annotations, required for `[]`),
   `a.len`, `a[i]` indexing, `a[lo..hi]` slicing into a fresh array,
@@ -65,8 +74,9 @@ Remaining:
 - `match`-like selection over `data` variants (enum data)
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - more primitives (`char` — `u*`/`f32`/`f64`/`str` already resolve)
-- wider patch ops (signature edits, `use` management, `data` field
-  edits) — the protocol is general; each op adds resolution logic
+- still-wider patch ops — the protocol is general; each op adds
+  resolution logic (item reordering, comment/header edits, and
+  file-level create/delete are the standing boundary)
 - finer-grained file-level queries (per-item parse, incremental
   graph) — the honest weakness stands; see benchmarks/README.md
 

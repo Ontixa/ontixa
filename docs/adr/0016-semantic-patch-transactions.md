@@ -74,9 +74,11 @@ to validate, and able to express states no `.ixa` file can hold.
   The guarantee is: the patched workspace compiles with zero errors,
   or nothing is applied.
 - **No `use` edits, no reordering, no non-item text.** Ops cannot
-  add/remove imports, move items, or touch comments — a `fn` whose
-  signature is followed by a comment before `{` is refused
-  (`E_UNSUPPORTED_TARGET`) rather than silently dropping it.
+  move items or touch comments — a `fn` whose signature is followed
+  by a comment before `{` is refused (`E_UNSUPPORTED_TARGET`)
+  rather than silently dropping it. *(The `use` half of this limit
+  was lifted by the addendum below: whole-declaration `use` splices
+  arrived with the wider op vocabulary.)*
 - **No file creation or deletion.** `add_def` targets a reachable
   module's existing file.
 - **Whitespace seams are normalized, not styled.** `remove_def`
@@ -111,3 +113,65 @@ to validate, and able to express states no `.ixa` file can hold.
   `data` edits) can be added per-op without changing the
   transaction protocol — each new op is new resolution logic inside
   the same plan/shadow/apply shape.
+
+## Addendum — the wider op vocabulary (signature/`use`/field ops)
+
+The protocol is unchanged: same bounded spec, same pipeline order,
+same provenance and stale guards, same compile-integrity guarantee.
+What widened is the op vocabulary — nine more kinds, each resolved
+through the same machinery:
+
+- **Signature** (`fn` targets only):
+  - `{"op":"rename_param","symbol":"m::f","param":"x","to":"acc"}` —
+    rewrites the parameter's decl token plus every body-local site
+    bound to it (the `Var`/assign-base site rule of positional
+    rename); a `to` already bound in that body is
+    `E_NAME_CONFLICT`. The fn's name and body block are preserved.
+  - `{"op":"set_param_type","symbol":"m::f","param":"x","ty":"i64"}`
+    — replaces the declared type in place.
+  - `{"op":"set_ret_type","symbol":"m::f","ty":"i32"}` — adds,
+    replaces, or removes `-> T`; `"ty":null` is the deliberate
+    remove form (an absent `ty` is `E_MALFORMED_PATCH`).
+  - Retyped signatures that break the body or any caller fail the
+    shadow compile — integer literals adopt expected types inward,
+    so `-> i64` on `return 5` checks.
+- **`use`** (file targets — `module`, absent = root):
+  - `{"op":"add_use","module":"m","path":"dep::T","as":"T2"}` —
+    splices one `use` decl after the file's last `use`, or above
+    the first item below a leading comment banner; `as` is its own
+    field — `path` never carries an alias. Adding a `use` can pull
+    a registered-but-unreachable file into scope.
+  - `{"op":"remove_use","module":"m","path":"dep","as":"x"}` —
+    removes the decl whose path and alias match exactly; omitting
+    `as` matches only unaliased decls. References losing their
+    binding fail the shadow compile.
+- **`data` fields** (`data` targets only):
+  - `add_field` appends `field: ty;` after the last field, copying
+    the file's separator convention (into `data D {}` it inserts
+    after the `{`). It never invents literal values — struct
+    literals missing the new field fail the shadow compile and must
+    be fixed by a sibling op in the same patch.
+  - `remove_field` deletes the field's whole entry span *including
+    its leading trivia run* — a comment in that seam is
+    `E_UNSUPPORTED_TARGET`, since the comment's attachment is
+    ambiguous and the splice would silently drop it.
+  - `rename_field` rewrites the decl token plus every site the
+    checker resolved to that field: `base.field` accesses (matched
+    by resolved index on a `Struct` base), `D { field: v }` literal
+    names, and `place.field = v` projections — in every reachable
+    file.
+  - `set_field_type` replaces the field's declared type.
+
+New resolution failures reuse existing codes: `E_UNKNOWN_FIELD`
+for a field the `data` lacks, `E_UNKNOWN_SYMBOL` for a `param` or
+`use` decl that does not resolve, `E_NAME_CONFLICT` for
+`rename_param`'s `to`. Type payloads parse through a synthetic
+`fn f(p: <ty>) {}` probe and `path` payloads through a `use`
+probe — a payload can never smuggle trailing text or a second
+item into the splice.
+
+Standing boundary, unchanged: ops still cannot reorder items,
+edit comments, create/delete files, or write outside the `use`
+graph; `use` edits are whole-declaration splices, not arbitrary
+header text. The 64-op / 256 KiB bounds and every apply-time
+guard cover the new vocabulary identically.

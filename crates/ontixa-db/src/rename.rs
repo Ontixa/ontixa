@@ -415,41 +415,18 @@ impl Db {
         })?;
         let sym_rec = &body.local_symbols[sym.local_index()];
         let old_name = self.interner.resolve(sym_rec.name).to_string();
-        let old_len = old_name.len() as u32;
 
         // Sites: the decl name, every `Var` resolving to `sym`, and
         // every assign-place whose *base token* resolves to `sym`.
-        let mut edits = vec![RenameEdit {
-            file: file_id,
-            span: sym_rec.span.abs(item_base),
-            replace: new_name.to_string(),
-        }];
-        for e in &body.exprs {
-            if matches!(e.kind, HirExprKind::Var(s) if s == sym) {
-                edits.push(RenameEdit {
+        let mut edits: Vec<RenameEdit> =
+            local_binding_sites(&body, sym, &old_name, &text, item_base)
+                .into_iter()
+                .map(|span| RenameEdit {
                     file: file_id,
-                    span: e.span.abs(item_base),
+                    span,
                     replace: new_name.to_string(),
-                });
-            }
-        }
-        for stmt in body_stmts(&body) {
-            if let HirStmt::Assign { target, .. } = stmt {
-                if target.base == sym {
-                    // The place span covers `x.f.g`; the rename site is
-                    // just the base token — verify the bytes, never assume.
-                    let span =
-                        Span::new(target.span.start, target.span.start + old_len).abs(item_base);
-                    if text.get(span.start as usize..span.end as usize) == Some(old_name.as_str()) {
-                        edits.push(RenameEdit {
-                            file: file_id,
-                            span,
-                            replace: new_name.to_string(),
-                        });
-                    }
-                }
-            }
-        }
+                })
+                .collect();
         edits.sort_by_key(|e| (e.file, e.span.start));
         edits.dedup_by_key(|e| (e.file, e.span.start, e.span.end));
 
@@ -780,8 +757,8 @@ enum Binding {
 
 /// Every statement in `body` — statements live inside `Block`
 /// expression nodes; iterating the flat arena reaches each exactly
-/// once.
-fn body_stmts(body: &HirBody) -> Vec<&HirStmt> {
+/// once. Shared with `patch` (field-edit site scans).
+pub(crate) fn body_stmts(body: &HirBody) -> Vec<&HirStmt> {
     let mut out = Vec::new();
     for e in &body.exprs {
         if let HirExprKind::Block { stmts, .. } = &e.kind {
@@ -818,6 +795,39 @@ fn binding_seq(body: &HirBody) -> Vec<Binding> {
         }
     }
     seq
+}
+
+/// Every file-absolute source span bound to body-local `sym`: its
+/// decl token, every `Var` reference, and the base token of every
+/// assign-place rooted at `sym` (a place span covers `x.f.g`; the
+/// site is just the head token — the bytes are verified, never
+/// assumed). Shared by `plan_rename_at` (positional selection) and
+/// `patch`'s `rename_param` (name-selected selection).
+pub(crate) fn local_binding_sites(
+    body: &HirBody,
+    sym: SymbolId,
+    old_name: &str,
+    text: &str,
+    item_base: u32,
+) -> Vec<Span> {
+    let mut spans = vec![body.local_symbols[sym.local_index()].span.abs(item_base)];
+    for e in &body.exprs {
+        if matches!(e.kind, HirExprKind::Var(s) if s == sym) {
+            spans.push(e.span.abs(item_base));
+        }
+    }
+    let old_len = old_name.len() as u32;
+    for stmt in body_stmts(body) {
+        if let HirStmt::Assign { target, .. } = stmt {
+            if target.base == sym {
+                let span = Span::new(target.span.start, target.span.start + old_len).abs(item_base);
+                if text.get(span.start as usize..span.end as usize) == Some(old_name) {
+                    spans.push(span);
+                }
+            }
+        }
+    }
+    spans
 }
 
 /// The body-local symbol selected by item-relative byte `rel`:
@@ -872,8 +882,9 @@ pub(crate) fn sources_fingerprint(sources: &[(usize, String)]) -> u64 {
 }
 
 /// `new_name` must lex as exactly one identifier token — keywords
-/// and anything with trailing junk are rejected.
-fn is_ident(name: &str) -> bool {
+/// and anything with trailing junk are rejected. Shared with
+/// `patch`, which checks `to`/`as`/`field` payloads the same way.
+pub(crate) fn is_ident(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }

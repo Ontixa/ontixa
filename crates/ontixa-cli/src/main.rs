@@ -138,7 +138,10 @@ enum Cmd {
         json: bool,
     },
     /// Preview or apply a structured semantic patch — a bounded op
-    /// list (`replace_body`, `remove_def`, `add_def`) resolved
+    /// list (item ops `replace_body`/`remove_def`/`add_def`,
+    /// signature ops `rename_param`/`set_param_type`/`set_ret_type`,
+    /// `use` ops `add_use`/`remove_use`, and field ops `add_field`/
+    /// `remove_field`/`rename_field`/`set_field_type`) resolved
     /// through the workspace scope, validated by a shadow compile,
     /// and committed atomically like a rename. The spec is JSON:
     /// `{"ops": [...]}` or a bare op array.

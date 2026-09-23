@@ -2,9 +2,9 @@
 //! shared between the CLI subcommand and the `ontixad` daemon op.
 //!
 //! A patch is a transaction planned by [`Db::plan_patch`]: a bounded
-//! list of ops (`replace_body`, `remove_def`, `add_def`) resolved
-//! through the workspace scope, shadow-compiled on a scratch `Db`,
-//! and applied in one revision after the stale guard passes.
+//! list of ops resolved through the workspace scope, shadow-compiled
+//! on a scratch `Db`, and applied in one revision after the stale
+//! guard passes.
 //!
 //! The spec is JSON — `{"ops": [...]}` or a bare `[...]`:
 
@@ -13,9 +13,26 @@
 //!   {"op": "replace_body", "symbol": "m::f", "body": "{ return x + 1; }"},
 //!   {"op": "remove_def",   "symbol": "m::dead"},
 //!   {"op": "add_def",      "module": "m",
-//!    "text": "fn g() -> i32 { return 1; }"}
+//!    "text": "fn g() -> i32 { return 1; }"},
+//!   {"op": "rename_param", "symbol": "m::f", "param": "x", "to": "acc"},
+//!   {"op": "set_param_type", "symbol": "m::f", "param": "x", "ty": "i64"},
+//!   {"op": "set_ret_type", "symbol": "m::f", "ty": "i32"},
+//!   {"op": "add_use",    "module": "m", "path": "dep::T", "as": "T2"},
+//!   {"op": "remove_use", "module": "m", "path": "dep"},
+//!   {"op": "add_field",  "symbol": "m::D", "field": "c", "ty": "i32"},
+//!   {"op": "remove_field", "symbol": "m::D", "field": "dead"},
+//!   {"op": "rename_field", "symbol": "m::D", "field": "a", "to": "b"},
+//!   {"op": "set_field_type", "symbol": "m::D", "field": "a", "ty": "i64"}
 //! ]}
 //! ```
+//!
+//! `module` names the file to edit — a reachable module stem, or the
+//! workspace root when absent. `symbol` names a top-level `fn`/`data`
+//! resolved through the workspace scope (`x` or `m::x`); `param` and
+//! `field` name existing members of that target, `to`/`as`/`ty` carry
+//! new text. `set_ret_type`'s `ty` is required — `"ty": null` is the
+//! remove-the-annotation form. `path` is `m` or `m::x` and never
+//! carries `as` — the alias is the separate `as` field.
 //!
 //! Malformed specs surface as `E_MALFORMED_PATCH` diagnostics — the
 //! same rejection channel every semantic failure uses.
@@ -71,7 +88,12 @@ fn op_from_json(i: usize, op: &Json) -> Result<PatchOp, Box<Diagnostic>> {
     };
     let Some(kind) = op["op"].as_str() else {
         return err(
-            "missing `op` kind (expected \"replace_body\" | \"remove_def\" | \"add_def\")".into(),
+            "missing `op` kind (expected \"replace_body\" | \"remove_def\" \
+                    | \"add_def\" | \"rename_param\" | \"set_param_type\" \
+                    | \"set_ret_type\" | \"add_use\" | \"remove_use\" \
+                    | \"add_field\" | \"remove_field\" | \"rename_field\" \
+                    | \"set_field_type\")"
+                .into(),
         );
     };
     let need_str = |field: &str| -> Result<String, Box<Diagnostic>> {
@@ -79,6 +101,32 @@ fn op_from_json(i: usize, op: &Json) -> Result<PatchOp, Box<Diagnostic>> {
             .as_str()
             .map(str::to_string)
             .ok_or_else(|| malformed(format!("ops[{i}] {kind}: missing string field `{field}`")))
+    };
+    // Optional string field: absent or `null` → `None`; any other
+    // non-string type rejects.
+    let opt_str = |field: &str| -> Result<Option<String>, Box<Diagnostic>> {
+        match op.get(field) {
+            None | Some(Json::Null) => Ok(None),
+            Some(Json::String(s)) => Ok(Some(s.clone())),
+            _ => Err(malformed(format!(
+                "ops[{i}] {kind}: `{field}` must be a string or absent"
+            ))),
+        }
+    };
+    // Required-but-nullable field: present as a string or as an
+    // explicit `null` (the "remove" form); absent rejects — the
+    // remove form must be written deliberately.
+    let req_opt_str = |field: &str| -> Result<Option<String>, Box<Diagnostic>> {
+        match op.get(field) {
+            None => Err(malformed(format!(
+                "ops[{i}] {kind}: missing field `{field}` (a type string, or `null` to remove)"
+            ))),
+            Some(Json::Null) => Ok(None),
+            Some(Json::String(s)) => Ok(Some(s.clone())),
+            _ => Err(malformed(format!(
+                "ops[{i}] {kind}: `{field}` must be a type string or `null`"
+            ))),
+        }
     };
     match kind {
         "replace_body" => Ok(PatchOp::ReplaceBody {
@@ -88,24 +136,54 @@ fn op_from_json(i: usize, op: &Json) -> Result<PatchOp, Box<Diagnostic>> {
         "remove_def" => Ok(PatchOp::RemoveDef {
             symbol: need_str("symbol")?,
         }),
-        "add_def" => {
-            let module = match &op["module"] {
-                Json::Null => None,
-                Json::String(m) => Some(m.clone()),
-                _ => {
-                    return err("add_def: `module` must be a string (a file \
-                                stem in the workspace) or absent"
-                        .into());
-                }
-            };
-            Ok(PatchOp::AddDef {
-                module,
-                text: need_str("text")?,
-            })
-        }
-        other => err(format!(
-            "unknown op `{other}` (expected \"replace_body\" | \"remove_def\" | \"add_def\")"
-        )),
+        "add_def" => Ok(PatchOp::AddDef {
+            module: opt_str("module")?,
+            text: need_str("text")?,
+        }),
+        "rename_param" => Ok(PatchOp::RenameParam {
+            symbol: need_str("symbol")?,
+            param: need_str("param")?,
+            to: need_str("to")?,
+        }),
+        "set_param_type" => Ok(PatchOp::SetParamType {
+            symbol: need_str("symbol")?,
+            param: need_str("param")?,
+            ty: need_str("ty")?,
+        }),
+        "set_ret_type" => Ok(PatchOp::SetRetType {
+            symbol: need_str("symbol")?,
+            ty: req_opt_str("ty")?,
+        }),
+        "add_use" => Ok(PatchOp::AddUse {
+            module: opt_str("module")?,
+            path: need_str("path")?,
+            alias: opt_str("as")?,
+        }),
+        "remove_use" => Ok(PatchOp::RemoveUse {
+            module: opt_str("module")?,
+            path: need_str("path")?,
+            alias: opt_str("as")?,
+        }),
+        "add_field" => Ok(PatchOp::AddField {
+            symbol: need_str("symbol")?,
+            field: need_str("field")?,
+            ty: need_str("ty")?,
+        }),
+        "remove_field" => Ok(PatchOp::RemoveField {
+            symbol: need_str("symbol")?,
+            field: need_str("field")?,
+        }),
+        "rename_field" => Ok(PatchOp::RenameField {
+            symbol: need_str("symbol")?,
+            field: need_str("field")?,
+            to: need_str("to")?,
+        }),
+        "set_field_type" => Ok(PatchOp::SetFieldType {
+            symbol: need_str("symbol")?,
+            field: need_str("field")?,
+            ty: need_str("ty")?,
+        }),
+        other => err(format!("unknown op `{other}`")),
     }
 }
 
