@@ -49,6 +49,8 @@ per line, one schema-1 envelope per line.
 {"op":"explain", "path":"x.ixa", "symbol":"s"}    → explain envelope
 {"op":"rename",  "path":"x.ixa", "symbol":"m::s", "to":"new",
                  "apply":true, "revision":R}      → preview or apply
+{"op":"patch",   "path":"x.ixa", "ops":[{...}],   → preview or apply;
+                 "apply":true, "revision":R}          same guards as rename
 {"op":"fmt",     "path":"x.ixa"}                  → fmt envelope: canonical
                                                   text, no mutation
 {"op":"stats"}                                   → counters + last_evaluated
@@ -123,10 +125,49 @@ Alias semantics: `use m::x` rebinds, so bare `x` refs rewrite with
 the member segment; `use m::x as y` keeps `y` — only the member
 segment rewrites.
 
+## Structured semantic patches (ADR-0016)
+
+`patch` is the rename transaction generalized to a bounded op
+vocabulary — same pipeline (plan → preview → shadow compile →
+revision-guarded atomic apply), same envelopes, same persistence.
+
+```json
+{"ops": [
+  {"op": "replace_body", "symbol": "m::f", "body": "{ return x + 1; }"},
+  {"op": "remove_def",   "symbol": "m::dead"},
+  {"op": "add_def",      "module": "m",
+   "text": "fn g() -> i32 { return 1; }"}
+]}
+```
+
+- CLI: `ontixa patch <file> <spec> [--apply] [--json]` — `<spec>` is
+  `-` (stdin), `@path`, inline JSON, or a spec file path. Preview by
+  default; `--apply` writes through the same staged journaled
+  transaction engine rename uses.
+- Daemon: `{"op":"patch","path":...,"ops":[...]}` previews;
+  `"apply":true,"revision":R` commits in memory and returns
+  `new_sources` for the client to persist.
+
+Op semantics: `replace_body` splices a `fn`'s `{ ... }` block
+(signature untouched), `remove_def` deletes a top-level item,
+`add_def` appends one item to a reachable module's file. Targets
+resolve through the workspace scope exactly like rename targets.
+
+Rejection codes, in pipeline order: `E_MALFORMED_PATCH` (spec shape,
+payload bounds, overlapping edits), `E_BASELINE_ERRORS`,
+`E_UNKNOWN_SYMBOL` / `E_AMBIGUOUS_SYMBOL` / `E_UNKNOWN_MODULE` /
+`E_UNSUPPORTED_TARGET` (resolution — a comment between signature and
+`{` also refuses), `E_PATCH_REJECTED` (shadow compile surfaced new
+errors, carrying them), `E_STALE_REVISION` and `E_PLAN_MISMATCH` at
+apply. Every rejection writes nothing.
+
+Honest limits: a patch guarantees *compile integrity*, not semantic
+preservation — there is no binding-correspondence check (the patch
+is meant to change behavior). Ops cannot touch `use` declarations,
+reorder items, edit comments, or create/delete files; layout seams
+are normalized minimally and `ontixa fmt` owns canonical form.
+
 ## Planned (roadmap)
 
-- Semantic patches: `apply` an AST-level edit, serialized as spans +
-  nodes, preserving untouched source exactly — the rename
-  transaction is the first instance of this shape.
 - Evidence-carrying diffs: a patch ships with the diagnostics it
   resolved and the contract deltas it caused.

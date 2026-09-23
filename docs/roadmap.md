@@ -45,6 +45,12 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   / `s[lo..]` / `s[..hi]` / `s[..]` slicing, lexicographic ordering.
   Indices count Unicode scalars; out-of-bounds traps. Demo:
   `examples/strings.ixa`
+- structured semantic patches: a bounded op vocabulary
+  (`replace_body`, `remove_def`, `add_def`) through the rename
+  transaction pipeline — plan → preview → shadow-compile →
+  revision-guarded atomic apply; CLI `patch` + daemon `patch` op
+  (ADR-0016). Compile integrity, not semantic preservation; no
+  `use` edits, reordering, comments, or file create/delete.
 
 Remaining:
 
@@ -52,8 +58,8 @@ Remaining:
 - `match`-like selection over `data` variants (enum data)
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - more primitives (`char` — `u*`/`f32`/`f64`/`str` already resolve)
-- semantic patches beyond rename (structured apply of arbitrary
-  edits — the transaction shape exists; generality doesn't)
+- wider patch ops (signature edits, `use` management, `data` field
+  edits) — the protocol is general; each op adds resolution logic
 - finer-grained file-level queries (per-item parse, incremental
   graph) — the honest weakness stands; see benchmarks/README.md
 

@@ -92,12 +92,14 @@ recomputed value comparing equal stops invalidation from
 propagating (ADR-0004/0008). Spans in derived values are
 item-relative, so offset-shifting edits preserve semantic identity
 (see `docs/semantic-identity.md`). `Db::set_sources` is the atomic
-multi-file write rename transactions commit through.
+multi-file write source transactions commit through.
 
-### Renames are transactions
+### Source edits are transactions
 
 `plan_rename` resolves sites semantically (never text), validates,
 and shadow-compiles the edited sources in a scratch `Db` — pure, no
 live mutation. `apply_rename` re-checks the planned revision
 (`E_STALE_REVISION` on drift) and commits every file in one
-revision bump (ADR-0014).
+revision bump (ADR-0014/0015). `plan_patch`/`apply_patch` run the
+same pipeline over a bounded op vocabulary — `replace_body`,
+`remove_def`, `add_def` (ADR-0016).

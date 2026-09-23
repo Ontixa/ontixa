@@ -45,15 +45,17 @@ Codes are a public contract. Never reuse; retire instead.
 | `E_MUTABLE_BORROW_OF_IMMUTABLE` | ownership | `borrow_mut` arg lacks `mut` authority |
 | `E_BORROW_CONFLICT`    | ownership | overlapping loans, at least one mutable |
 | `E_MOVE_WHILE_BORROWED` | ownership | move of a place under a live loan |
-| `E_AMBIGUOUS_SYMBOL`   | explain/rename | symbol query matched >1 symbol |
+| `E_AMBIGUOUS_SYMBOL`   | explain/rename/patch | symbol query matched >1 symbol |
 | `E_UNKNOWN_MODULE`     | resolve   | `use`/path names an unregistered module |
 | `E_INVALID_NAME`       | rename    | replacement is not a valid identifier |
 | `E_NAME_CONFLICT`      | rename    | new name collides with an existing binding |
 | `E_RENAME_REJECTED`    | rename    | shadow compile surfaced new errors, or a reference rebinds |
-| `E_STALE_REVISION`     | rename    | workspace changed between plan and apply |
-| `E_BASELINE_ERRORS`    | rename    | workspace already has errors; rename needs a clean baseline |
-| `E_PLAN_MISMATCH`      | rename    | plan provenance violated (wrong Db, snapshot, or payload) |
-| `E_UNSUPPORTED_TARGET` | rename    | selected target is not a renameable binding |
+| `E_MALFORMED_PATCH`    | patch     | spec shape/bounds invalid, or edits overlap |
+| `E_PATCH_REJECTED`     | patch     | shadow compile surfaced new errors — nothing applied |
+| `E_STALE_REVISION`     | rename/patch | workspace changed between plan and apply |
+| `E_BASELINE_ERRORS`    | rename/patch | workspace already has errors; transactions need a clean baseline |
+| `E_PLAN_MISMATCH`      | rename/patch | plan provenance violated (wrong Db, snapshot, or payload) |
+| `E_UNSUPPORTED_TARGET` | rename/patch | selected target cannot take the requested edit |
 | `E_MISSING_RETURN`     | types     | non-unit fn can fall through     |
 | `E_LITERAL_OVERFLOW`   | types     | literal exceeds its type         |
 | `E_UNSUPPORTED_OP`     | types     | op not defined for operand types |

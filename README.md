@@ -143,6 +143,8 @@ $ ontixa explain file.ixa m::sym   # a single symbol, qualified ok
 $ ontixa rename file.ixa m::old new         # preview edits
 $ ontixa rename file.ixa @138 new           # local/param rename by byte offset
 $ ontixa rename file.ixa m::old new --apply # guarded apply; staged+journaled to disk
+$ ontixa patch file.ixa '{"ops":[...]}'     # structured patch preview (spec: -/@file/inline JSON)
+$ ontixa patch file.ixa @p.json --apply     # guarded apply; staged+journaled to disk
 $ ontixa recover dir/                       # resolve a transaction journal after a crash
 $ ontixa fmt file.ixa                       # canonical format to stdout (CST-driven, keeps comments)
 $ ontixa fmt file.ixa --check               # exit 1 if the file would change — CI gate
@@ -150,7 +152,8 @@ $ ontixa fmt file.ixa --write               # overwrite in place (staged+journal
 ```
 
 `ontixad` is the persistent daemon (NDJSON on stdio): `open`, `set`,
-`check`, `explain`, `rename`, `fmt`, `stats`, `close`, `shutdown` — see
+`check`, `explain`, `rename`, `patch`, `fmt`, `stats`, `close`,
+`shutdown` — see
 [docs/agent-interface.md](docs/agent-interface.md).
 
 Common flags: `--json` (machine-readable output), `--timings`
@@ -170,7 +173,7 @@ crates/
   ontixa-memory       ownership/borrow/move/escape inference
   ontixa-semantic     Semantic Program Graph
   ontixa-mir          typed CFG
-  ontixa-db           incremental query engine + rename transactions
+  ontixa-db           incremental query engine + source transactions (rename, patch)
   ontixa-interpreter  reference executor (semantics oracle)
   ontixa-cli          the `ontixa` tool + `ontixad` daemon
 docs/                 design documentation

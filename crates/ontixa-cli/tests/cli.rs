@@ -758,6 +758,172 @@ fn daemon_rename_previews_applies_and_guards_stale() {
     assert!(math.contains("fn double("), "{math}");
 }
 
+// ---------- semantic-patch transactions ----------
+
+const PATCH_SRC: &str = "use math;\n\
+                         fn main() -> i32 { return math::double(21); }\n\
+                         fn local() -> i32 { return 1; }\n";
+const PATCH_DEP: &str = "fn double(x: i32) -> i32 { return x * 2; }\n\
+                         fn norm(x: i32) -> i32 { return x; }\n";
+
+/// `patch` with no `--apply` is the preview: edits + revision in
+/// the result, nothing on disk — the same dry-run shape as rename.
+#[test]
+fn patch_preview_lists_edits_and_writes_nothing() {
+    let main = ws_fixture("patchprev", PATCH_SRC, PATCH_DEP);
+    let dep_path = main.parent().unwrap().join("math.ixa");
+    let dep_before = std::fs::read_to_string(&dep_path).unwrap();
+    let spec = r#"{"ops": [{"op": "replace_body", "symbol": "local", "body": "{ return 7; }"}]}"#;
+    let out = ontixa(&["patch", main.to_str().unwrap(), spec, "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["command"], "patch");
+    assert_eq!(d["success"], true, "{d}");
+    assert_eq!(d["result"]["applied"], false);
+    assert!(d["result"]["revision"].as_u64().is_some());
+    let edits = d["result"]["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 1, "{edits:?}");
+    assert_eq!(edits[0]["replace"], "{ return 7; }");
+    assert!(
+        edits[0]["file"].as_str().unwrap().contains("main.ixa"),
+        "{edits:?}"
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(std::fs::read_to_string(&dep_path).unwrap(), dep_before);
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), PATCH_SRC);
+}
+
+/// `patch --apply` writes every touched file through the staged
+/// transaction and the patched workspace still compiles and runs.
+#[test]
+fn patch_apply_writes_all_files_and_program_still_runs() {
+    let main = ws_fixture("patchapply", PATCH_SRC, PATCH_DEP);
+    // A spec file exercises the path form of the spec argument.
+    let spec_path = main.parent().unwrap().join("patch.json");
+    std::fs::write(
+        &spec_path,
+        r#"{"ops": [
+             {"op": "replace_body", "symbol": "math::double",
+              "body": "{ return x * 3; }"},
+             {"op": "add_def", "module": "math",
+              "text": "fn triple(x: i32) -> i32 { return x * 3; }"}
+           ]}"#,
+    )
+    .unwrap();
+    let spec = format!("@{}", spec_path.display());
+    let out = ontixa(&["patch", main.to_str().unwrap(), &spec, "--apply", "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true, "{d}");
+    assert_eq!(d["result"]["applied"], true);
+    assert_eq!(d["result"]["ops_applied"], 2);
+    let dep = std::fs::read_to_string(main.parent().unwrap().join("math.ixa")).unwrap();
+    assert!(dep.contains("return x * 3;"), "{dep}");
+    assert!(dep.contains("fn triple(x: i32)"), "{dep}");
+    // The patched workspace still runs: double(21) is now x*3.
+    let run = ontixa(&["run", main.to_str().unwrap(), "--json"]);
+    assert_eq!(envelope(&run)["result"]["value"], 63);
+}
+
+/// Every rejection channel is a diagnostic envelope — and a
+/// rejected apply writes nothing.
+#[test]
+fn patch_rejections_emit_codes_and_write_nothing() {
+    let main = ws_fixture("patchrej", PATCH_SRC, PATCH_DEP);
+    let dep_path = main.parent().unwrap().join("math.ixa");
+    let dep_before = std::fs::read_to_string(&dep_path).unwrap();
+    let reject = |spec: &str| {
+        let out = ontixa(&["patch", main.to_str().unwrap(), spec, "--apply", "--json"]);
+        let d = envelope(&out);
+        assert_eq!(d["success"], false, "{d}");
+        assert_eq!(out.status.code(), Some(1));
+        d["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["code"].as_str().map(String::from))
+            .collect::<Vec<_>>()
+    };
+    // Removing a still-called def fails the shadow compile.
+    let codes = reject(r#"{"ops": [{"op": "remove_def", "symbol": "math::double"}]}"#);
+    assert!(codes.contains(&"E_PATCH_REJECTED".to_string()), "{codes:?}");
+    // Inline spec that is not valid JSON, and an unknown op kind —
+    // both are E_MALFORMED_PATCH.
+    let codes = reject("{nope");
+    assert!(
+        codes.contains(&"E_MALFORMED_PATCH".to_string()),
+        "{codes:?}"
+    );
+    let codes = reject(r#"{"ops": [{"op": "explode", "symbol": "x"}]}"#);
+    assert!(
+        codes.contains(&"E_MALFORMED_PATCH".to_string()),
+        "{codes:?}"
+    );
+    // Unknown target symbol.
+    let codes = reject(r#"{"ops": [{"op": "remove_def", "symbol": "math::nope"}]}"#);
+    assert!(codes.contains(&"E_UNKNOWN_SYMBOL".to_string()), "{codes:?}");
+    // Nothing was written.
+    assert_eq!(std::fs::read_to_string(&dep_path).unwrap(), dep_before);
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), PATCH_SRC);
+}
+
+/// The daemon `patch` op: preview carries the planned revision,
+/// apply requires it, and a stale revision is rejected before any
+/// mutation — the session's sources only change in memory.
+#[test]
+fn daemon_patch_previews_applies_and_guards_stale() {
+    let main = ws_fixture("daemonpatch", PATCH_SRC, PATCH_DEP);
+    let p = main.to_str().unwrap();
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "patch", "path": p, "ops": [
+            {"op": "replace_body", "symbol": "math::double", "body": "{ return x * 4; }"}
+        ]}),
+    ]);
+    assert_eq!(rs[1]["command"], "patch");
+    assert_eq!(rs[1]["success"], true, "{:?}", rs[1]);
+    assert_eq!(rs[1]["result"]["applied"], false);
+    let rev = rs[1]["result"]["revision"].as_u64().unwrap();
+    assert_eq!(rs[1]["result"]["edits"].as_array().unwrap().len(), 1);
+
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        // Apply naming the wrong revision → E_STALE_REVISION.
+        serde_json::json!({"op": "patch", "path": p, "apply": true, "revision": rev + 9, "ops": [
+            {"op": "replace_body", "symbol": "math::double", "body": "{ return x * 4; }"}
+        ]}),
+        // Apply with the planned revision → applied in-memory.
+        serde_json::json!({"op": "patch", "path": p, "apply": true, "revision": rev, "ops": [
+            {"op": "replace_body", "symbol": "math::double", "body": "{ return x * 4; }"}
+        ]}),
+        // A malformed spec is a diagnostic, never a crash.
+        serde_json::json!({"op": "patch", "path": p, "ops": [{"op": "bogus"}]}),
+    ]);
+    let stale: Vec<&str> = rs[1]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x["code"].as_str())
+        .collect();
+    assert!(stale.contains(&"E_STALE_REVISION"), "{:?}", rs[1]);
+    assert_eq!(rs[2]["success"], true, "{:?}", rs[2]);
+    assert_eq!(rs[2]["result"]["applied"], true);
+    let srcs = rs[2]["result"]["new_sources"].as_array().unwrap();
+    assert!(
+        srcs.iter()
+            .any(|s| s["text"].as_str().unwrap().contains("return x * 4;")),
+        "{srcs:?}"
+    );
+    let malformed: Vec<&str> = rs[3]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|x| x["code"].as_str())
+        .collect();
+    assert!(malformed.contains(&"E_MALFORMED_PATCH"), "{:?}", rs[3]);
+    // The daemon never writes disk — math.ixa is untouched.
+    let dep = std::fs::read_to_string(main.parent().unwrap().join("math.ixa")).unwrap();
+    assert_eq!(dep, PATCH_DEP);
+}
+
 // ---------- canonical formatting ----------
 
 const MESSY: &str = "fn f( x:i32)->i32{return x;}";

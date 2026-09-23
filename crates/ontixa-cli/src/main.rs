@@ -1,7 +1,7 @@
 //! `ontixa` — the Ontixa developer tool.
 //!
 //! Commands: `check`, `run`, `tokens`, `ast`, `mir`, `graph`,
-//! `explain`, `rename`, `recover`, `fmt`. Exit codes are part of the
+//! `explain`, `rename`, `patch`, `recover`, `fmt`. Exit codes are part of the
 //! tool contract:
 //!
 //! - `0` — success (diagnostics, if any, are warnings)
@@ -137,6 +137,26 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Preview or apply a structured semantic patch — a bounded op
+    /// list (`replace_body`, `remove_def`, `add_def`) resolved
+    /// through the workspace scope, validated by a shadow compile,
+    /// and committed atomically like a rename. The spec is JSON:
+    /// `{"ops": [...]}` or a bare op array.
+    Patch {
+        /// The `.ixa` source file (workspace root).
+        file: PathBuf,
+        /// The patch spec: `-` reads stdin, `@path` reads a file, an
+        /// argument starting with `{` or `[` is inline JSON, and
+        /// anything else is read as a spec file path.
+        spec: String,
+        /// Validate and write the patched files to disk. Without
+        /// this flag the command only previews the planned edits.
+        #[arg(long)]
+        apply: bool,
+        /// Emit machine-readable JSON (one envelope document).
+        #[arg(long)]
+        json: bool,
+    },
     /// Resolve a pending source-transaction journal under a
     /// workspace directory — finishes a committed transaction or
     /// rolls one back that never swapped. Safe to run on a clean
@@ -203,6 +223,12 @@ fn main() -> ExitCode {
             apply,
             json,
         } => rename_cmd(file, symbol, new_name, apply, json),
+        Cmd::Patch {
+            file,
+            spec,
+            apply,
+            json,
+        } => patch_cmd(file, spec, apply, json),
         Cmd::Recover { dir, json } => recover_cmd(dir, json),
         Cmd::Fmt {
             files,
@@ -622,6 +648,139 @@ fn rename_cmd(
                     .emit();
             }
             ontixa_cli::rename::print_preview(&plan, &sfs);
+            eprintln!("dry run — pass --apply to write the changes");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Reads a patch spec argument into its raw text: `-` reads stdin,
+/// `@path` reads a file, an argument starting with `{`/`[` is inline
+/// JSON, and anything else is read as a spec file path.
+fn patch_spec_text(spec: &str) -> Result<String, CompileFailure> {
+    let io = |e: std::io::Error, what: String| CompileFailure::Io(format!("{what}: {e}"));
+    if spec == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| io(e, "cannot read patch spec from stdin".into()))?;
+        return Ok(buf);
+    }
+    if let Some(path) = spec.strip_prefix('@') {
+        return std::fs::read_to_string(path)
+            .map_err(|e| io(e, format!("cannot read patch spec {path}")));
+    }
+    if spec.trim_start().starts_with(['{', '[']) {
+        return Ok(spec.to_string());
+    }
+    std::fs::read_to_string(spec).map_err(|e| io(e, format!("cannot read patch spec {spec}")))
+}
+
+/// Emits a spec-level failure (`E_MALFORMED_PATCH`) in the active
+/// mode. `sfs` gives the diagnostic a file context to render
+/// against — the spec errors carry no spans.
+fn patch_spec_failure(d: &Diagnostic, sfs: &[SourceFile], json: bool) -> ExitCode {
+    if json {
+        Envelope::new("patch").extra_diagnostic(d, sfs).emit()
+    } else {
+        eprint!(
+            "{}",
+            ontixa_diagnostics::render_all_in(std::slice::from_ref(d), sfs)
+        );
+        ExitCode::from(1)
+    }
+}
+
+/// `patch`: read spec → parse ops → plan → (preview | apply+persist).
+/// Rejections are diagnostics — never a mutation; an applied plan
+/// persists through the same staged, journaled transaction engine
+/// `rename --apply` uses.
+fn patch_cmd(file: PathBuf, spec: String, apply: bool, json: bool) -> ExitCode {
+    // Read the root up front: spec diagnostics need a file context
+    // to render against (the engine keeps them spanless).
+    let root_text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) => {
+            return emit_failure(
+                CompileFailure::Io(format!("cannot read {}: {e}", file.display())),
+                "patch",
+                json,
+            );
+        }
+    };
+    let root_sf = [SourceFile::new(
+        FileId::new(0),
+        file.display().to_string(),
+        Some(file.clone()),
+        root_text,
+    )];
+    let spec_text = match patch_spec_text(&spec) {
+        Ok(t) => t,
+        Err(f) => return emit_failure(f, "patch", json),
+    };
+    let ops = match serde_json::from_str::<Json>(&spec_text)
+        .map_err(|e| {
+            Box::new(Diagnostic::error(
+                Code::MalformedPatch,
+                format!("patch spec is not valid JSON: {e}"),
+            ))
+        })
+        .and_then(|spec| ontixa_cli::patch::parse_ops(&spec))
+    {
+        Ok(ops) => ops,
+        Err(d) => return patch_spec_failure(&d, &root_sf, json),
+    };
+    let (sfs, outcome) = match with_db(&file, |db, f| match db.plan_patch(f, &ops) {
+        Err(e) => Err(e),
+        Ok(plan) if apply => db.apply_patch(&plan).map(|r| (plan, Some(r))),
+        Ok(plan) => Ok((plan, None)),
+    }) {
+        Ok(x) => x,
+        Err(f) => return emit_failure(f, "patch", json),
+    };
+    match outcome {
+        Err(e) => {
+            let diags = e.diagnostics();
+            if json {
+                let mut env = Envelope::new("patch");
+                for d in &diags {
+                    env = env.extra_diagnostic(d, &sfs);
+                }
+                env.emit()
+            } else {
+                eprint!("{}", ontixa_diagnostics::render_all_in(&diags, &sfs));
+                ExitCode::from(1)
+            }
+        }
+        Ok((plan, report)) => {
+            if let Some(rep) = &report {
+                // Apply landed in the Db — persist every touched
+                // file through the staged transaction engine.
+                if let Err(e) = ontixa_cli::patch::persist(&plan, &sfs) {
+                    return emit_failure(CompileFailure::Io(e), "patch", json);
+                }
+                if json {
+                    return Envelope::new("patch")
+                        .diagnostics(&rep.diags, &sfs)
+                        .result(ontixa_cli::patch::applied_json(&plan, rep, &sfs))
+                        .emit();
+                }
+                let code = emit_human_diags(&rep.diags, &sfs);
+                println!(
+                    "applied {} op(s): {} edit(s), {} file(s) written",
+                    rep.ops,
+                    rep.edits,
+                    rep.files.len(),
+                );
+                return code;
+            }
+            if json {
+                return Envelope::new("patch")
+                    .result(ontixa_cli::patch::plan_json(&plan, &sfs, false))
+                    .emit();
+            }
+            ontixa_cli::patch::print_preview(&plan, &sfs);
             eprintln!("dry run — pass --apply to write the changes");
             ExitCode::SUCCESS
         }
