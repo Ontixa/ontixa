@@ -155,6 +155,7 @@ impl Checker<'_> {
                 .interner
                 .resolve(self.scope.symbols.get(self.scope.def(d).name).name)
                 .to_string(),
+            Ty::Array(e) => format!("[{}]", self.show(e.ty())),
             Ty::Poison => "<error>".into(),
         }
     }
@@ -356,14 +357,14 @@ impl Checker<'_> {
     fn field_ty(&mut self, ty: Ty, name: InternId, span: Span) -> Option<Ty> {
         match ty {
             Ty::Poison => None,
-            // `s.len` reads fine as an expression (the Field arm
-            // intercepts it), but it is not a place — `s.len = n`
+            // `s.len`/`a.len` read fine as expressions (the Field arm
+            // intercepts them), but they are not places — `.len = n`
             // must fail here rather than as a generic field error.
-            Ty::Str if self.interner.resolve(name) == "len" => {
+            Ty::Str | Ty::Array(_) if self.interner.resolve(name) == "len" => {
                 self.diags.push(
                     Diagnostic::error(
                         Code::UnsupportedOperation,
-                        "`str.len` is a read-only property; cannot assign to it",
+                        "`len` is a read-only property; cannot assign to it",
                     )
                     .primary(span),
                 );
@@ -428,11 +429,12 @@ impl Checker<'_> {
             HirExprKind::Call { def, args } => self.call_ty(def, &args, span),
             HirExprKind::Field { base, name, .. } => {
                 let base_ty = self.expr_ty(base, None);
-                if base_ty == Ty::Str && self.interner.resolve(name.id) == "len" {
-                    // `str.len` is a built-in property, not a field —
+                let is_len = self.interner.resolve(name.id) == "len";
+                if is_len && matches!(base_ty, Ty::Str | Ty::Array(_)) {
+                    // `len` is a built-in property, not a field —
                     // rewrite the node so MIR and ownership analysis
                     // never treat it as a projection.
-                    self.exprs[id.index()].kind = HirExprKind::StrLen { base };
+                    self.exprs[id.index()].kind = HirExprKind::Len { base };
                     Ty::I32
                 } else {
                     match self.field_ty(base_ty, name.id, name.span) {
@@ -450,11 +452,12 @@ impl Checker<'_> {
                     }
                 }
             }
-            HirExprKind::StrLen { base } => {
-                // Only the checker creates `StrLen`, and only for `str`
-                // bases — any other base means an internal gap.
+            HirExprKind::Len { base } => {
+                // Only the checker creates `Len`, and only for
+                // `str`/`[T]` bases — any other base means an
+                // internal gap.
                 match self.expr_ty(base, None) {
-                    Ty::Str => Ty::I32,
+                    Ty::Str | Ty::Array(_) => Ty::I32,
                     Ty::Poison => Ty::Poison,
                     other => {
                         self.diags.push(
@@ -470,6 +473,24 @@ impl Checker<'_> {
             }
             HirExprKind::Index { base, index } => self.index_ty(base, index),
             HirExprKind::Slice { base, lo, hi } => self.slice_ty(base, lo, hi),
+            HirExprKind::ArrayLit { elems } => self.array_lit_ty(&elems, expected, span),
+            HirExprKind::Range { lo, hi } => {
+                // A `..` range is only valid as a `for` iterable
+                // (slice bounds inside `[]` never lower to `Range`).
+                // Bounds are still checked for secondary diagnostics.
+                for bound in [lo, hi].into_iter().flatten() {
+                    self.expr_ty(bound, None);
+                }
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::UnsupportedOperation,
+                        "a `..` range is only valid as a `for` iterable",
+                    )
+                    .primary(span),
+                );
+                Ty::Poison
+            }
+            HirExprKind::For { var, iter, body } => self.for_ty(var, iter, body),
             HirExprKind::Binary { op, lhs, rhs } => self.binary_ty(op, lhs, rhs, span),
             HirExprKind::Unary { op, expr } => self.unary_ty(op, expr, span),
             HirExprKind::If { cond, then, else_ } => self.if_ty(cond, then, else_, expected, span),
@@ -555,57 +576,66 @@ impl Checker<'_> {
         ret
     }
 
-    /// `base[index]`: only `str` indexes, only by integer position;
-    /// the result is a one-character `str`.
+    /// `base[index]`: `str` indexes by character position (the result
+    /// is a one-character `str`); `[T]` indexes by element position
+    /// (the result is `T`). The index must be an integer.
     fn index_ty(&mut self, base: ExprId, index: ExprId) -> Ty {
         let b = self.expr_ty(base, None);
         let i = self.expr_ty(index, None);
         let mut ok = true;
-        if b != Ty::Str && b != Ty::Poison {
-            let bspan = self.node(base).span;
-            self.diags.push(
-                Diagnostic::error(
-                    Code::UnsupportedOperation,
-                    format!("cannot index {}", self.show(b)),
-                )
-                .primary(bspan),
-            );
-            ok = false;
-        }
+        let result = match b {
+            Ty::Str => Ty::Str,
+            Ty::Array(e) => e.ty(),
+            Ty::Poison => Ty::Poison,
+            other => {
+                let bspan = self.node(base).span;
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::UnsupportedOperation,
+                        format!("cannot index {}", self.show(other)),
+                    )
+                    .primary(bspan),
+                );
+                ok = false;
+                Ty::Poison
+            }
+        };
         if !i.is_integer() && i != Ty::Poison {
             let ispan = self.node(index).span;
             self.diags.push(
                 Diagnostic::error(
                     Code::TypeMismatch,
-                    format!("string index must be an integer, found {}", self.show(i)),
+                    format!("index must be an integer, found {}", self.show(i)),
                 )
                 .primary(ispan),
             );
             ok = false;
         }
-        if ok && b == Ty::Str {
-            Ty::Str
-        } else {
-            Ty::Poison
-        }
+        if ok { result } else { Ty::Poison }
     }
 
-    /// `base[lo..hi]`: only `str` slices; present bounds must be
-    /// integers; the result is a `str`.
+    /// `base[lo..hi]`: `str` slices produce `str`; `[T]` slices
+    /// produce a fresh `[T]`. Present bounds must be integers.
     fn slice_ty(&mut self, base: ExprId, lo: Option<ExprId>, hi: Option<ExprId>) -> Ty {
         let b = self.expr_ty(base, None);
         let mut ok = true;
-        if b != Ty::Str && b != Ty::Poison {
-            let bspan = self.node(base).span;
-            self.diags.push(
-                Diagnostic::error(
-                    Code::UnsupportedOperation,
-                    format!("cannot slice {}", self.show(b)),
-                )
-                .primary(bspan),
-            );
-            ok = false;
-        }
+        let result = match b {
+            Ty::Str => Ty::Str,
+            Ty::Array(_) => b,
+            Ty::Poison => Ty::Poison,
+            other => {
+                let bspan = self.node(base).span;
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::UnsupportedOperation,
+                        format!("cannot slice {}", self.show(other)),
+                    )
+                    .primary(bspan),
+                );
+                ok = false;
+                Ty::Poison
+            }
+        };
         for bound in [lo, hi].into_iter().flatten() {
             let t = self.expr_ty(bound, None);
             if !t.is_integer() && t != Ty::Poison {
@@ -620,8 +650,175 @@ impl Checker<'_> {
                 ok = false;
             }
         }
-        if ok && b == Ty::Str {
-            Ty::Str
+        if ok { result } else { Ty::Poison }
+    }
+
+    /// `[e, ...]`: every element must share one type — the first
+    /// element's, or the annotation's when given (`let a: [i32] =
+    /// [..]`). An empty `[]` needs the annotation — there is nothing
+    /// to infer from.
+    fn array_lit_ty(&mut self, elems: &[ExprId], expected: Option<Ty>, span: Span) -> Ty {
+        let expected_elem = match expected {
+            Some(Ty::Array(e)) => Some(e.ty()),
+            _ => None,
+        };
+        let mut elem: Option<Ty> = expected_elem;
+        let mut ok = true;
+        for &e in elems {
+            let t = self.expr_ty(e, expected_elem);
+            match elem {
+                None => elem = Some(t),
+                Some(prev) => {
+                    if !prev.compatible(t) {
+                        let espan = self.node(e).span;
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::TypeMismatch,
+                                format!(
+                                    "array element must be {}, found {}",
+                                    self.show(prev),
+                                    self.show(t)
+                                ),
+                            )
+                            .primary(espan),
+                        );
+                        ok = false;
+                    }
+                }
+            }
+        }
+        let Some(elem) = elem else {
+            // `[]` with no `[T]` context — nothing to infer from. When
+            // the context itself is poison (`let a: [unit] = []`), the
+            // annotation was already diagnosed — don't report twice.
+            if expected != Some(Ty::Poison) {
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::CannotInfer,
+                        "cannot infer the element type of an empty array literal; \
+                         add a type annotation",
+                    )
+                    .primary(span),
+                );
+            }
+            return Ty::Poison;
+        };
+        if !ok || elem == Ty::Poison {
+            return Ty::Poison;
+        }
+        match elem.elem() {
+            Some(e) => Ty::Array(e),
+            None => {
+                // Only `unit` and `[_]` elements reach here — `Poison`
+                // returned early above.
+                let msg = match elem {
+                    Ty::Array(_) => "nested arrays are not supported yet".to_string(),
+                    _ => format!("arrays cannot hold {} elements", self.show(elem)),
+                };
+                self.diags
+                    .push(Diagnostic::error(Code::UnsupportedOperation, msg).primary(span));
+                Ty::Poison
+            }
+        }
+    }
+
+    /// `for x in e { .. }`: `e` must be an array (`x` binds its
+    /// element type) or a `lo..hi` integer range (`x` binds the
+    /// bound type — `i32` by default). `for` is `unit`-typed.
+    fn for_ty(&mut self, var: SymbolId, iter: ExprId, body: ExprId) -> Ty {
+        let elem = match self.node(iter).kind.clone() {
+            HirExprKind::Range { lo, hi } => self.range_iter_ty(lo, hi, iter),
+            _ => match self.expr_ty(iter, None) {
+                Ty::Array(e) => e.ty(),
+                Ty::Poison => Ty::Poison,
+                other => {
+                    let ispan = self.node(iter).span;
+                    self.diags.push(
+                        Diagnostic::error(
+                            Code::UnsupportedOperation,
+                            format!("cannot iterate over {}", self.show(other)),
+                        )
+                        .primary(ispan),
+                    );
+                    Ty::Poison
+                }
+            },
+        };
+        self.locals.insert(var, elem);
+        self.tables.local_types.insert(var, elem);
+        // The body is a statement block — its tail value, if any, is
+        // discarded like an `if` without `else`.
+        self.expr_ty(body, None);
+        Ty::Unit
+    }
+
+    /// Element type of a `for i in lo..hi` iterable. Bounds must be
+    /// integers of one type; a missing `lo` starts at 0; a missing
+    /// `hi` never terminates — `break` does not exist yet, so an
+    /// unbounded range is rejected.
+    fn range_iter_ty(&mut self, lo: Option<ExprId>, hi: Option<ExprId>, iter: ExprId) -> Ty {
+        let mut ok = true;
+        if hi.is_none() {
+            let ispan = self.node(iter).span;
+            self.diags.push(
+                Diagnostic::error(
+                    Code::UnsupportedOperation,
+                    "cannot iterate an unbounded `lo..` range (no `break` yet)",
+                )
+                .primary(ispan),
+            );
+            ok = false;
+        }
+        let mut elem: Option<Ty> = None;
+        // A bare integer literal adopts the other bound's type —
+        // evaluate a non-literal bound first so `0..n` with `n: i64`
+        // treats `0` as `i64` too (not just `n..0`).
+        let lo_lit = lo.is_some_and(|e| matches!(self.node(e).kind, HirExprKind::Literal(_)));
+        let bounds: Vec<ExprId> = if lo_lit {
+            [hi, lo].into_iter().flatten().collect()
+        } else {
+            [lo, hi].into_iter().flatten().collect()
+        };
+        for bound in bounds {
+            let t = self.expr_ty(bound, elem);
+            if t == Ty::Poison {
+                ok = false;
+                continue;
+            }
+            if !t.is_integer() {
+                let bspan = self.node(bound).span;
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::TypeMismatch,
+                        format!("range bound must be an integer, found {}", self.show(t)),
+                    )
+                    .primary(bspan),
+                );
+                ok = false;
+                continue;
+            }
+            match elem {
+                None => elem = Some(t),
+                Some(e) if e != t => {
+                    let ispan = self.node(iter).span;
+                    self.diags.push(
+                        Diagnostic::error(
+                            Code::TypeMismatch,
+                            format!(
+                                "range bounds must share one integer type, found {} and {}",
+                                self.show(e),
+                                self.show(t)
+                            ),
+                        )
+                        .primary(ispan),
+                    );
+                    ok = false;
+                }
+                Some(_) => {}
+            }
+        }
+        if ok {
+            elem.unwrap_or(Ty::I32)
         } else {
             Ty::Poison
         }

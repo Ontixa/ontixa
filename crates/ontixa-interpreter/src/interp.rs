@@ -154,8 +154,8 @@ impl<'a> Interp<'a> {
                 }
             }
             match &block.term {
-                Terminator::Return(op) => return self.operand(&locals, op),
-                Terminator::Goto(next) => pc = next.0 as usize,
+                Terminator::Return { value: op } => return self.operand(&locals, op),
+                Terminator::Goto { target: next } => pc = next.0 as usize,
                 Terminator::Branch { cond, then, else_ } => {
                     pc = match self.operand(&locals, cond)? {
                         Value::Bool(true) => then.0 as usize,
@@ -248,11 +248,13 @@ impl<'a> Interp<'a> {
                 let r = self.operand(locals, rhs)?;
                 binary(*op, l, r)
             }
-            Rvalue::StrLen { base } => match self.operand(locals, base)? {
+            Rvalue::Len { base } => match self.operand(locals, base)? {
                 // `str.len` counts characters (Unicode scalars), not
                 // bytes — indexing and slicing share the same unit.
                 Value::Str(s) => Ok(Value::Int(s.chars().count() as i128)),
-                v => Err(RuntimeError::Trap(format!("`len` on non-string {v:?}"))),
+                // `a.len` counts elements.
+                Value::Array(elems) => Ok(Value::Int(elems.len() as i128)),
+                v => Err(RuntimeError::Trap(format!("`len` on {v:?}"))),
             },
             Rvalue::Index { base, index } => {
                 let s = self.operand(locals, base)?;
@@ -268,17 +270,35 @@ impl<'a> Interp<'a> {
                         let c = s.chars().nth(i as usize).expect("index checked");
                         Ok(Value::Str(Rc::from(c.to_string().as_str())))
                     }
+                    (Value::Array(elems), Value::Int(i)) => {
+                        let len = elems.len();
+                        if i < 0 || i >= len as i128 {
+                            return Err(RuntimeError::Trap(format!(
+                                "array index {i} out of bounds (length {len})"
+                            )));
+                        }
+                        Ok(elems[i as usize].borrow().clone())
+                    }
                     (s, i) => Err(RuntimeError::Trap(format!("bad index {i:?} into {s:?}"))),
                 }
             }
+            Rvalue::ArrayLit { elems } => {
+                let mut cells = Vec::with_capacity(elems.len());
+                for op in elems {
+                    let v = self.operand(locals, op)?;
+                    cells.push(Rc::new(RefCell::new(v)));
+                }
+                Ok(Value::Array(cells))
+            }
             Rvalue::Slice { base, lo, hi } => {
-                let s = match self.operand(locals, base)? {
-                    Value::Str(s) => s,
+                let base = self.operand(locals, base)?;
+                let (len, str_base) = match &base {
+                    Value::Str(s) => (s.chars().count() as i128, Some(s.clone())),
+                    Value::Array(elems) => (elems.len() as i128, None),
                     v => {
                         return Err(RuntimeError::Trap(format!("cannot slice {v:?}")));
                     }
                 };
-                let len = s.chars().count() as i128;
                 let lo = match lo {
                     Some(op) => self.int_operand(locals, op)?,
                     None => 0,
@@ -287,17 +307,33 @@ impl<'a> Interp<'a> {
                     Some(op) => self.int_operand(locals, op)?,
                     None => len,
                 };
+                let what = if str_base.is_some() {
+                    "string"
+                } else {
+                    "array"
+                };
                 if lo < 0 || hi < lo || hi > len {
                     return Err(RuntimeError::Trap(format!(
-                        "string slice {lo}..{hi} out of bounds (length {len})"
+                        "{what} slice {lo}..{hi} out of bounds (length {len})"
                     )));
                 }
-                let out: String = s
-                    .chars()
-                    .skip(lo as usize)
-                    .take((hi - lo) as usize)
-                    .collect();
-                Ok(Value::Str(Rc::from(out.as_str())))
+                match base {
+                    Value::Str(s) => {
+                        let out: String = s
+                            .chars()
+                            .skip(lo as usize)
+                            .take((hi - lo) as usize)
+                            .collect();
+                        Ok(Value::Str(Rc::from(out.as_str())))
+                    }
+                    Value::Array(elems) => Ok(Value::Array(
+                        elems[lo as usize..hi as usize]
+                            .iter()
+                            .map(|c| Rc::new(RefCell::new(c.borrow().clone())))
+                            .collect(),
+                    )),
+                    _ => unreachable!("base kind checked above"),
+                }
             }
             Rvalue::StructLit { def, fields } => {
                 let n = self
@@ -443,6 +479,13 @@ fn deep_eq(a: &Value, b: &Value) -> bool {
                 && fa
                     .iter()
                     .zip(fb.iter())
+                    .all(|(x, y)| deep_eq(&x.borrow(), &y.borrow()))
+        }
+        (Value::Array(ea), Value::Array(eb)) => {
+            ea.len() == eb.len()
+                && ea
+                    .iter()
+                    .zip(eb.iter())
                     .all(|(x, y)| deep_eq(&x.borrow(), &y.borrow()))
         }
         _ => values_eq(a, b),

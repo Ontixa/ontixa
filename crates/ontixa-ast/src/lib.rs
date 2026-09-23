@@ -238,6 +238,128 @@ mod tests {
     }
 
     #[test]
+    fn lowers_array_literal_and_index() {
+        let m = module("fn f() -> i32 { let a = [1, 2, 3]; return a[0]; }");
+        match &m.items[0] {
+            Item::Fn(f) => {
+                match &f.body.stmts[0] {
+                    Stmt::Let {
+                        init: Some(Expr::ArrayLit { elems, .. }),
+                        ..
+                    } => assert_eq!(elems.len(), 3),
+                    other => panic!("expected array literal, got {other:?}"),
+                }
+                match &f.body.stmts[1] {
+                    Stmt::Return {
+                        value: Some(Expr::Index { .. }),
+                        ..
+                    } => {}
+                    other => panic!("expected index, got {other:?}"),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn lowers_array_type_annotation() {
+        let m = module("fn f(a: [i64]) -> i32 { let b: [i32] = a[0..]; return 0; }");
+        match &m.items[0] {
+            Item::Fn(f) => {
+                assert!(matches!(f.params[0].ty, TypeExpr::Array { .. }));
+                match &f.body.stmts[0] {
+                    Stmt::Let {
+                        ty: Some(TypeExpr::Array { elem, .. }),
+                        init: Some(Expr::Slice { .. }),
+                        ..
+                    } => assert!(matches!(**elem, TypeExpr::Named { .. })),
+                    other => panic!("expected typed let + slice, got {other:?}"),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn lowers_for_over_range() {
+        let m = module("fn f() -> i32 { for i in 0..3 { let z = i; } return 0; }");
+        match &m.items[0] {
+            Item::Fn(f) => match &f.body.stmts[0] {
+                Stmt::Expr {
+                    expr:
+                        Expr::For {
+                            var,
+                            iter,
+                            body,
+                            mutable,
+                            ..
+                        },
+                    ..
+                } => {
+                    assert_eq!(var.name, "i");
+                    assert!(!mutable);
+                    assert!(matches!(
+                        **iter,
+                        Expr::Range {
+                            lo: Some(_),
+                            hi: Some(_),
+                            ..
+                        }
+                    ));
+                    assert_eq!(body.stmts.len(), 1);
+                }
+                other => panic!("expected for, got {other:?}"),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn for_mut_and_array_iterable() {
+        let m = module("fn f(a: [i32]) -> i32 { for mut x in a { x = x + 1; } return 0; }");
+        match &m.items[0] {
+            Item::Fn(f) => match &f.body.stmts[0] {
+                Stmt::Expr {
+                    expr: Expr::For { mutable, iter, .. },
+                    ..
+                } => {
+                    assert!(*mutable);
+                    assert!(matches!(**iter, Expr::Var { .. }));
+                }
+                other => panic!("expected for, got {other:?}"),
+            },
+            _ => panic!(),
+        }
+    }
+
+    /// `-7` used to lower to `Expr::Error` — the prefix operator was
+    /// hidden behind leading trivia inside the `PREFIX_EXPR` node and
+    /// the unary value silently became `unit`.
+    #[test]
+    fn unary_operators_lower_through_trivia() {
+        let m = module("fn f() -> i32 { let x = -7; let y = !true; return x; }");
+        match &m.items[0] {
+            Item::Fn(f) => {
+                match &f.body.stmts[0] {
+                    Stmt::Let {
+                        init: Some(Expr::Unary { op: UnOp::Neg, .. }),
+                        ..
+                    } => {}
+                    other => panic!("expected unary neg, got {other:?}"),
+                }
+                match &f.body.stmts[1] {
+                    Stmt::Let {
+                        init: Some(Expr::Unary { op: UnOp::Not, .. }),
+                        ..
+                    } => {}
+                    other => panic!("expected unary not, got {other:?}"),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
     fn serializes_to_json() {
         let m = module("fn main() -> i32 { return 42; }");
         let json = serde_json::to_value(&m).expect("serialize");

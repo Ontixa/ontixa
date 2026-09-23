@@ -494,7 +494,7 @@ fn callees_of(body: &HirBody) -> FxHashSet<DefId> {
                 out.insert(*def);
                 stack.extend(args.iter().copied());
             }
-            HirExprKind::Field { base, .. } | HirExprKind::StrLen { base } => stack.push(*base),
+            HirExprKind::Field { base, .. } | HirExprKind::Len { base } => stack.push(*base),
             HirExprKind::Index { base, index } => {
                 stack.push(*base);
                 stack.push(*index);
@@ -503,6 +503,17 @@ fn callees_of(body: &HirBody) -> FxHashSet<DefId> {
                 stack.push(*base);
                 stack.extend(*lo);
                 stack.extend(*hi);
+            }
+            HirExprKind::Range { lo, hi } => {
+                stack.extend(*lo);
+                stack.extend(*hi);
+            }
+            HirExprKind::ArrayLit { elems } => {
+                stack.extend(elems.iter().copied());
+            }
+            HirExprKind::For { iter, body, .. } => {
+                stack.push(*iter);
+                stack.push(*body);
             }
             HirExprKind::Binary { lhs, rhs, .. } => {
                 stack.push(*lhs);
@@ -736,7 +747,7 @@ impl FactCollector<'_, '_> {
                     self.eval(base, ctx)
                 }
             }
-            HirExprKind::StrLen { base } => {
+            HirExprKind::Len { base } => {
                 self.eval(base, Ctx::Read);
                 Carriers::default()
             }
@@ -836,6 +847,31 @@ impl FactCollector<'_, '_> {
                     out.extend(self.eval(*v, Ctx::Move));
                 }
                 out
+            }
+            HirExprKind::ArrayLit { elems } => {
+                // Elements move into the array value — the literal
+                // carries whatever they carried.
+                let mut out = Carriers::default();
+                for e in &elems {
+                    out.extend(self.eval(*e, Ctx::Move));
+                }
+                out
+            }
+            HirExprKind::Range { lo, hi } => {
+                // Ranges exist only as `for` iterables; their bounds
+                // are read once.
+                for b in [lo, hi].into_iter().flatten() {
+                    self.eval(b, Ctx::Read);
+                }
+                Carriers::default()
+            }
+            HirExprKind::For { iter, body, .. } => {
+                // Iterating reads the iterable — `for x in a` borrows
+                // `a`; each `x` binds a fresh element copy, so `x`
+                // itself carries nothing.
+                self.eval(iter, Ctx::Read);
+                self.eval(body, Ctx::Move);
+                Carriers::default()
             }
         }
     }
@@ -1018,7 +1054,7 @@ impl Enforcer<'_> {
                     self.eval(base, ctx);
                 }
             }
-            HirExprKind::StrLen { base } => self.eval(base, Ctx::Read),
+            HirExprKind::Len { base } => self.eval(base, Ctx::Read),
             HirExprKind::Index { base, index } => {
                 if self.tables.ty_of(id).is_copy() {
                     self.eval(base, Ctx::Read);
@@ -1116,6 +1152,36 @@ impl Enforcer<'_> {
                 for (_, v) in &fields {
                     self.eval(*v, Ctx::Move);
                 }
+            }
+            HirExprKind::ArrayLit { elems } => {
+                for e in &elems {
+                    self.eval(*e, Ctx::Move);
+                }
+            }
+            HirExprKind::Range { lo, hi } => {
+                for b in [lo, hi].into_iter().flatten() {
+                    self.eval(b, Ctx::Read);
+                }
+            }
+            HirExprKind::For { var, iter, body } => {
+                // Iterating reads the iterable — `for x in a` borrows
+                // `a` and binds a fresh element copy per iteration.
+                self.eval(iter, Ctx::Read);
+                // The body may not run at all (empty range/array):
+                // join post-body state with pre-loop state like an
+                // `if` without `else`. `var` is scoped to the body.
+                let saved = self.state.clone();
+                self.state.insert(
+                    var,
+                    BindingState {
+                        init: Init::Yes,
+                        moved: Moved::No,
+                    },
+                );
+                self.eval(body, Ctx::Move);
+                let mut after = std::mem::replace(&mut self.state, saved);
+                after.remove(&var);
+                self.state = merge(after, self.state.clone());
             }
         }
     }

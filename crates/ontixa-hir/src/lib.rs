@@ -28,9 +28,9 @@ mod lower;
 mod resolve;
 
 pub use hir::{
-    BinOp, DataShape, Def, DefKind, FieldDef, FileEnv, FnSig, HirBody, HirExpr, HirExprKind,
-    HirModule, HirPlace, HirStmt, LitValue, Literal, ModuleScope, Name, ParamDef, Symbol,
-    SymbolKind, SymbolTable, TypeRef, UnOp,
+    BinOp, DataShape, Def, DefKind, ElemRef, FieldDef, FileEnv, FnSig, HirBody, HirExpr,
+    HirExprKind, HirModule, HirPlace, HirStmt, LitValue, Literal, ModuleScope, Name, ParamDef,
+    Symbol, SymbolKind, SymbolTable, TypeRef, UnOp,
 };
 pub use lower::{lower_bodies, lower_body};
 pub use resolve::{WorkspaceFile, resolve_module, resolve_workspace};
@@ -267,5 +267,128 @@ mod tests {
                 .iter()
                 .any(|d| d.code == ontixa_diagnostics::Code::UnknownType)
         );
+    }
+
+    #[test]
+    fn resolves_array_type_refs() {
+        let (m, mut interner, diags) =
+            parse_hir("data P { x: i32; } fn f(a: [i64], b: [P]) -> [i32] { return a[0..]; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        let f = fn_def(&m, "f", &mut interner);
+        let sig = m.scope.fn_sig(f).expect("fn sig");
+        assert_eq!(sig.params[0].ty, TypeRef::Array { elem: ElemRef::I64 });
+        let p = m.scope.root_env().datas[&interner.intern("P")];
+        assert_eq!(
+            sig.params[1].ty,
+            TypeRef::Array {
+                elem: ElemRef::Struct(p)
+            }
+        );
+        assert_eq!(sig.ret, TypeRef::Array { elem: ElemRef::I32 });
+    }
+
+    #[test]
+    fn rejects_bad_element_types() {
+        // Nested arrays and arrays of `unit` are rejected at resolution.
+        let (_, _, diags) = parse_hir("fn f(a: [[i32]]) -> i32 { return 0; }");
+        assert!(diags.has_errors());
+        let (_, _, diags) = parse_hir("fn f(a: [unit]) -> i32 { return 0; }");
+        assert!(diags.has_errors());
+        let (_, _, diags) = parse_hir("fn f(a: [Nope]) -> i32 { return 0; }");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == ontixa_diagnostics::Code::UnknownType)
+        );
+    }
+
+    #[test]
+    fn lowers_array_for_range_nodes() {
+        let (m, mut interner, diags) = parse_hir(
+            "fn f() -> i32 { let a = [1, 2]; for i in 0..a.len { } for x in a { } return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let f = fn_def(&m, "f", &mut interner);
+        let body = m.body(f).expect("body");
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
+            panic!()
+        };
+        let HirStmt::Let {
+            init: Some(init), ..
+        } = &stmts[0]
+        else {
+            panic!("expected let")
+        };
+        assert!(matches!(
+            body.expr(*init).kind,
+            HirExprKind::ArrayLit { .. }
+        ));
+        for s in &stmts[1..3] {
+            let HirStmt::Expr { expr, .. } = s else {
+                panic!("expected expr stmt")
+            };
+            let HirExprKind::For { iter, .. } = &body.expr(*expr).kind else {
+                panic!("expected for, got {:?}", body.expr(*expr).kind)
+            };
+            match &body.expr(*iter).kind {
+                HirExprKind::Range {
+                    lo: Some(_),
+                    hi: Some(_),
+                } => {}
+                HirExprKind::Var(_) => {}
+                other => panic!("unexpected iterable kind {other:?}"),
+            }
+        }
+    }
+
+    /// The loop variable is a fresh `Local` symbol scoped to the loop:
+    /// `x` does not leak past the body and shadows an outer `x`.
+    #[test]
+    fn for_var_is_loop_scoped() {
+        let (m, mut interner, diags) = parse_hir(
+            "fn f() -> i32 { let x = 9; for x in 0..2 { let y = x; } let z = x; return z; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let f = fn_def(&m, "f", &mut interner);
+        let body = m.body(f).expect("body");
+        // locals: outer x, loop x, y, z → the loop `x` is a distinct
+        // symbol even though it shadows the outer binding.
+        let x = interner.intern("x");
+        let xs: Vec<_> = body.local_symbols.iter().filter(|s| s.name == x).collect();
+        assert_eq!(xs.len(), 2);
+        // `let z = x` must see the *outer* x, not the loop's.
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
+            panic!()
+        };
+        let HirStmt::Let {
+            init: Some(init), ..
+        } = &stmts[2]
+        else {
+            panic!("expected let z")
+        };
+        let HirExprKind::Var(sym) = &body.expr(*init).kind else {
+            panic!("expected var")
+        };
+        assert_eq!(*sym, xs[0].id);
+    }
+
+    /// `for mut` marks the loop symbol mutable; plain `for` does not.
+    #[test]
+    fn for_mut_marks_symbol_mutable() {
+        let (m, mut interner, diags) =
+            parse_hir("fn f() -> i32 { for i in 0..1 { } for mut j in 0..1 { } return 0; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        let f = fn_def(&m, "f", &mut interner);
+        let body = m.body(f).expect("body");
+        let i = interner.intern("i");
+        let j = interner.intern("j");
+        let sym = |n| {
+            body.local_symbols
+                .iter()
+                .find(|s| s.name == n)
+                .expect("loop var")
+        };
+        assert!(!sym(i).mutable);
+        assert!(sym(j).mutable);
     }
 }

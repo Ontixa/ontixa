@@ -39,8 +39,14 @@ fn path(p: &Path, base: u32) -> Path {
 }
 
 fn type_expr(t: &TypeExpr, base: u32) -> TypeExpr {
-    TypeExpr {
-        path: path(&t.path, base),
+    match t {
+        TypeExpr::Named { path: p } => TypeExpr::Named {
+            path: path(p, base),
+        },
+        TypeExpr::Array { elem, span } => TypeExpr::Array {
+            elem: Box::new(type_expr(elem, base)),
+            span: rel(*span, base),
+        },
     }
 }
 
@@ -175,6 +181,28 @@ fn expr(e: &Expr, base: u32) -> Expr {
             base: Box::new(expr(b, base)),
             lo: lo.as_deref().map(|e| Box::new(expr(e, base))),
             hi: hi.as_deref().map(|e| Box::new(expr(e, base))),
+            span: rel(*span, base),
+        },
+        Expr::ArrayLit { elems, span } => Expr::ArrayLit {
+            elems: elems.iter().map(|e| expr(e, base)).collect(),
+            span: rel(*span, base),
+        },
+        Expr::Range { lo, hi, span } => Expr::Range {
+            lo: lo.as_deref().map(|e| Box::new(expr(e, base))),
+            hi: hi.as_deref().map(|e| Box::new(expr(e, base))),
+            span: rel(*span, base),
+        },
+        Expr::For {
+            var,
+            mutable,
+            iter,
+            body,
+            span,
+        } => Expr::For {
+            var: ident(var, base),
+            mutable: *mutable,
+            iter: Box::new(expr(iter, base)),
+            body: block(body, base),
             span: rel(*span, base),
         },
         Expr::Binary { op, lhs, rhs, span } => Expr::Binary {

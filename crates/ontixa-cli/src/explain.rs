@@ -263,6 +263,7 @@ fn def_name(m: &HirModule, interner: &Interner, def: DefId) -> String {
 fn ty_name(m: &HirModule, interner: &Interner, ty: Ty) -> String {
     match ty {
         Ty::Struct(d) => def_name(m, interner, d),
+        Ty::Array(e) => format!("[{}]", ty_name(m, interner, e.ty())),
         other => format!("{other:?}").to_lowercase(),
     }
 }

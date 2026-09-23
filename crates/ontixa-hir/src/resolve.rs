@@ -18,8 +18,8 @@
 //! - Field names within one `data` def must be unique.
 
 use crate::hir::{
-    DataShape, Def, DefKind, FieldDef, FileEnv, FnSig, ModuleScope, ParamDef, Symbol, SymbolKind,
-    SymbolTable, TypeRef,
+    DataShape, Def, DefKind, ElemRef, FieldDef, FileEnv, FnSig, ModuleScope, ParamDef, Symbol,
+    SymbolKind, SymbolTable, TypeRef,
 };
 use ontixa_ast::{AstModule, Item, TypeExpr, UseDecl};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
@@ -421,9 +421,41 @@ impl Resolver<'_> {
 
     /// Resolves a syntactic type path to a [`TypeRef`] through
     /// `file`'s environment: builtins, own `data` defs, imports, or
-    /// a qualified `m::T` path.
+    /// a qualified `m::T` path. `[T]` resolves to a flat array type —
+    /// nested arrays and `unit` elements are rejected.
     fn resolve_type(&mut self, ty: &TypeExpr, file: FileId) -> TypeRef {
-        let segs = &ty.path.segs;
+        let path = match ty {
+            TypeExpr::Array { elem, span } => {
+                return match self.resolve_type(elem, file) {
+                    TypeRef::Poison => TypeRef::Poison,
+                    TypeRef::Array { .. } => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::UnsupportedOperation,
+                                "nested array types are not supported yet",
+                            )
+                            .primary(*span),
+                        );
+                        TypeRef::Poison
+                    }
+                    TypeRef::Unit => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::UnsupportedOperation,
+                                "arrays cannot hold `unit` elements",
+                            )
+                            .primary(*span),
+                        );
+                        TypeRef::Poison
+                    }
+                    leaf => TypeRef::Array {
+                        elem: ElemRef::of(leaf).expect("leaf types are valid elements"),
+                    },
+                };
+            }
+            TypeExpr::Named { path } => path,
+        };
+        let segs = &path.segs;
         if segs.len() == 1 {
             let name = segs[0].name.as_str();
             match name {
@@ -491,10 +523,10 @@ impl Resolver<'_> {
         self.diags.push(
             Diagnostic::error(
                 Code::UnknownType,
-                format!("unsupported type path `{}`", ty.path.display()),
+                format!("unsupported type path `{}`", path.display()),
             )
-            .primary(ty.path.span)
-            .subject(ty.path.display()),
+            .primary(path.span)
+            .subject(path.display()),
         );
         TypeRef::Poison
     }

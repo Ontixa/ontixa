@@ -143,9 +143,21 @@ impl Lowerer<'_> {
     fn type_ref(&self, node: &SyntaxNode) -> Option<TypeExpr> {
         node.children()
             .find(|n| n.kind() == SyntaxKind::TYPE_REF)
-            .map(|n| TypeExpr {
-                path: self.path_of(&n),
-            })
+            .map(|n| self.type_expr(&n))
+    }
+
+    /// A `TYPE_REF` CST node — a named path (`T`, `m::T`) or an array
+    /// type `[T]` whose element is itself a `TYPE_REF`.
+    fn type_expr(&self, node: &SyntaxNode) -> TypeExpr {
+        if let Some(elem) = node.children().find(|n| n.kind() == SyntaxKind::TYPE_REF) {
+            return TypeExpr::Array {
+                elem: Box::new(self.type_expr(&elem)),
+                span: node.text_range().into(),
+            };
+        }
+        TypeExpr::Named {
+            path: self.path_of(node),
+        }
     }
 
     fn data_decl(&mut self, node: &SyntaxNode) -> DataDecl {
@@ -400,10 +412,24 @@ impl Lowerer<'_> {
                 }
             }
             SyntaxKind::INDEX_EXPR => self.index_expr(node)?,
+            SyntaxKind::RANGE => {
+                let (lo, hi) = self.range_bounds(node);
+                Expr::Range { lo, hi, span }
+            }
+            SyntaxKind::ARRAY_EXPR => Expr::ArrayLit {
+                elems: node
+                    .children()
+                    .filter(|n| is_value_node(n.kind()))
+                    .filter_map(|n| self.expr(&n))
+                    .collect(),
+                span,
+            },
+            SyntaxKind::FOR_EXPR => self.for_expr(node)?,
             SyntaxKind::BIN_EXPR => self.bin_expr(node)?,
             SyntaxKind::PREFIX_EXPR => {
                 let mut elems = node.children_with_tokens();
-                let op_tok = elems.find_map(SyntaxElement::into_token)?;
+                let op_tok =
+                    elems.find_map(|e| e.into_token().filter(|t| !t.kind().is_trivia()))?;
                 let operand = elems
                     .filter_map(SyntaxElement::into_node)
                     .find(|n| is_value_node(n.kind()))?;
@@ -482,28 +508,7 @@ impl Lowerer<'_> {
         match children.next() {
             None => Some(Expr::Error { span }),
             Some(n) if n.kind() == SyntaxKind::RANGE => {
-                // Bound positions are relative to the `..` token: a
-                // bound *before* it is `lo`, one *after* is `hi`
-                // (`lo..hi`, `..hi`, `lo..`, `..`).
-                let mut lo = None;
-                let mut hi = None;
-                let mut after_dots = false;
-                for elem in n.children_with_tokens() {
-                    match elem {
-                        SyntaxElement::Token(t) if t.kind() == SyntaxKind::DOT2 => {
-                            after_dots = true;
-                        }
-                        SyntaxElement::Node(c) if is_value_node(c.kind()) => {
-                            let e = self.expr(&c).map(Box::new);
-                            if after_dots {
-                                hi = e;
-                            } else {
-                                lo = e;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                let (lo, hi) = self.range_bounds(&n);
                 Some(Expr::Slice {
                     base: Box::new(base),
                     lo,
@@ -517,6 +522,65 @@ impl Lowerer<'_> {
                 span,
             }),
         }
+    }
+
+    /// `(lo, hi)` bounds of a `RANGE` node. Bound positions are
+    /// relative to the `..` token: a bound *before* it is `lo`, one
+    /// *after* is `hi` (`lo..hi`, `..hi`, `lo..`, `..`).
+    fn range_bounds(&mut self, node: &SyntaxNode) -> (Option<Box<Expr>>, Option<Box<Expr>>) {
+        let mut lo = None;
+        let mut hi = None;
+        let mut after_dots = false;
+        for elem in node.children_with_tokens() {
+            match elem {
+                SyntaxElement::Token(t) if t.kind() == SyntaxKind::DOT2 => {
+                    after_dots = true;
+                }
+                SyntaxElement::Node(c) if is_value_node(c.kind()) => {
+                    let e = self.expr(&c).map(Box::new);
+                    if after_dots {
+                        hi = e;
+                    } else {
+                        lo = e;
+                    }
+                }
+                _ => {}
+            }
+        }
+        (lo, hi)
+    }
+
+    /// `for x in e { .. }` — FOR_EXPR children are `for` `mut`? NAME
+    /// `in` <iterable> BLOCK. The iterable is the first value child;
+    /// the body is the BLOCK after it (a block in iterable position —
+    /// `for x in { } { }` — is handled by ordering, not kind).
+    fn for_expr(&mut self, node: &SyntaxNode) -> Option<Expr> {
+        let span: Span = node.text_range().into();
+        let var = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::NAME)
+            .map(|n| self.name(&n))
+            .unwrap_or_else(|| Ident::new("<missing>", span));
+        let mut iter = None;
+        let mut body = None;
+        for child in node.children() {
+            if child.kind() == SyntaxKind::BLOCK && iter.is_some() {
+                body = Some(child);
+            } else if is_value_node(child.kind()) && iter.is_none() {
+                iter = self.expr(&child).map(Box::new);
+            }
+        }
+        Some(Expr::For {
+            var,
+            mutable: has_token(node, SyntaxKind::MUT_KW),
+            iter: iter?,
+            body: body.map(|b| self.block(&b)).unwrap_or_else(|| Block {
+                stmts: Vec::new(),
+                tail: None,
+                span: Span::empty(span.end),
+            }),
+            span,
+        })
     }
 
     fn bin_expr(&mut self, node: &SyntaxNode) -> Option<Expr> {
@@ -725,9 +789,12 @@ fn is_expr_kind(kind: SyntaxKind) -> bool {
             | SyntaxKind::BIN_EXPR
             | SyntaxKind::PREFIX_EXPR
             | SyntaxKind::IF_EXPR
+            | SyntaxKind::FOR_EXPR
             | SyntaxKind::PAREN_EXPR
             | SyntaxKind::BLOCK
             | SyntaxKind::STRUCT_LIT
+            | SyntaxKind::ARRAY_EXPR
+            | SyntaxKind::RANGE
     )
 }
 

@@ -103,27 +103,35 @@ pub enum Rvalue {
         /// Operand.
         operand: Operand,
     },
-    /// `base.len` — a `str`'s length in characters (`i32`).
-    StrLen {
-        /// The string operand.
+    /// `base.len` — a `str`'s length in characters or an array's
+    /// length in elements (`i32`).
+    Len {
+        /// The string or array operand.
         base: Operand,
     },
-    /// `base[index]` — character indexing into a `str`; yields a
-    /// one-character `str`.
+    /// `base[index]` — character indexing into a `str` (yields a
+    /// one-character `str`) or element indexing into an array
+    /// (yields the element type).
     Index {
-        /// The string operand.
+        /// The string or array operand.
         base: Operand,
-        /// The character index operand (integer).
+        /// The index operand (integer).
         index: Operand,
     },
-    /// `base[lo..hi]` — a `str` slice; a `None` bound is open.
+    /// `base[lo..hi]` — a `str` slice or an array slice producing a
+    /// fresh `[T]`; a `None` bound is open.
     Slice {
-        /// The string operand.
+        /// The string or array operand.
         base: Operand,
         /// Lower bound (inclusive), when present.
         lo: Option<Operand>,
         /// Upper bound (exclusive), when present.
         hi: Option<Operand>,
+    },
+    /// `[e, ...]` — array construction in element order.
+    ArrayLit {
+        /// Element operands, in order.
+        elems: Vec<Operand>,
     },
     /// Direct call; callee contract comes from `param_behaviors`.
     Call {
@@ -162,11 +170,20 @@ pub enum MirStmt {
 }
 
 /// How a basic block ends.
+///
+/// Variants are struct-shaped on purpose: serde's internally-tagged
+/// representation only serializes newtype variants whose payload is
+/// itself a map — `Goto(BlockId)` serialized as a bare integer and
+/// `serde_json` failed the whole document (and `Return(Operand)`
+/// flattened the operand's own `kind` tag over `"Return"`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum Terminator {
     /// Return a value to the caller.
-    Return(Operand),
+    Return {
+        /// The returned operand.
+        value: Operand,
+    },
     /// Conditional branch.
     Branch {
         /// Condition (`bool` operand).
@@ -177,7 +194,10 @@ pub enum Terminator {
         else_: BlockId,
     },
     /// Unconditional jump.
-    Goto(BlockId),
+    Goto {
+        /// Target block.
+        target: BlockId,
+    },
 }
 
 /// A basic block: straight-line statements plus a terminator.

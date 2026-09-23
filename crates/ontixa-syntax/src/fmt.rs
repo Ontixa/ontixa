@@ -18,7 +18,9 @@
 //! * exactly one blank line between top-level items, except `use`
 //!   declarations which group without blank lines;
 //! * no space before `(` `[` `)` `]` `,` `;` `:` `::` `.` `..` —
-//!   except `(`/`[` after a keyword (`if (x)` keeps its space); no
+//!   except `(` after a keyword (`if (x)` keeps its space) and `[`
+//!   opening an array literal or `[T]` type, which space normally
+//!   (indexing stays glued: `s[i]`); no
 //!   space after `(` `[` `::` `.` `..` or a prefix `-`/`!`; `:` spaces
 //!   after;
 //!   everything else is separated by a single space;
@@ -241,9 +243,13 @@ fn separator(prev: &SyntaxToken, cur: &SyntaxToken, src: &str) -> Sep {
         return Sep::Newline;
     }
     // Tight pairs: no space before closers/separators/`::`/`.`/`:`;
-    // `(`/`[` glue to a callee or group but not to a keyword
-    // (`if (x)` keeps its space); nothing after `(`/`[`/`::`/`.`
-    // or a prefix `-`/`!`.
+    // `(` glues to a callee or group but not to a keyword (`if (x)`
+    // keeps its space); `[` glues only for indexing (`s[i]`) — an
+    // array literal or `[T]` type spaces normally (`= [1]`,
+    // `a: [i32]`); nothing after `(`/`[`/`::`/`.` or a
+    // prefix `-`/`!`. `..` glues only to a bound that lives inside
+    // its own RANGE node — in `for i in 0.. {` the `{` is the loop
+    // body and keeps its space.
     if matches!(
         ck,
         SyntaxKind::R_PAREN
@@ -254,15 +260,19 @@ fn separator(prev: &SyntaxToken, cur: &SyntaxToken, src: &str) -> Sep {
             | SyntaxKind::COLON2
             | SyntaxKind::DOT
             | SyntaxKind::DOT2
-    ) || (matches!(ck, SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET) && !pk.is_keyword())
+    ) || (ck == SyntaxKind::L_PAREN && !pk.is_keyword())
+        || (ck == SyntaxKind::L_BRACKET
+            && cur
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::INDEX_EXPR))
         || matches!(
             pk,
-            SyntaxKind::L_PAREN
-                | SyntaxKind::L_BRACKET
-                | SyntaxKind::DOT
-                | SyntaxKind::DOT2
-                | SyntaxKind::COLON2
+            SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET | SyntaxKind::DOT | SyntaxKind::COLON2
         )
+        || (pk == SyntaxKind::DOT2
+            && prev
+                .parent()
+                .is_some_and(|r| cur.parent_ancestors().any(|a| a == r)))
         || is_prefix_op(prev)
     {
         return Sep::None;
@@ -426,6 +436,19 @@ mod tests {
         assert_eq!(fmt(src), want);
     }
 
+    /// `[e, ...]` glues tight inside brackets; `for` spaces its
+    /// keywords and keeps the `..` bound tight.
+    #[test]
+    fn array_and_for_canonical() {
+        let src = "fn f(a:[i32])->i32{let b=[1,2,3];for i in 0..a.len{let z=b[i];}return b[0];}";
+        let want = "fn f(a: [i32]) -> i32 {\n    let b = [1, 2, 3];\n    for i in 0..a.len {\n        let z = b[i];\n    }\n    return b[0];\n}\n";
+        assert_eq!(fmt(src), want);
+        // Empty array, open range, `for mut`.
+        let src2 = "fn f()->i32{let e: [i32]=[ ];for mut x in 1..{x=x;}return 0;}";
+        let want2 = "fn f() -> i32 {\n    let e: [i32] = [];\n    for mut x in 1.. {\n        x = x;\n    }\n    return 0;\n}\n";
+        assert_eq!(fmt(src2), want2);
+    }
+
     /// A file that doesn't parse is refused with the parser's own
     /// diagnostics — tokens inside ERROR nodes are never re-laid-out.
     #[test]
@@ -453,6 +476,8 @@ mod tests {
             "fn f()->i32{return if 1<2{3}else{4}+5;}",
             "fn f(){let mut q=P{x:1,y:2};q.x=q.x+1;}",
             "fn f(s: str) -> str { return s[1] + s[0..s.len]; }",
+            "fn f(a: [i32]) -> i32 { let b = [1, a[0]]; for i in 0..b.len { let z = b[i]; } for mut x in a { x = x + 1; } return b[1]; }",
+            "fn f() -> i32 { let e: [i32] = []; for i in 2.. { } return e.len; }",
         ] {
             let once = fmt(src);
             let toks = |s: &str| {

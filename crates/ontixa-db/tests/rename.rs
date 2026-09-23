@@ -124,6 +124,24 @@ fn data_rename_covers_type_and_literal_sites() {
     assert!(new_text(&plan, 0).contains("-> i32 { return dep::norm(v); }"));
 }
 
+#[test]
+fn data_rename_covers_array_element_types() {
+    // `[Vec2]` — the element path inside a bracketed array type is a
+    // rename site exactly like a bare type path.
+    let mut db = ws(&[
+        (
+            "main",
+            "use dep::Vec2;\n\
+             fn sum(v: [Vec2]) -> i32 { return v.len; }\n\
+             fn main() -> i32 { let a: [Vec2] = []; return sum(a); }\n",
+        ),
+        ("dep", DEP),
+    ]);
+    let plan = db.plan_rename(0, "dep::Vec2", "Point").unwrap();
+    assert!(new_text(&plan, 0).contains("fn sum(v: [Point])"));
+    assert!(new_text(&plan, 0).contains("let a: [Point] = []"));
+}
+
 // ---------- apply ----------
 
 #[test]

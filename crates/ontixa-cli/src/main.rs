@@ -482,6 +482,9 @@ fn value_json(v: &Value, a: &Artifacts) -> Json {
             }
             json!({"data": name, "fields": Json::Object(fmap)})
         }
+        Value::Array(elems) => {
+            Json::Array(elems.iter().map(|c| value_json(&c.borrow(), a)).collect())
+        }
     }
 }
 

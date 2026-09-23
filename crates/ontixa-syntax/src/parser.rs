@@ -272,13 +272,21 @@ impl Parser<'_> {
         self.finish();
     }
 
-    /// `Name` or `m::Name` — a (possibly qualified) type reference.
+    /// `Name`, `m::Name`, or `[T]` — a (possibly qualified) named type
+    /// or an array type. Nested `[..]` parses here; resolution rejects
+    /// it (`[ [T] ]` is not a supported type).
     fn type_ref(&mut self) {
         self.start(SyntaxKind::TYPE_REF);
-        self.name();
-        while self.at(SyntaxKind::COLON2) {
-            self.bump(); // ::
+        if self.at(SyntaxKind::L_BRACKET) {
+            self.bump(); // [
+            self.type_ref();
+            self.expect(SyntaxKind::R_BRACKET, "to close the array type");
+        } else {
             self.name();
+            while self.at(SyntaxKind::COLON2) {
+                self.bump(); // ::
+                self.name();
+            }
         }
         self.finish();
     }
@@ -410,9 +418,9 @@ impl Parser<'_> {
         match self.current() {
             SyntaxKind::LET_KW => self.let_stmt(),
             SyntaxKind::RETURN_KW => self.return_stmt(),
-            SyntaxKind::IF_KW | SyntaxKind::L_BRACE => {
-                // `if`- and block-expressions used as statements do not
-                // require a trailing semicolon.
+            SyntaxKind::IF_KW | SyntaxKind::L_BRACE | SyntaxKind::FOR_KW => {
+                // `if`-, `for`-, and block-expressions used as statements
+                // do not require a trailing semicolon.
                 let cp = self.checkpoint();
                 self.expr(0, true);
                 self.start_at(cp, SyntaxKind::EXPR_STMT);
@@ -493,9 +501,12 @@ impl Parser<'_> {
                 | SyntaxKind::IDENT
                 | SyntaxKind::L_PAREN
                 | SyntaxKind::L_BRACE
+                | SyntaxKind::L_BRACKET
                 | SyntaxKind::IF_KW
+                | SyntaxKind::FOR_KW
                 | SyntaxKind::MINUS
                 | SyntaxKind::NOT
+                | SyntaxKind::DOT2
         )
     }
 
@@ -515,6 +526,18 @@ impl Parser<'_> {
                 self.start(SyntaxKind::PREFIX_EXPR);
                 self.bump();
                 self.expr_bp(UNARY_BP, allow_struct);
+                self.finish();
+            }
+            SyntaxKind::DOT2 => {
+                // `..hi` — an open-start range. Parsed everywhere; the
+                // checker only accepts it inside `[]` or `for .. in`.
+                // A bare `{` never opens a bound — in `for i in .. { }`
+                // it is the loop body (parenthesize to bound a block).
+                self.start(SyntaxKind::RANGE);
+                self.bump(); // ..
+                if Self::can_start_expr(self.current()) && !self.at(SyntaxKind::L_BRACE) {
+                    self.expr_bp(0, allow_struct);
+                }
                 self.finish();
             }
             _ => self.atom(allow_struct),
@@ -551,6 +574,19 @@ impl Parser<'_> {
             if l_bp < min_bp {
                 break;
             }
+            if self.at(SyntaxKind::DOT2) {
+                // `lo..hi` — a range, not a binary op; `lo..` leaves the
+                // upper bound absent. The loosest operator in the grammar.
+                // A bare `{` is never a bound — `for i in 0.. { }` reads
+                // it as the loop body, like the struct-literal rule.
+                self.start_at(cp, SyntaxKind::RANGE);
+                self.bump(); // ..
+                if Self::can_start_expr(self.current()) && !self.at(SyntaxKind::L_BRACE) {
+                    self.expr_bp(r_bp, allow_struct);
+                }
+                self.finish();
+                continue;
+            }
             self.start_at(cp, SyntaxKind::BIN_EXPR);
             self.bump(); // operator
             self.expr_bp(r_bp, allow_struct);
@@ -570,6 +606,8 @@ impl Parser<'_> {
                 self.finish();
             }
             SyntaxKind::IF_KW => self.if_expr(),
+            SyntaxKind::FOR_KW => self.for_expr(),
+            SyntaxKind::L_BRACKET => self.array_lit(),
             SyntaxKind::L_PAREN => {
                 self.start(SyntaxKind::PAREN_EXPR);
                 self.bump();
@@ -634,36 +672,57 @@ impl Parser<'_> {
         }
     }
 
-    /// Inside `s[...]`: an index (`i`), a range (`lo..hi`, `lo..`,
-    /// `..hi`, `..`), or an error (empty brackets). `..` is not an
-    /// infix operator, so a leading expression stops before it.
+    /// Inside `base[...]`: an index (`i`) or a range (`lo..hi`, `lo..`,
+    /// `..hi`, `..`). `..` parses as a `RANGE` expression like anywhere
+    /// else — `index_expr` interprets it as slice bounds.
     fn index_content(&mut self) {
-        if self.at(SyntaxKind::DOT2) {
-            self.start(SyntaxKind::RANGE);
-            self.bump(); // ..
-            if Self::can_start_expr(self.current()) {
-                self.expr(0, true);
-            }
-            self.finish();
-            return;
-        }
-        if !Self::can_start_expr(self.current()) {
+        if self.at(SyntaxKind::DOT2) || Self::can_start_expr(self.current()) {
+            self.expr(0, true);
+        } else {
             self.error(format!(
                 "expected an index or `..` range, found {}",
                 self.current().describe()
             ));
-            return;
         }
-        let cp = self.checkpoint();
-        self.expr(0, true);
-        if self.at(SyntaxKind::DOT2) {
-            self.start_at(cp, SyntaxKind::RANGE);
-            self.bump(); // ..
+    }
+
+    /// `[e, ...]` — a homogeneous array literal. `[]` and trailing
+    /// commas are legal syntax; the checker requires an element type
+    /// (from the elements or an annotation) to give `[]` a type.
+    fn array_lit(&mut self) {
+        self.start(SyntaxKind::ARRAY_EXPR);
+        self.bump(); // [
+        while !self.at_end() && !self.at(SyntaxKind::R_BRACKET) {
             if Self::can_start_expr(self.current()) {
                 self.expr(0, true);
+            } else {
+                self.err_recover(
+                    format!("expected an element, found {}", self.current().describe()),
+                    &[SyntaxKind::COMMA, SyntaxKind::R_BRACKET],
+                );
             }
-            self.finish();
+            if !self.eat(SyntaxKind::COMMA) {
+                break;
+            }
         }
+        self.expect(SyntaxKind::R_BRACKET, "to close the array literal");
+        self.finish();
+    }
+
+    /// `for x in e { .. }` — iterates `e` (an array or a `lo..hi`
+    /// integer range), binding each element to a fresh `x`. `for mut x`
+    /// makes the loop binding assignable inside the body.
+    fn for_expr(&mut self) {
+        self.start(SyntaxKind::FOR_EXPR);
+        self.bump(); // for
+        self.eat(SyntaxKind::MUT_KW); // `for mut x` — mutable binding
+        self.name();
+        self.expect(SyntaxKind::IN_KW, "after the loop variable");
+        // The iterable can't open a struct literal — `for x in S { }`
+        // reads `{` as the loop body, like an `if` condition.
+        self.expr(0, false);
+        self.block();
+        self.finish();
     }
 
     fn if_expr(&mut self) {
@@ -732,10 +791,12 @@ impl Parser<'_> {
 const UNARY_BP: u8 = 13;
 
 /// Infix binding powers `(left, right)`. Higher binds tighter; for
-/// left-associative operators `right = left + 1`.
+/// left-associative operators `right = left + 1`. `..` binds loosest
+/// of all — `a + b .. c + d` is `(a+b)..(c+d)`.
 const fn infix_binding_power(kind: SyntaxKind) -> Option<(u8, u8)> {
     use SyntaxKind as K;
     match kind {
+        K::DOT2 => Some((0, 1)),
         K::OR2 => Some((1, 2)),
         K::AND2 => Some((3, 4)),
         K::EQ2 | K::NEQ => Some((5, 6)),

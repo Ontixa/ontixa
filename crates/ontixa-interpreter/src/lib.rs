@@ -232,6 +232,209 @@ mod tests {
         }
     }
 
+    // ---- arrays and `for` --------------------------------------------
+
+    /// Runs `main` and extracts an array of integers.
+    fn eval_int_array(src: &str) -> Vec<i128> {
+        let (v, _m, _h, _i, diags) = run_src(src, "main").expect("run");
+        assert!(diags.is_empty(), "{diags:?}");
+        match v {
+            Value::Array(elems) => elems
+                .iter()
+                .map(|c| match *c.borrow() {
+                    Value::Int(i) => i,
+                    ref other => panic!("expected int element, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_array_literal_index_len() {
+        assert_eq!(eval_int("fn main() -> i32 { return [1, 2, 3][1]; }"), 2);
+        assert_eq!(
+            eval_int("fn main() -> i32 { let a = [4, 5]; return a.len + a[0]; }"),
+            6
+        );
+        assert_eq!(
+            eval_int_array("fn main() -> [i32] { let a: [i32] = []; return a; }"),
+            Vec::<i128>::new()
+        );
+        assert_eq!(
+            eval_int_array("fn main() -> [i64] { let a: [i64] = [1, 2]; return a; }"),
+            vec![1, 2]
+        );
+        // String elements.
+        assert_eq!(
+            eval_str("fn main() -> str { let a = [\"x\", \"yz\"]; return a[0] + a[1]; }"),
+            "xyz"
+        );
+    }
+
+    #[test]
+    fn runs_array_slices() {
+        assert_eq!(
+            eval_int_array("fn main() -> [i32] { return [1, 2, 3, 4][1..3]; }"),
+            vec![2, 3]
+        );
+        assert_eq!(
+            eval_int_array("fn main() -> [i32] { let a = [1, 2, 3]; return a[1..]; }"),
+            vec![2, 3]
+        );
+        assert_eq!(
+            eval_int_array("fn main() -> [i32] { let a = [1, 2, 3]; return a[..2]; }"),
+            vec![1, 2]
+        );
+        assert_eq!(
+            eval_int_array("fn main() -> [i32] { let a = [1, 2, 3]; return a[..]; }"),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            eval_int_array("fn main() -> [i32] { let a = [1, 2, 3]; return a[2..2]; }"),
+            Vec::<i128>::new()
+        );
+    }
+
+    #[test]
+    fn array_index_out_of_bounds_traps() {
+        for idx in ["2", "0 - 1"] {
+            let src = format!("fn main() -> i32 {{ return [1, 2][{idx}]; }}");
+            let err = run_src(&src, "main").unwrap_err();
+            match err {
+                RuntimeError::Trap(m) => assert!(m.contains("out of bounds"), "{m}"),
+                other => panic!("expected trap, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn array_slice_out_of_bounds_traps() {
+        for slice in ["1..9", "2..1", "0 - 1..2"] {
+            let src = format!("fn main() -> [i32] {{ return [1, 2, 3][{slice}]; }}");
+            let err = run_src(&src, "main").unwrap_err();
+            match err {
+                RuntimeError::Trap(m) => assert!(m.contains("out of bounds"), "{m}"),
+                other => panic!("expected trap, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn runs_for_over_range() {
+        assert_eq!(
+            eval_int("fn main() -> i32 { let mut t = 0; for i in 0..5 { t = t + i; } return t; }"),
+            10
+        );
+        // `..hi` starts at 0; `lo..hi` is half-open.
+        assert_eq!(
+            eval_int("fn main() -> i32 { let mut t = 0; for i in ..3 { t = t + 1; } return t; }"),
+            3
+        );
+        assert_eq!(
+            eval_int("fn main() -> i32 { let mut t = 0; for i in 2..5 { t = t + 1; } return t; }"),
+            3
+        );
+        // A typed bound carries its integer type into the loop var;
+        // a literal bound adopts it.
+        assert_eq!(
+            eval_int(
+                "fn main() -> i64 { let lo: i64 = 1; let mut t: i64 = 0; for i in lo..4 { t = t + i; } return t; }"
+            ),
+            6
+        );
+    }
+
+    #[test]
+    fn for_empty_iterables_run_zero_times() {
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { for i in 3..3 { return i; } for i in 5..2 { return i; } return 7; }"
+            ),
+            7
+        );
+        assert_eq!(
+            eval_int("fn main() -> i32 { let a: [i32] = []; for x in a { return x; } return 9; }"),
+            9
+        );
+    }
+
+    #[test]
+    fn runs_for_over_array() {
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let a = [3, 4, 5]; let mut t = 0; for x in a { t = t + x; } return t; }"
+            ),
+            12
+        );
+        // The var is a fresh element each iteration.
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let mut last = 0; for x in [7, 8, 9] { last = x; } return last; }"
+            ),
+            9
+        );
+        // `for mut` allows rebinding the var inside the body.
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let mut t = 0; for mut x in [1, 2] { x = x * 10; t = t + x; } return t; }"
+            ),
+            30
+        );
+    }
+
+    /// The iterable is evaluated once and snapshotted: reassigning the
+    /// array inside the body does not change what the loop visits.
+    #[test]
+    fn for_snapshots_the_iterable() {
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let mut a = [1, 2, 3]; let mut n = 0; for x in a { n = n + 1; a = [9]; } return n * 10 + a[0]; }"
+            ),
+            39
+        );
+        // Range bounds are fixed before the first iteration too.
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let mut hi = 3; let mut n = 0; for i in 0..hi { n = n + 1; hi = 0; } return n; }"
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn nested_loops_and_early_return() {
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let mut t = 0; for i in 0..2 { for j in 0..2 { t = t + i * 10 + j; } } return t; }"
+            ),
+            // i=0: 0+1; i=1: 10+11 → 22
+            22
+        );
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { for x in [5, 6, 7] { if x == 6 { return x; } } return 0; }"
+            ),
+            6
+        );
+    }
+
+    #[test]
+    fn runs_arrays_of_structs() {
+        let src = "data P { x: i32; }
+                   fn main() -> i32 { let ps = [P { x: 1 }, P { x: 2 }]; let mut t = 0; for p in ps { t = t + p.x; } return t + ps.len; }";
+        assert_eq!(eval_int(src), 5);
+    }
+
+    /// An array param written through `mut` is a `borrow_mut` — the
+    /// callee's reassignment is visible to the caller.
+    #[test]
+    fn array_borrow_mut_writes_through() {
+        let src = "fn reset(mut a: [i32]) { a = [9]; }
+                   fn main() -> i32 { let mut ps = [1]; reset(ps); return ps[0]; }";
+        assert_eq!(eval_int(src), 9);
+    }
+
     // ---- contract oracle --------------------------------------------
     //
     // The oracle's traps are unreachable through valid source — the
