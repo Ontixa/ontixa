@@ -134,6 +134,89 @@ mod tests {
     }
 
     #[test]
+    fn parses_array_literals() {
+        let root = parse_ok("fn f() -> i32 { let a = [1, 2, 3]; let b = []; return a[0]; }");
+        let arrays: Vec<_> = root
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::ARRAY_EXPR)
+            .collect();
+        assert_eq!(arrays.len(), 2);
+        // `a[0]` is still an index, not an array literal.
+        assert!(find_kind(&root, SyntaxKind::INDEX_EXPR));
+    }
+
+    #[test]
+    fn parses_for_over_range_and_array() {
+        let root =
+            parse_ok("fn f(a: [i32]) -> i32 { for i in 0..a.len { } for x in a { } return 0; }");
+        assert_eq!(
+            root.descendants()
+                .filter(|n| n.kind() == SyntaxKind::FOR_EXPR)
+                .count(),
+            2
+        );
+        assert!(find_kind(&root, SyntaxKind::RANGE));
+    }
+
+    #[test]
+    fn parses_all_range_forms() {
+        // `..` alone is an unbounded range (rejected by the checker).
+        let root =
+            parse_ok("fn f() -> i32 { let s = \"a\"; return s[0] + s[1..] + s[..2] + s[..]; }");
+        assert_eq!(
+            root.descendants()
+                .filter(|n| n.kind() == SyntaxKind::RANGE)
+                .count(),
+            3
+        );
+    }
+
+    /// `for i in 0.. { }`: the `{` opens the loop *body*, never the
+    /// range's upper bound — the same ambiguity rule as `if` and
+    /// struct literals. (Without it, the body would parse as a bound.)
+    #[test]
+    fn range_never_takes_brace_bound() {
+        let (root, diags) = parse_file("fn f() -> i32 { for i in 0.. { return i; } return 0; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        let range = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::RANGE)
+            .expect("range");
+        assert_eq!(
+            range
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::BLOCK)
+                .count(),
+            0
+        );
+        let for_expr = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::FOR_EXPR)
+            .expect("for");
+        assert!(for_expr.children().any(|n| n.kind() == SyntaxKind::BLOCK));
+    }
+
+    /// `-7` must produce a `PREFIX_EXPR` whose operator token is the
+    /// minus — leading trivia lives inside the node and used to hide
+    /// the operator from the AST lowerer (it emitted `Expr::Error`,
+    /// silently evaluating to `unit`).
+    #[test]
+    fn unary_minus_keeps_operator_visible() {
+        let (root, diags) = parse_file("fn f() -> i32 { let x = -7; return x; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        let pre = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::PREFIX_EXPR)
+            .expect("prefix expr");
+        let first = pre
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| !t.kind().is_trivia())
+            .expect("operator token");
+        assert_eq!(first.kind(), SyntaxKind::MINUS);
+    }
+
+    #[test]
     fn malformed_input_does_not_panic() {
         for src in [
             "",
@@ -154,6 +237,13 @@ mod tests {
             "fn f(s: str) { s[]; }",
             "fn f(s: str) { s[; }",
             "fn f(s: str) { s[.. ..]; }",
+            "fn f() { let a = [1, ; }",
+            "fn f() { let a = [,]; }",
+            "fn f() { for in { } }",
+            "fn f() { for i { } }",
+            "fn f() { for i in }",
+            "fn f() { [",
+            "fn f() { for i in 0.. [1] }",
         ] {
             let _ = parse_file(src); // must not panic
         }

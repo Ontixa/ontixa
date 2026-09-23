@@ -41,7 +41,9 @@ pub enum SyntaxKind {
     USE_KW,
     /// `as` — the alias keyword in `use` declarations.
     AS_KW,
-    // Reserved for future use.
+    // `for` and `in` are live keywords (the `for` loop); the rest of
+    // this block is reserved for future use. All are unusable as
+    // identifiers (`is_reserved_keyword`).
     UNSAFE_KW,
     MUT_KW,
     SHARED_KW,
@@ -173,10 +175,15 @@ pub enum SyntaxKind {
     STRUCT_LIT,
     /// `name: expr` inside a struct literal.
     STRUCT_LIT_FIELD,
-    /// `base[i]` or `base[lo..hi]` — string indexing and slicing.
+    /// `base[i]` or `base[lo..hi]` — string/array indexing and slicing.
     INDEX_EXPR,
-    /// `lo .. hi` inside brackets — either bound may be absent.
+    /// `lo .. hi` — inside brackets a slice bound, in `for` an
+    /// integer range; either bound may be absent.
     RANGE,
+    /// `[e, ...]` — an array literal.
+    ARRAY_EXPR,
+    /// `for x in e { .. }` — iteration over arrays and ranges.
+    FOR_EXPR,
     /// Parser error recovery node; wraps skipped tokens.
     ERROR,
     /// End of input marker used by the parser internally.
@@ -505,6 +512,8 @@ static KIND_TABLE: &[SyntaxKind] = &[
     SyntaxKind::STRUCT_LIT_FIELD,
     SyntaxKind::INDEX_EXPR,
     SyntaxKind::RANGE,
+    SyntaxKind::ARRAY_EXPR,
+    SyntaxKind::FOR_EXPR,
     SyntaxKind::ERROR,
     SyntaxKind::EOF,
 ];

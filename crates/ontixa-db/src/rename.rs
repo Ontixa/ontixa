@@ -1214,15 +1214,21 @@ impl<'a> Scan<'a> {
             match item {
                 Item::Data(d) => {
                     for field in &d.fields {
-                        self.site(&field.ty.path);
+                        for path in field.ty.paths() {
+                            self.site(path);
+                        }
                     }
                 }
                 Item::Fn(f) => {
                     for p in &f.params {
-                        self.site(&p.ty.path);
+                        for path in p.ty.paths() {
+                            self.site(path);
+                        }
                     }
                     if let Some(ret) = &f.ret {
-                        self.site(&ret.path);
+                        for path in ret.paths() {
+                            self.site(path);
+                        }
                     }
                     self.block(&f.body);
                 }
@@ -1286,7 +1292,9 @@ impl<'a> Scan<'a> {
             match s {
                 Stmt::Let { ty, init, .. } => {
                     if let Some(t) = ty {
-                        self.site(&t.path);
+                        for path in t.paths() {
+                            self.site(path);
+                        }
                     }
                     if let Some(e) = init {
                         self.expr(e);
@@ -1334,6 +1342,25 @@ impl<'a> Scan<'a> {
                 if let Some(h) = hi {
                     self.expr(h);
                 }
+            }
+            Expr::ArrayLit { elems, .. } => {
+                for e in elems {
+                    self.expr(e);
+                }
+            }
+            Expr::Range { lo, hi, .. } => {
+                if let Some(l) = lo {
+                    self.expr(l);
+                }
+                if let Some(h) = hi {
+                    self.expr(h);
+                }
+            }
+            Expr::For { iter, body, .. } => {
+                // `var` is a body-local binding — never a rename site
+                // for a top-level definition (same rule as `Var`).
+                self.expr(iter);
+                self.block(body);
             }
             Expr::Binary { lhs, rhs, .. } => {
                 self.expr(lhs);

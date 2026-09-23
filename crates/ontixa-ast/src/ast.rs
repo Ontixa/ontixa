@@ -150,12 +150,43 @@ pub struct Param {
     pub span: Span,
 }
 
-/// A type position: a named type, optionally module-qualified
-/// (`m::Name`).
+/// A type position: a named type (`Name`, optionally module-qualified
+/// `m::Name`) or an array type `[T]`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct TypeExpr {
-    /// The type path as written.
-    pub path: Path,
+#[serde(untagged)]
+pub enum TypeExpr {
+    /// `Name` / `m::Name` — serializes as `{"path": ...}`.
+    Named {
+        /// The type path as written.
+        path: Path,
+    },
+    /// `[T]` — a homogeneous array of `elem`. Element types are flat:
+    /// `[[i32]]` parses, but type resolution rejects nested arrays.
+    Array {
+        /// The element type.
+        elem: Box<TypeExpr>,
+        /// Span covering the whole `[T]`.
+        span: Span,
+    },
+}
+
+impl TypeExpr {
+    /// The type's full source span.
+    pub fn span(&self) -> Span {
+        match self {
+            TypeExpr::Named { path } => path.span,
+            TypeExpr::Array { span, .. } => *span,
+        }
+    }
+
+    /// Every named path the type mentions — `[P]` contributes `P`'s
+    /// path (element types are flat, so at most one level deep).
+    pub fn paths(&self) -> Vec<&Path> {
+        match self {
+            TypeExpr::Named { path } => vec![path],
+            TypeExpr::Array { elem, .. } => elem.paths(),
+        }
+    }
 }
 
 /// A block: statements plus an optional trailing expression whose value
@@ -269,7 +300,8 @@ pub enum Expr {
         span: Span,
     },
     /// `base[index]` — for `str`, `index` is a character position and
-    /// the result is a one-character `str`.
+    /// the result is a one-character `str`; for `[T]` it is an
+    /// element position and the result is a `T`.
     Index {
         /// The indexed expression.
         base: Box<Expr>,
@@ -278,7 +310,8 @@ pub enum Expr {
         /// Expression span.
         span: Span,
     },
-    /// `base[lo..hi]` — a slice; either bound may be omitted.
+    /// `base[lo..hi]` — a slice; either bound may be omitted. For
+    /// `str` the result is a `str`; for `[T]` a fresh `[T]`.
     Slice {
         /// The sliced expression.
         base: Box<Expr>,
@@ -286,6 +319,40 @@ pub enum Expr {
         lo: Option<Box<Expr>>,
         /// Optional upper bound (`hi` in `base[..hi]`).
         hi: Option<Box<Expr>>,
+        /// Expression span.
+        span: Span,
+    },
+    /// `[e, ...]` — a homogeneous array literal. Empty literals `[]`
+    /// parse fine but need a type annotation to check.
+    ArrayLit {
+        /// Elements in order.
+        elems: Vec<Expr>,
+        /// Expression span.
+        span: Span,
+    },
+    /// `lo..hi` — a half-open integer range; either bound may be
+    /// omitted. Valid only as a `for` iterable (ranges inside `[]`
+    /// brackets lower to `Slice` bounds, never to `Range`).
+    Range {
+        /// Optional lower bound (`lo` in `lo..hi`; `..hi` starts at 0).
+        lo: Option<Box<Expr>>,
+        /// Optional upper bound (`hi` in `lo..hi`; `lo..` is
+        /// unbounded and rejected by the checker).
+        hi: Option<Box<Expr>>,
+        /// Expression span.
+        span: Span,
+    },
+    /// `for x in e { .. }` — iterates `e` (an array or a `Range`),
+    /// binding each element to a fresh `x`. Always `unit`-typed.
+    For {
+        /// Loop variable — a fresh body-local binding per iteration.
+        var: Ident,
+        /// Whether the binding was written `for mut x`.
+        mutable: bool,
+        /// The iterated expression.
+        iter: Box<Expr>,
+        /// Loop body.
+        body: Block,
         /// Expression span.
         span: Span,
     },
@@ -360,6 +427,9 @@ impl Expr {
             | Expr::Field { span, .. }
             | Expr::Index { span, .. }
             | Expr::Slice { span, .. }
+            | Expr::ArrayLit { span, .. }
+            | Expr::Range { span, .. }
+            | Expr::For { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Unary { span, .. }
             | Expr::If { span, .. }

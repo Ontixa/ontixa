@@ -593,4 +593,97 @@ mod tests {
         let read: DefId = m.scope.root_env().fns[&interner.intern("read")];
         assert!(own.summary(read)[0].escapes.is_empty());
     }
+
+    // ---------- arrays and `for` ----------
+
+    /// Elements move into an array literal — `[q]` consumes `q` like
+    /// a call to a moving callee does.
+    #[test]
+    fn array_literal_moves_elements() {
+        let c = codes(
+            "data P { x: i32; } fn main() -> i32 { let q = P { x: 1 }; let a = [q]; return q.x; }",
+        );
+        assert!(c.contains(&ontixa_diagnostics::Code::UseAfterMove), "{c:?}");
+    }
+
+    /// `for x in a` reads `a` — the array stays usable after the loop.
+    #[test]
+    fn iterating_an_array_reads_it() {
+        let c =
+            codes("fn main() -> i32 { let a = [1, 2]; for x in a { let z = x; } return a[0]; }");
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    /// A slice produces a fresh non-copy array, so it consumes the
+    /// base — same rule as a move (`a[..]` is not a borrow view).
+    #[test]
+    fn array_slice_consumes_base() {
+        let c = codes("fn main() -> i32 { let a = [1, 2]; let s = a[..]; return a[0] + s.len; }");
+        assert!(c.contains(&ontixa_diagnostics::Code::UseAfterMove), "{c:?}");
+    }
+
+    /// Indexing out a `copy` element only reads the array.
+    #[test]
+    fn array_index_of_copy_reads() {
+        let c = codes("fn main() -> i32 { let a = [1, 2]; let x = a[0]; return a[1] + x; }");
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    /// A move inside a `for` body is conditional — the loop may run
+    /// zero times — so reading the moved value after the loop flags.
+    #[test]
+    fn move_inside_loop_is_flagged_after() {
+        let c = codes(
+            "data P { x: i32; } fn eat(p: P) -> i32 { return 0; } \
+             fn main() -> i32 { let q = P { x: 1 }; for i in 0..2 { let a = eat(q); } return q.x; }",
+        );
+        assert!(c.contains(&ontixa_diagnostics::Code::UseAfterMove), "{c:?}");
+    }
+
+    /// The loop variable is immutable unless written `for mut x`.
+    #[test]
+    fn for_var_assignment_needs_mut() {
+        let c = codes("fn main() -> i32 { for i in 0..3 { i = i + 1; } return 0; }");
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::ImmutableAssignment),
+            "{c:?}"
+        );
+        let c = codes("fn main() -> i32 { for mut i in 0..3 { i = i + 1; } return 0; }");
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    /// Iterating an array param is a read — the param's contract is
+    /// `borrow`, not `move`/`escape`.
+    #[test]
+    fn array_iteration_infers_borrow_contract() {
+        assert_eq!(
+            behavior(
+                "fn sum(a: [i32]) -> i32 { let mut t = 0; for x in a { t = t + x; } return t; } fn main() -> i32 { return 0; }",
+                "sum",
+                0
+            ),
+            ParamBehavior::Borrow
+        );
+    }
+
+    /// Returning an array param (or a slice of it) escapes.
+    #[test]
+    fn array_param_escape_is_tracked() {
+        assert_eq!(
+            behavior(
+                "fn id(a: [i32]) -> [i32] { return a; } fn main() -> i32 { return 0; }",
+                "id",
+                0
+            ),
+            ParamBehavior::Escape
+        );
+        assert_eq!(
+            behavior(
+                "fn tail(a: [i32]) -> [i32] { return a[1..]; } fn main() -> i32 { return 0; }",
+                "tail",
+                0
+            ),
+            ParamBehavior::Escape
+        );
+    }
 }

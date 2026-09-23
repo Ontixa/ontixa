@@ -9,7 +9,7 @@
 //! types arrive — the split keeps that evolution from touching every
 //! signature in the compiler.
 
-use ontixa_hir::TypeRef;
+use ontixa_hir::{ElemRef, TypeRef};
 use ontixa_source::DefId;
 use serde::Serialize;
 
@@ -18,7 +18,8 @@ use serde::Serialize;
 /// `Serialize` is implemented by hand: `Struct(DefId)` cannot use an
 /// internally-tagged enum representation (serde_json cannot serialize
 /// a tagged newtype containing an integer), so every variant emits
-/// `{"kind": name}` plus `{"def": id}` for structs.
+/// `{"kind": name}` plus `{"def": id}` for structs and `{"elem": ty}`
+/// for arrays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// `bool`
@@ -41,10 +42,70 @@ pub enum Ty {
     Unit,
     /// A user `data` type.
     Struct(DefId),
+    /// `[T]` — a homogeneous array. `elem` is flat by construction:
+    /// nested arrays are rejected at type resolution.
+    Array(ElemTy),
     /// A type that could not be determined because an upstream pass
     /// already emitted a diagnostic. Poison unifies with everything so
     /// one error never cascades into a waterfall of secondary errors.
     Poison,
+}
+
+/// A semantic array element type — every [`Ty`] except `Array`
+/// itself (nested arrays are not supported yet), `Unit`, and
+/// `Poison`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ElemTy {
+    /// `bool`
+    Bool,
+    /// `i32`
+    I32,
+    /// `i64`
+    I64,
+    /// `u32`
+    U32,
+    /// `u64`
+    U64,
+    /// `f32`
+    F32,
+    /// `f64`
+    F64,
+    /// `str`
+    Str,
+    /// A user `data` type.
+    Struct(DefId),
+}
+
+impl ElemTy {
+    /// The full [`Ty`] this element type stands for.
+    pub const fn ty(self) -> Ty {
+        match self {
+            ElemTy::Bool => Ty::Bool,
+            ElemTy::I32 => Ty::I32,
+            ElemTy::I64 => Ty::I64,
+            ElemTy::U32 => Ty::U32,
+            ElemTy::U64 => Ty::U64,
+            ElemTy::F32 => Ty::F32,
+            ElemTy::F64 => Ty::F64,
+            ElemTy::Str => Ty::Str,
+            ElemTy::Struct(d) => Ty::Struct(d),
+        }
+    }
+
+    /// The element type for a resolved [`ElemRef`].
+    pub fn from_ref(e: ElemRef) -> Self {
+        match e {
+            ElemRef::Bool => ElemTy::Bool,
+            ElemRef::I32 => ElemTy::I32,
+            ElemRef::I64 => ElemTy::I64,
+            ElemRef::U32 => ElemTy::U32,
+            ElemRef::U64 => ElemTy::U64,
+            ElemRef::F32 => ElemTy::F32,
+            ElemRef::F64 => ElemTy::F64,
+            ElemRef::Str => ElemTy::Str,
+            ElemRef::Struct(d) => ElemTy::Struct(d),
+        }
+    }
 }
 
 impl Ty {
@@ -61,8 +122,26 @@ impl Ty {
             TypeRef::Str => Ty::Str,
             TypeRef::Unit => Ty::Unit,
             TypeRef::Struct(d) => Ty::Struct(d),
+            TypeRef::Array { elem } => Ty::Array(ElemTy::from_ref(elem)),
             TypeRef::Poison => Ty::Poison,
         }
+    }
+
+    /// The [`ElemTy`] for a type that can be an array element —
+    /// `None` for `unit`, `[_]`, and `Poison`.
+    pub fn elem(self) -> Option<ElemTy> {
+        Some(match self {
+            Ty::Bool => ElemTy::Bool,
+            Ty::I32 => ElemTy::I32,
+            Ty::I64 => ElemTy::I64,
+            Ty::U32 => ElemTy::U32,
+            Ty::U64 => ElemTy::U64,
+            Ty::F32 => ElemTy::F32,
+            Ty::F64 => ElemTy::F64,
+            Ty::Str => ElemTy::Str,
+            Ty::Struct(d) => ElemTy::Struct(d),
+            Ty::Unit | Ty::Array(_) | Ty::Poison => return None,
+        })
     }
 
     /// Whether this is a numeric type (supports `+ - * / %` and
@@ -81,9 +160,10 @@ impl Ty {
     }
 
     /// Whether a value of this type is copied bitwise on use
-    /// (`copy` semantics) rather than moved. Struct values move.
+    /// (`copy` semantics) rather than moved. Struct and array values
+    /// move.
     pub fn is_copy(self) -> bool {
-        !matches!(self, Ty::Struct(_) | Ty::Poison)
+        !matches!(self, Ty::Struct(_) | Ty::Array(_) | Ty::Poison)
     }
 
     /// Whether `self` and `other` are the same type, treating `Poison`
@@ -105,6 +185,7 @@ impl Ty {
             Ty::Str => "str",
             Ty::Unit => "unit",
             Ty::Struct(_) => "struct",
+            Ty::Array(_) => "array",
             Ty::Poison => "poison",
         }
     }
@@ -113,11 +194,17 @@ impl Ty {
 impl Serialize for Ty {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let len = if matches!(self, Ty::Struct(_)) { 2 } else { 1 };
+        let len = if matches!(self, Ty::Struct(_) | Ty::Array(_)) {
+            2
+        } else {
+            1
+        };
         let mut m = s.serialize_map(Some(len))?;
         m.serialize_entry("kind", self.as_str())?;
-        if let Ty::Struct(d) = self {
-            m.serialize_entry("def", d)?;
+        match self {
+            Ty::Struct(d) => m.serialize_entry("def", d)?,
+            Ty::Array(e) => m.serialize_entry("elem", &e.ty())?,
+            _ => {}
         }
         m.end()
     }

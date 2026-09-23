@@ -72,13 +72,20 @@ pub fn lower_fn(
     l.cur = l.new_block(); // entry = block 0
     let result = l.eval(body.root);
     if l.cur_is_open() {
-        l.close(Terminator::Return(result));
+        l.close(Terminator::Return { value: result });
     }
     // Any block still holding the placeholder terminator falls off
     // the end — a unit return (only reachable in error paths).
     for b in l.blocks.iter_mut() {
-        if matches!(b.term, Terminator::Goto(BlockId(u32::MAX))) {
-            b.term = Terminator::Return(Operand::Const(Const::Unit));
+        if matches!(
+            b.term,
+            Terminator::Goto {
+                target: BlockId(u32::MAX)
+            }
+        ) {
+            b.term = Terminator::Return {
+                value: Operand::Const(Const::Unit),
+            };
         }
     }
     MirBody {
@@ -105,7 +112,7 @@ struct FnLowerer<'a> {
     cur_closed: bool,
 }
 
-// The "pending" terminator is `Terminator::Goto(u32::MAX)`, written by
+// The "pending" terminator is `Goto { target: u32::MAX }`, written by
 // `new_block` and always overwritten by `close`; `lower_mir` sweeps any
 // survivors (unreachable paths) into `Return(unit)`.
 
@@ -140,7 +147,9 @@ impl FnLowerer<'_> {
         self.blocks.push(BasicBlock {
             id,
             stmts: Vec::new(),
-            term: Terminator::Goto(BlockId(u32::MAX)), // placeholder
+            term: Terminator::Goto {
+                target: BlockId(u32::MAX),
+            }, // placeholder
         });
         id
     }
@@ -167,7 +176,9 @@ impl FnLowerer<'_> {
     fn cur_is_open(&self) -> bool {
         matches!(
             self.blocks[self.cur.0 as usize].term,
-            Terminator::Goto(BlockId(u32::MAX))
+            Terminator::Goto {
+                target: BlockId(u32::MAX)
+            }
         )
     }
 
@@ -278,7 +289,7 @@ impl FnLowerer<'_> {
                     Some(v) => self.eval(*v),
                     None => Operand::Const(Const::Unit),
                 };
-                self.close(Terminator::Return(op));
+                self.close(Terminator::Return { value: op });
                 // Anything written next lands in a lazily-created
                 // unreachable block — kept for tooling, never executed.
             }
@@ -317,14 +328,31 @@ impl FnLowerer<'_> {
                 });
                 Operand::Place(t)
             }
-            HirExprKind::StrLen { base } => {
+            HirExprKind::Len { base } => {
                 let b = self.eval(base);
                 let t = self.temp(self.ty_of(id));
                 self.emit(MirStmt::Assign {
                     dst: t.clone(),
-                    val: Rvalue::StrLen { base: b },
+                    val: Rvalue::Len { base: b },
                 });
                 Operand::Place(t)
+            }
+            HirExprKind::ArrayLit { elems } => {
+                let ops: Vec<Operand> = elems.iter().map(|e| self.eval(*e)).collect();
+                let t = self.temp(self.ty_of(id));
+                self.emit(MirStmt::Assign {
+                    dst: t.clone(),
+                    val: Rvalue::ArrayLit { elems: ops },
+                });
+                Operand::Place(t)
+            }
+            HirExprKind::Range { .. } => {
+                // The checker rejects ranges outside `for`; defensive.
+                Operand::Const(Const::Unit)
+            }
+            HirExprKind::For { var, iter, body } => {
+                self.for_loop(var, iter, body);
+                Operand::Const(Const::Unit)
             }
             HirExprKind::Index { base, index } => {
                 let b = self.eval(base);
@@ -387,7 +415,7 @@ impl FnLowerer<'_> {
                     });
                 }
                 if !self.cur_closed {
-                    self.close(Terminator::Goto(join_bb));
+                    self.close(Terminator::Goto { target: join_bb });
                 }
 
                 if let (Some(e), Some(ebb)) = (else_, else_bb) {
@@ -401,7 +429,7 @@ impl FnLowerer<'_> {
                         });
                     }
                     if !self.cur_closed {
-                        self.close(Terminator::Goto(join_bb));
+                        self.close(Terminator::Goto { target: join_bb });
                     }
                 }
 
@@ -442,5 +470,140 @@ impl FnLowerer<'_> {
             }
             HirExprKind::Poison => Operand::Const(Const::Unit),
         }
+    }
+
+    /// `for x in iter { body }` desugars to a counted loop:
+    ///
+    /// ```text
+    ///   <iter evaluated once into temps>
+    ///   var = first
+    ///   head: cond = var < end (or idx < len)
+    ///         Branch(cond -> body_bb, exit_bb)
+    ///   body_bb: [x = arr[idx]]; <body>; var/idx += 1; Goto(head)
+    ///   exit_bb: (unit)
+    /// ```
+    ///
+    /// Both iterable forms fix their extent before the first
+    /// iteration: range bounds are snapshotted into temps and array
+    /// iteration walks a copy of the array, so writes inside the body
+    /// cannot invalidate the loop.
+    fn for_loop(&mut self, var: SymbolId, iter: ExprId, body: ExprId) {
+        let var_ty = self
+            .types
+            .local_types
+            .get(&var)
+            .copied()
+            .unwrap_or(Ty::Poison);
+        // The loop machinery rewrites the var's slot each iteration —
+        // internally writable regardless of the source `mut`.
+        let var_local = self.alloc_local(Some(var), var_ty, true);
+        self.local_of.insert(var, var_local);
+        let var_place = Place::local(var_local);
+
+        // Iteration state: (counter place, limit operand, per-iteration
+        // var binding for the array form).
+        let (counter, limit, elem_read) = match self.body.expr(iter).kind.clone() {
+            HirExprKind::Range { lo, hi } => {
+                let lo_op = match lo {
+                    Some(l) => self.eval(l),
+                    None => Operand::Const(Const::Int(0)),
+                };
+                let lo_t = self.temp(var_ty);
+                self.emit(MirStmt::Assign {
+                    dst: lo_t.clone(),
+                    val: Rvalue::Use(lo_op),
+                });
+                let hi_op = hi
+                    .map(|h| self.eval(h))
+                    .unwrap_or(Operand::Const(Const::Int(0)));
+                let hi_t = self.temp(var_ty);
+                self.emit(MirStmt::Assign {
+                    dst: hi_t.clone(),
+                    val: Rvalue::Use(hi_op),
+                });
+                // The var *is* the counter for a range loop.
+                self.emit(MirStmt::Assign {
+                    dst: var_place.clone(),
+                    val: Rvalue::Use(Operand::Place(lo_t)),
+                });
+                (var_place.clone(), Operand::Place(hi_t), None)
+            }
+            _ => {
+                // Array iteration: snapshot the array, then count
+                // `idx` against its (fixed) length.
+                let arr_op = self.eval(iter);
+                let arr = self.temp(self.ty_of(iter));
+                self.emit(MirStmt::Assign {
+                    dst: arr.clone(),
+                    val: Rvalue::Use(arr_op),
+                });
+                let len = self.temp(Ty::I32);
+                self.emit(MirStmt::Assign {
+                    dst: len.clone(),
+                    val: Rvalue::Len {
+                        base: Operand::Place(arr.clone()),
+                    },
+                });
+                let idx = self.temp(Ty::I32);
+                self.emit(MirStmt::Assign {
+                    dst: idx.clone(),
+                    val: Rvalue::Use(Operand::Const(Const::Int(0))),
+                });
+                (idx, Operand::Place(len), Some(arr))
+            }
+        };
+
+        let head_bb = self.new_block();
+        let body_bb = self.new_block();
+        let exit_bb = self.new_block();
+        self.close(Terminator::Goto { target: head_bb });
+
+        // Head: `counter < limit`.
+        self.cur = head_bb;
+        self.cur_closed = false;
+        let cond = self.temp(Ty::Bool);
+        self.emit(MirStmt::Assign {
+            dst: cond.clone(),
+            val: Rvalue::Binary {
+                op: ontixa_hir::BinOp::Lt,
+                lhs: Operand::Place(counter.clone()),
+                rhs: limit,
+            },
+        });
+        self.close(Terminator::Branch {
+            cond: Operand::Place(cond),
+            then: body_bb,
+            else_: exit_bb,
+        });
+
+        // Body: bind the element, run the block, bump the counter.
+        self.cur = body_bb;
+        self.cur_closed = false;
+        if let Some(arr) = elem_read {
+            self.emit(MirStmt::Assign {
+                dst: var_place.clone(),
+                val: Rvalue::Index {
+                    base: Operand::Place(arr),
+                    index: Operand::Place(counter.clone()),
+                },
+            });
+        }
+        self.eval(body);
+        if self.cur_is_open() {
+            // `counter` is a bare local — `var` for ranges, the `idx`
+            // temp for arrays.
+            self.emit(MirStmt::Assign {
+                dst: counter.clone(),
+                val: Rvalue::Binary {
+                    op: ontixa_hir::BinOp::Add,
+                    lhs: Operand::Place(counter),
+                    rhs: Operand::Const(Const::Int(1)),
+                },
+            });
+            self.close(Terminator::Goto { target: head_bb });
+        }
+
+        self.cur = exit_bb;
+        self.cur_closed = false;
     }
 }

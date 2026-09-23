@@ -51,10 +51,17 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   revision-guarded atomic apply; CLI `patch` + daemon `patch` op
   (ADR-0016). Compile integrity, not semantic preservation; no
   `use` edits, reordering, comments, or file create/delete.
+- arrays/slices + `for` loops: homogeneous `[e, ...]` literals with
+  inferred element types (`[T]` annotations, required for `[]`),
+  `a.len`, `a[i]` indexing, `a[lo..hi]` slicing into a fresh array,
+  `for x in a` element iteration over a snapshot of the iterable,
+  `for i in lo..hi` counted ranges (bounds typed uniformly — a
+  literal bound adopts the other bound's integer type); assigning to
+  the loop variable requires `for mut x`. Out-of-bounds indices and
+  invalid slices trap; unbounded ranges are rejected (no `break`
+  yet). Demo: `examples/arrays.ixa`
 
 Remaining:
-
-- arrays/slices + `for` loops
 - `match`-like selection over `data` variants (enum data)
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - more primitives (`char` — `u*`/`f32`/`f64`/`str` already resolve)

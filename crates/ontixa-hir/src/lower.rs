@@ -12,8 +12,8 @@
 //! guesses, so later passes never see fabricated semantics.
 
 use crate::hir::{
-    FileEnv, HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope, Name,
-    Symbol, SymbolKind, TypeRef,
+    ElemRef, FileEnv, HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope,
+    Name, Symbol, SymbolKind, TypeRef,
 };
 use ontixa_ast::{AstModule, Block, Expr, FnDecl, Ident, Item, Path, Place, Stmt, TypeExpr};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
@@ -449,6 +449,32 @@ impl BodyLowerer<'_> {
                 let hi = hi.as_deref().and_then(|e| self.expr(e));
                 self.alloc_expr(HirExprKind::Slice { base, lo, hi }, span)
             }
+            Expr::ArrayLit { elems, .. } => {
+                let elems: Vec<ExprId> = elems.iter().filter_map(|e| self.expr(e)).collect();
+                self.alloc_expr(HirExprKind::ArrayLit { elems }, span)
+            }
+            Expr::Range { lo, hi, .. } => {
+                let lo = lo.as_deref().and_then(|e| self.expr(e));
+                let hi = hi.as_deref().and_then(|e| self.expr(e));
+                self.alloc_expr(HirExprKind::Range { lo, hi }, span)
+            }
+            Expr::For {
+                var,
+                mutable,
+                iter,
+                body,
+                ..
+            } => {
+                // The iterable resolves before the loop variable exists
+                // — `for x in x` reads an outer `x`. The variable then
+                // scopes over the body only.
+                let iter = self.expr(iter)?;
+                self.scopes.push(FxHashMap::default());
+                let var = self.declare_local(var, *mutable);
+                let body = self.block(body);
+                self.scopes.pop();
+                self.alloc_expr(HirExprKind::For { var, iter, body }, span)
+            }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let lhs = self.expr(lhs)?;
                 let rhs = self.expr(rhs)?;
@@ -511,7 +537,38 @@ impl BodyLowerer<'_> {
     }
 
     fn resolve_type(&mut self, ty: &TypeExpr) -> TypeRef {
-        let segs = &ty.path.segs;
+        let path = match ty {
+            TypeExpr::Array { elem, span } => {
+                return match self.resolve_type(elem) {
+                    TypeRef::Poison => TypeRef::Poison,
+                    TypeRef::Array { .. } => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::UnsupportedOperation,
+                                "nested array types are not supported yet",
+                            )
+                            .primary(*span),
+                        );
+                        TypeRef::Poison
+                    }
+                    TypeRef::Unit => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::UnsupportedOperation,
+                                "arrays cannot hold `unit` elements",
+                            )
+                            .primary(*span),
+                        );
+                        TypeRef::Poison
+                    }
+                    leaf => TypeRef::Array {
+                        elem: ElemRef::of(leaf).expect("leaf types are valid elements"),
+                    },
+                };
+            }
+            TypeExpr::Named { path } => path,
+        };
+        let segs = &path.segs;
         if segs.len() == 1 {
             let name = segs[0].name.as_str();
             match name {
@@ -527,21 +584,21 @@ impl BodyLowerer<'_> {
                 _ => {}
             }
         }
-        match self.path_def(&ty.path) {
+        match self.path_def(path) {
             Ok(d) if self.scope.data_shape(d).is_some() => TypeRef::Struct(d),
             Ok(_) => {
                 self.diags.push(
                     Diagnostic::error(
                         Code::UnknownType,
-                        format!("`{}` is a function, not a type", ty.path.display()),
+                        format!("`{}` is a function, not a type", path.display()),
                     )
-                    .primary(ty.path.span)
-                    .subject(ty.path.display()),
+                    .primary(path.span)
+                    .subject(path.display()),
                 );
                 TypeRef::Poison
             }
             Err(e) => {
-                self.path_error(&ty.path, e, "type", Code::UnknownType);
+                self.path_error(path, e, "type", Code::UnknownType);
                 TypeRef::Poison
             }
         }

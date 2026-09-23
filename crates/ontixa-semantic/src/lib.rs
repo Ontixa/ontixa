@@ -186,7 +186,7 @@ mod tests {
         }
         assert!(g.nodes.iter().any(|n| kind(n) == "index"));
         assert!(g.nodes.iter().any(|n| kind(n) == "slice"));
-        assert_eq!(g.nodes.iter().filter(|n| kind(n) == "strlen").count(), 2);
+        assert_eq!(g.nodes.iter().filter(|n| kind(n) == "len").count(), 2);
         // The slice's `lo` bound edge is role-tagged.
         let slice = g
             .nodes
@@ -210,5 +210,86 @@ mod tests {
             .filter(|n| n.kind == NodeKind::Type && n.label == "i32")
             .count();
         assert_eq!(i32_nodes, 1);
+    }
+
+    fn expr_kind(n: &SpgNode) -> &str {
+        n.attrs
+            .get("expr_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+    }
+
+    #[test]
+    fn array_and_for_have_graph_nodes() {
+        let (g, _, _, _, _, diags) = graph_src(
+            "fn main() -> i32 { let a = [1, 2]; let mut t = 0; for x in a { t = t + x; } return t + a.len; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(g.nodes.iter().any(|n| expr_kind(n) == "array_lit"));
+        assert!(g.nodes.iter().any(|n| expr_kind(n) == "for"));
+        assert!(g.nodes.iter().any(|n| expr_kind(n) == "len"));
+        // The array literal's elements attach by position.
+        let lit = g
+            .nodes
+            .iter()
+            .find(|n| expr_kind(n) == "array_lit")
+            .expect("array_lit node");
+        let positions: Vec<u64> = g
+            .edges
+            .iter()
+            .filter(|e| e.from == lit.id && e.kind == EdgeKind::Contains)
+            .filter_map(|e| e.attrs.get("position").and_then(|v| v.as_u64()))
+            .collect();
+        assert_eq!(positions.len(), 2);
+        // `for` carries `iter` and `body` role edges.
+        let f = g
+            .nodes
+            .iter()
+            .find(|n| expr_kind(n) == "for")
+            .expect("for node");
+        for role in ["iter", "body"] {
+            assert!(
+                g.edges.iter().any(|e| {
+                    e.from == f.id
+                        && e.kind == EdgeKind::Contains
+                        && e.attrs.get("role").and_then(|v| v.as_str()) == Some(role)
+                }),
+                "no `{role}` edge on for node"
+            );
+        }
+    }
+
+    #[test]
+    fn range_for_has_bound_edges() {
+        let (g, _, _, _, _, diags) =
+            graph_src("fn main() -> i32 { for i in 0..3 { let z = i; } return 0; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        let range = g
+            .nodes
+            .iter()
+            .find(|n| expr_kind(n) == "range")
+            .expect("range node");
+        for role in ["lo", "hi"] {
+            assert!(
+                g.edges.iter().any(|e| {
+                    e.from == range.id
+                        && e.kind == EdgeKind::Contains
+                        && e.attrs.get("role").and_then(|v| v.as_str()) == Some(role)
+                }),
+                "no `{role}` edge on range node"
+            );
+        }
+    }
+
+    #[test]
+    fn array_type_nodes_render_bracketed() {
+        let (g, _, _, _, _, diags) =
+            graph_src("fn f(a: [i64]) -> [i64] { return a; } fn main() -> i32 { return 0; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            g.nodes
+                .iter()
+                .any(|n| n.kind == NodeKind::Type && n.label == "[i64]")
+        );
     }
 }

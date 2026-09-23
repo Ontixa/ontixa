@@ -30,6 +30,8 @@ pub enum Value {
     Unit,
     /// A `data` value: fields as cells in declared order.
     Struct(DefId, Vec<Cell>),
+    /// A `[T]` value: elements as cells in order.
+    Array(Vec<Cell>),
     /// A read of a never-initialized local. Unreachable in accepted
     /// programs — the checker rejects uninitialized reads.
     Hole,
@@ -44,6 +46,12 @@ impl Value {
             Value::Struct(d, fields) => Value::Struct(
                 *d,
                 fields
+                    .iter()
+                    .map(|c| Rc::new(RefCell::new(c.borrow().deep_clone())))
+                    .collect(),
+            ),
+            Value::Array(elems) => Value::Array(
+                elems
                     .iter()
                     .map(|c| Rc::new(RefCell::new(c.borrow().deep_clone())))
                     .collect(),
@@ -65,6 +73,10 @@ impl Value {
             Value::Struct(d, fields) => {
                 let inner: Vec<String> = fields.iter().map(|c| c.borrow().show(name_of)).collect();
                 format!("{} {{ {} }}", name_of(*d), inner.join(", "))
+            }
+            Value::Array(elems) => {
+                let inner: Vec<String> = elems.iter().map(|c| c.borrow().show(name_of)).collect();
+                format!("[{}]", inner.join(", "))
             }
         }
     }

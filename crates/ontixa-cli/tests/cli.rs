@@ -209,6 +209,71 @@ fn human_check_has_no_json_on_stdout() {
     assert!(stdout_str(&out).trim().is_empty());
 }
 
+// ---------- arrays + for ----------
+
+#[test]
+fn run_json_arrays_are_real_json_arrays() {
+    let f = src_file(
+        "arrays",
+        "fn main() -> [i32] { let a = [1, 2, 3]; return a; }",
+    );
+    let out = ontixa(&["run", f.to_str().unwrap(), "--json"]);
+    assert!(out.status.success());
+    let env = envelope(&out);
+    assert_eq!(env["success"], true);
+    assert_eq!(env["result"]["value"], serde_json::json!([1, 2, 3]));
+    assert_eq!(env["result"]["display"], "[1, 2, 3]");
+}
+
+#[test]
+fn run_for_loop_end_to_end() {
+    let f = src_file(
+        "forloop",
+        "fn main() -> i32 { let mut t = 0; for i in 0..4 { t = t + i; } for x in [10, 20] { t = t + x; } return t; }",
+    );
+    let out = ontixa(&["run", f.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert_eq!(stdout_str(&out).trim(), "36");
+}
+
+#[test]
+fn explain_lists_array_types() {
+    let f = src_file(
+        "explain_arrays",
+        "fn pick(a: [i64]) -> [i64] { return a[1..]; } fn main() -> i32 { return pick([1]).len; }",
+    );
+    let out = ontixa(&["explain", f.to_str().unwrap()]);
+    assert!(out.status.success());
+    let s = stdout_str(&out);
+    assert!(s.contains("[i64]"), "explain output missing [i64]: {s}");
+}
+
+/// `for` lowers to `Goto`/`Branch` terminators — these must serialize
+/// (an internally-tagged newtype `Goto(BlockId)` made the whole `mir`
+/// document fail to serialize and print `null`).
+#[test]
+fn mir_json_serializes_loops() {
+    let f = src_file(
+        "mir_for",
+        "fn main() -> i32 { for i in 0..3 { } return 0; }",
+    );
+    let out = ontixa(&["mir", f.to_str().unwrap(), "--json"]);
+    assert!(out.status.success());
+    let env = envelope(&out);
+    let mir = &env["result"]["mir"];
+    assert!(mir.is_object(), "mir payload is not an object: {mir}");
+    let text = mir.to_string();
+    assert!(text.contains("\"Goto\""), "no Goto terminator in {text}");
+    assert!(
+        text.contains("\"Branch\""),
+        "no Branch terminator in {text}"
+    );
+    assert!(
+        text.contains("\"Return\""),
+        "no Return terminator in {text}"
+    );
+}
+
 // ---------- ontixad: the persistent daemon ----------
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_ontixad");

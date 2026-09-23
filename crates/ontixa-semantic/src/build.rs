@@ -312,6 +312,14 @@ impl Builder<'_> {
             Ty::Str => "str".into(),
             Ty::Unit => "unit".into(),
             Ty::Struct(d) => self.sym_name(None, self.module.scope.def(d).name),
+            Ty::Array(e) => {
+                // Element labels are plain — `[i32]`, `[P]`, ...
+                let elem = match e.ty() {
+                    Ty::Struct(d) => self.sym_name(None, self.module.scope.def(d).name),
+                    t => t.as_str().to_string(),
+                };
+                format!("[{elem}]")
+            }
             Ty::Poison => "<error>".into(),
         };
         let n = self.g.add_node(NodeKind::Type, label, None);
@@ -332,9 +340,12 @@ impl Builder<'_> {
             HirExprKind::Var(_) => "var",
             HirExprKind::Call { .. } => "call",
             HirExprKind::Field { .. } => "field",
-            HirExprKind::StrLen { .. } => "strlen",
+            HirExprKind::Len { .. } => "len",
             HirExprKind::Index { .. } => "index",
             HirExprKind::Slice { .. } => "slice",
+            HirExprKind::ArrayLit { .. } => "array_lit",
+            HirExprKind::Range { .. } => "range",
+            HirExprKind::For { .. } => "for",
             HirExprKind::Binary { .. } => "binary",
             HirExprKind::Unary { .. } => "unary",
             HirExprKind::If { .. } => "if",
@@ -406,9 +417,40 @@ impl Builder<'_> {
                     }
                 }
             }
-            HirExprKind::StrLen { base } => {
+            HirExprKind::Len { base } => {
                 let bn = self.expr_node(body, tables, base);
                 self.g.add_edge(n, bn, EdgeKind::Contains);
+            }
+            HirExprKind::ArrayLit { elems } => {
+                for (i, e) in elems.iter().enumerate() {
+                    let en = self.expr_node(body, tables, *e);
+                    self.g
+                        .add_edge_attr(n, en, EdgeKind::Contains, "position", json!(i));
+                }
+            }
+            HirExprKind::Range { lo, hi } => {
+                if let Some(l) = lo {
+                    let ln = self.expr_node(body, tables, l);
+                    self.g
+                        .add_edge_attr(n, ln, EdgeKind::Contains, "role", json!("lo"));
+                }
+                if let Some(h) = hi {
+                    let hn = self.expr_node(body, tables, h);
+                    self.g
+                        .add_edge_attr(n, hn, EdgeKind::Contains, "role", json!("hi"));
+                }
+            }
+            HirExprKind::For { var, iter, body: b } => {
+                if let Some(s) = self.symbol_nodes.get(&(body.def, var)) {
+                    let s = *s;
+                    self.g.add_edge(n, s, EdgeKind::Binds);
+                }
+                let it = self.expr_node(body, tables, iter);
+                self.g
+                    .add_edge_attr(n, it, EdgeKind::Contains, "role", json!("iter"));
+                let bn = self.expr_node(body, tables, b);
+                self.g
+                    .add_edge_attr(n, bn, EdgeKind::Contains, "role", json!("body"));
             }
             HirExprKind::Index { base, index } => {
                 let bn = self.expr_node(body, tables, base);

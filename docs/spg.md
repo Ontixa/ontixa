@@ -42,7 +42,7 @@ as JSON; agents and tools consume it without parsing source.
 | `has_field`      | data → field                                   |
 | `has_local`      | function → local                               |
 | `typed_as`       | symbol/expr/stmt → type node                   |
-| `contains`       | parent → child (block→stmt, expr→subexpr)      |
+| `contains`       | parent → child (block→stmt, expr→subexpr; attrs: `position` on array-literal elements, `role` = `lo`/`hi`/`iter`/`body` on ranges and loops) |
 | `calls`          | call expr → callee function                    |
 | `passes`         | call arg expr → callee param (attrs: `position`, `behavior`) — the ownership/memory edge |
 | `reads`          | var expr → referenced symbol                   |

@@ -55,9 +55,60 @@ pub enum TypeRef {
     Unit,
     /// A user `data` type.
     Struct(DefId),
+    /// `[T]` — a homogeneous array. `elem` is flat by construction:
+    /// nested arrays are rejected at resolution.
+    Array {
+        /// The resolved element type.
+        elem: ElemRef,
+    },
     /// Resolution failed — a diagnostic already exists. Poison values
     /// keep downstream passes running without inventing semantics.
     Poison,
+}
+
+/// A resolved array element type — every [`TypeRef`] leaf except
+/// `Unit` (arrays of nothing carry nothing), `Array` (nested arrays
+/// are not supported yet), and `Poison`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "kind")]
+pub enum ElemRef {
+    /// `bool`
+    Bool,
+    /// `i32`
+    I32,
+    /// `i64`
+    I64,
+    /// `u32`
+    U32,
+    /// `u64`
+    U64,
+    /// `f32`
+    F32,
+    /// `f64`
+    F64,
+    /// `str`
+    Str,
+    /// A user `data` type.
+    Struct(DefId),
+}
+
+impl ElemRef {
+    /// The element type for a resolved leaf [`TypeRef`], or `None`
+    /// when `ty` cannot be an element (`unit`, `[_]`, `Poison`).
+    pub fn of(ty: TypeRef) -> Option<ElemRef> {
+        Some(match ty {
+            TypeRef::Bool => ElemRef::Bool,
+            TypeRef::I32 => ElemRef::I32,
+            TypeRef::I64 => ElemRef::I64,
+            TypeRef::U32 => ElemRef::U32,
+            TypeRef::U64 => ElemRef::U64,
+            TypeRef::F32 => ElemRef::F32,
+            TypeRef::F64 => ElemRef::F64,
+            TypeRef::Str => ElemRef::Str,
+            TypeRef::Struct(d) => ElemRef::Struct(d),
+            TypeRef::Unit | TypeRef::Array { .. } | TypeRef::Poison => return None,
+        })
+    }
 }
 
 /// The kind of a symbol in the module symbol table or a body arena.
@@ -384,22 +435,25 @@ pub enum HirExprKind {
         /// Field position index, filled by type checking.
         field: Option<u32>,
     },
-    /// `base.len` on a `str` — a built-in read-only property. The
-    /// type checker rewrites a `Field` node into this kind so
-    /// downstream passes never mistake it for a data projection.
-    StrLen {
-        /// The string expression.
+    /// `base.len` on a `str` or `[T]` — a built-in read-only
+    /// property. The type checker rewrites a `Field` node into this
+    /// kind so downstream passes never mistake it for a data
+    /// projection.
+    Len {
+        /// The string or array expression.
         base: ExprId,
     },
     /// Indexing (`base[index]`); for `str` the index is a character
-    /// position and the result is a one-character `str`.
+    /// position and the result is a one-character `str`; for `[T]`
+    /// it is an element position and the result is a `T`.
     Index {
         /// Indexed expression.
         base: ExprId,
         /// Index expression.
         index: ExprId,
     },
-    /// Slicing (`base[lo..hi]`); either bound may be absent.
+    /// Slicing (`base[lo..hi]`); either bound may be absent. For
+    /// `str` the result is a `str`; for `[T]` a fresh `[T]`.
     Slice {
         /// Sliced expression.
         base: ExprId,
@@ -407,6 +461,32 @@ pub enum HirExprKind {
         lo: Option<ExprId>,
         /// Optional upper bound.
         hi: Option<ExprId>,
+    },
+    /// `[e, ...]` — a homogeneous array literal.
+    ArrayLit {
+        /// Elements in order.
+        elems: Vec<ExprId>,
+    },
+    /// `lo..hi` — an integer range; either bound may be absent.
+    /// Valid only as a `for` iterable — the checker diagnoses every
+    /// other position.
+    Range {
+        /// Optional lower bound (`..hi` starts at 0).
+        lo: Option<ExprId>,
+        /// Optional upper bound (`lo..` is unbounded — rejected).
+        hi: Option<ExprId>,
+    },
+    /// `for x in e { .. }` — iterates `e` (an array or a `Range`),
+    /// binding each element to `var` fresh per iteration. `var` is a
+    /// body-local `Local` symbol, assignable iff written `for mut x`.
+    /// Always `unit`-typed.
+    For {
+        /// The loop variable's body-local symbol.
+        var: SymbolId,
+        /// The iterated expression — a `Range` node or an array value.
+        iter: ExprId,
+        /// The loop body (a `Block` expression).
+        body: ExprId,
     },
     /// Infix operation.
     Binary {
