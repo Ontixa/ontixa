@@ -28,10 +28,10 @@ Codes are a public contract. Never reuse; retire instead.
 | `E_UNTERMINATED_COMMENT`| lex      | unclosed `/*` comment            |
 | `E_UNEXPECTED_CHAR`    | lex       | character with no token role     |
 | `E_DUPLICATE_DEF`      | resolve   | two defs share a name            |
-| `E_UNKNOWN_SYMBOL`     | resolve   | unresolvable identifier          |
+| `E_UNKNOWN_SYMBOL`     | resolve/patch | unresolvable identifier — or a patch's unknown `symbol`/`param`/`use` decl |
 | `E_UNKNOWN_TYPE`       | resolve   | type position names a non-type   |
 | `E_NOT_A_STRUCT`       | types     | field access on non-data         |
-| `E_UNKNOWN_FIELD`      | types     | field the type lacks             |
+| `E_UNKNOWN_FIELD`      | types/patch | field the type lacks — or a patch's unknown `field` |
 | `E_EXTRA_FIELD`        | types     | literal initializes unknown field|
 | `E_DUPLICATE_FIELD`    | resolve   | field name reused                |
 | `E_MISSING_FIELD`      | types     | literal omits a required field   |
@@ -46,9 +46,9 @@ Codes are a public contract. Never reuse; retire instead.
 | `E_BORROW_CONFLICT`    | ownership | overlapping loans, at least one mutable |
 | `E_MOVE_WHILE_BORROWED` | ownership | move of a place under a live loan |
 | `E_AMBIGUOUS_SYMBOL`   | explain/rename/patch | symbol query matched >1 symbol |
-| `E_UNKNOWN_MODULE`     | resolve   | `use`/path names an unregistered module |
+| `E_UNKNOWN_MODULE`     | resolve/patch | `use`/path/`module` names an unregistered or unreachable module |
 | `E_INVALID_NAME`       | rename    | replacement is not a valid identifier |
-| `E_NAME_CONFLICT`      | rename    | new name collides with an existing binding |
+| `E_NAME_CONFLICT`      | rename/patch | new name collides with an existing binding (incl. `rename_param`'s `to`) |
 | `E_RENAME_REJECTED`    | rename    | shadow compile surfaced new errors, or a reference rebinds |
 | `E_MALFORMED_PATCH`    | patch     | spec shape/bounds invalid, or edits overlap |
 | `E_PATCH_REJECTED`     | patch     | shadow compile surfaced new errors — nothing applied |

@@ -989,6 +989,139 @@ fn daemon_patch_previews_applies_and_guards_stale() {
     assert_eq!(dep, PATCH_DEP);
 }
 
+const PATCH_DATA_MAIN: &str =
+    "use math;\nfn main() -> i32 { let p = math::P { x: 1 }; return math::double(p.x); }\n";
+const PATCH_DATA_DEP: &str = "data P { x: i32; }\nfn double(x: i32) -> i32 { return x * 2; }\n";
+
+/// The wider op vocabulary — `add_use`, `rename_param`, `add_field`
+/// — composes in one spec and applies through the same transaction.
+#[test]
+fn patch_wider_ops_apply_and_still_run() {
+    let main = ws_fixture("patchwide", PATCH_DATA_MAIN, PATCH_DATA_DEP);
+    let spec = r#"{"ops": [
+        {"op": "add_use", "path": "math::double", "as": "dbl"},
+        {"op": "rename_param", "symbol": "math::double", "param": "x", "to": "n"},
+        {"op": "add_field", "symbol": "math::P", "field": "y", "ty": "i32"},
+        {"op": "replace_body", "symbol": "main",
+         "body": "{ let p = math::P { x: 1, y: 2 }; return dbl(p.x) + p.y; }"}
+    ]}"#;
+    let out = ontixa(&["patch", main.to_str().unwrap(), spec, "--apply", "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true, "{d}");
+    assert_eq!(d["result"]["applied"], true);
+    assert_eq!(d["result"]["ops_applied"], 4);
+    // The `use` landed after the existing one, on its own line.
+    let src = std::fs::read_to_string(&main).unwrap();
+    assert!(
+        src.starts_with("use math;\nuse math::double as dbl;\n"),
+        "{src}"
+    );
+    assert!(src.contains("dbl(p.x)"), "{src}");
+    let math = std::fs::read_to_string(main.parent().unwrap().join("math.ixa")).unwrap();
+    assert!(math.contains("fn double(n: i32)"), "{math}");
+    assert!(math.contains("data P { x: i32; y: i32; }"), "{math}");
+    // dbl(1) = 2, plus p.y = 2 → 4.
+    let run = ontixa(&["run", main.to_str().unwrap(), "--json"]);
+    assert_eq!(envelope(&run)["result"]["value"], 4);
+}
+
+/// Malformed member-op specs name their rejection channel exactly;
+/// semantically impossible ones surface the shadow compile.
+#[test]
+fn patch_member_op_specs_reject_cleanly() {
+    let main = ws_fixture("patchspec", PATCH_DATA_MAIN, PATCH_DATA_DEP);
+    let reject = |spec: &str| {
+        let out = ontixa(&["patch", main.to_str().unwrap(), spec, "--apply", "--json"]);
+        let d = envelope(&out);
+        assert_eq!(d["success"], false, "{d}");
+        d["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["code"].as_str().map(String::from))
+            .collect::<Vec<_>>()
+    };
+    // Missing required fields and ill-formed payloads are malformed.
+    for spec in [
+        r#"{"ops": [{"op": "rename_param", "symbol": "math::double", "param": "x"}]}"#,
+        r#"{"ops": [{"op": "set_ret_type", "symbol": "math::double"}]}"#,
+        r#"{"ops": [{"op": "add_use", "path": "math as m"}]}"#,
+        r#"{"ops": [{"op": "add_field", "symbol": "math::P", "field": "y"}]}"#,
+        r#"{"ops": [{"op": "set_param_type", "symbol": "math::double", "param": "x", "ty": "i32 junk"}]}"#,
+    ] {
+        let codes = reject(spec);
+        assert!(
+            codes.contains(&"E_MALFORMED_PATCH".to_string()),
+            "{spec}: {codes:?}"
+        );
+    }
+    // `"ty": null` is the deliberate remove form — dropping `-> i32`
+    // leaves `return x * 2` checking against `unit` → shadow reject.
+    let codes =
+        reject(r#"{"ops": [{"op": "set_ret_type", "symbol": "math::double", "ty": null}]}"#);
+    assert!(codes.contains(&"E_PATCH_REJECTED".to_string()), "{codes:?}");
+    // A field op on a `fn` target is the wrong kind.
+    let codes = reject(
+        r#"{"ops": [{"op": "rename_field", "symbol": "math::double", "field": "x", "to": "y"}]}"#,
+    );
+    assert!(
+        codes.contains(&"E_UNSUPPORTED_TARGET".to_string()),
+        "{codes:?}"
+    );
+    // Unknown field and a `use` whose removal dangles a reference.
+    let codes =
+        reject(r#"{"ops": [{"op": "remove_field", "symbol": "math::P", "field": "nope"}]}"#);
+    assert!(codes.contains(&"E_UNKNOWN_FIELD".to_string()), "{codes:?}");
+    let codes = reject(r#"{"ops": [{"op": "remove_use", "path": "math"}]}"#);
+    assert!(codes.contains(&"E_PATCH_REJECTED".to_string()), "{codes:?}");
+    // Nothing was written.
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), PATCH_DATA_MAIN);
+    let math = std::fs::read_to_string(main.parent().unwrap().join("math.ixa")).unwrap();
+    assert_eq!(math, PATCH_DATA_DEP);
+}
+
+/// The daemon's `patch` route speaks the wider vocabulary through
+/// the same shared parser — here `rename_field` spans both files.
+#[test]
+fn daemon_patch_member_ops_span_files() {
+    let main = ws_fixture("daemonwide", PATCH_DATA_MAIN, PATCH_DATA_DEP);
+    let p = main.to_str().unwrap();
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "patch", "path": p, "ops": [
+            {"op": "rename_field", "symbol": "math::P", "field": "x", "to": "v"}
+        ]}),
+    ]);
+    assert_eq!(rs[1]["success"], true, "{:?}", rs[1]);
+    assert_eq!(rs[1]["result"]["applied"], false);
+    let edits = rs[1]["result"]["edits"].as_array().unwrap();
+    // Decl in math.ixa + `x:` literal + `p.x` access in main.ixa.
+    assert_eq!(edits.len(), 3, "{edits:?}");
+    let rev = rs[1]["result"]["revision"].as_u64().unwrap();
+
+    let rs = daemon(&[
+        serde_json::json!({"op": "open", "path": p}),
+        serde_json::json!({"op": "patch", "path": p, "apply": true, "revision": rev, "ops": [
+            {"op": "rename_field", "symbol": "math::P", "field": "x", "to": "v"}
+        ]}),
+    ]);
+    assert_eq!(rs[1]["success"], true, "{:?}", rs[1]);
+    let srcs = rs[1]["result"]["new_sources"].as_array().unwrap();
+    assert!(
+        srcs.iter()
+            .any(|s| s["text"].as_str().unwrap().contains("data P { v: i32; }")),
+        "{srcs:?}"
+    );
+    assert!(
+        srcs.iter()
+            .any(|s| s["text"].as_str().unwrap().contains("p.v")),
+        "{srcs:?}"
+    );
+    // Disk untouched — the daemon only mutates in-memory sources.
+    let math = std::fs::read_to_string(main.parent().unwrap().join("math.ixa")).unwrap();
+    assert_eq!(math, PATCH_DATA_DEP);
+}
+
 // ---------- canonical formatting ----------
 
 const MESSY: &str = "fn f( x:i32)->i32{return x;}";

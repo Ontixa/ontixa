@@ -136,7 +136,16 @@ revision-guarded atomic apply), same envelopes, same persistence.
   {"op": "replace_body", "symbol": "m::f", "body": "{ return x + 1; }"},
   {"op": "remove_def",   "symbol": "m::dead"},
   {"op": "add_def",      "module": "m",
-   "text": "fn g() -> i32 { return 1; }"}
+   "text": "fn g() -> i32 { return 1; }"},
+  {"op": "rename_param", "symbol": "m::f", "param": "x", "to": "acc"},
+  {"op": "set_param_type", "symbol": "m::f", "param": "x", "ty": "i64"},
+  {"op": "set_ret_type", "symbol": "m::f", "ty": "i32"},
+  {"op": "add_use",    "module": "m", "path": "dep::T", "as": "T2"},
+  {"op": "remove_use", "module": "m", "path": "dep"},
+  {"op": "add_field",  "symbol": "m::D", "field": "c", "ty": "i32"},
+  {"op": "remove_field", "symbol": "m::D", "field": "dead"},
+  {"op": "rename_field", "symbol": "m::D", "field": "a", "to": "b"},
+  {"op": "set_field_type", "symbol": "m::D", "field": "a", "ty": "i64"}
 ]}
 ```
 
@@ -148,24 +157,55 @@ revision-guarded atomic apply), same envelopes, same persistence.
   `"apply":true,"revision":R` commits in memory and returns
   `new_sources` for the client to persist.
 
-Op semantics: `replace_body` splices a `fn`'s `{ ... }` block
-(signature untouched), `remove_def` deletes a top-level item,
-`add_def` appends one item to a reachable module's file. Targets
-resolve through the workspace scope exactly like rename targets.
+Op semantics — every `symbol` resolves through the workspace scope
+exactly like a rename target:
+
+- **Item ops** (ADR-0016): `replace_body` splices a `fn`'s `{ ... }`
+  block (signature untouched), `remove_def` deletes a top-level
+  `fn`/`data`, `add_def` appends one item to a reachable module's
+  file.
+- **Signature ops**: `rename_param` rewrites a parameter's decl
+  token plus every body-local site bound to it (`Var` refs and
+  assign bases — the same site rule as positional rename) and
+  refuses a `to` that is already bound in that body
+  (`E_NAME_CONFLICT`); `set_param_type` replaces the parameter's
+  declared type; `set_ret_type` adds, replaces, or removes the
+  `-> T` annotation (`"ty": null` is the remove form). Name and
+  body are preserved; callers and bodies that no longer type-check
+  fail the shadow compile.
+- **`use` ops**: `add_use` splices `use path [as alias];` onto the
+  line after the file's last `use` (or above the first item, below
+  a leading comment banner); `remove_use` deletes the declaration
+  whose path **and** alias match — omitting `as` matches only an
+  unaliased decl. `path` is `m` or `m::x` and never carries `as`.
+  `add_use` can pull a registered-but-unreachable file into scope,
+  exactly like writing the `use` by hand.
+- **Field ops**: `add_field` appends `field: ty;` after the last
+  field, copying the file's separator convention (it never invents
+  a literal value — construct sites needing the field must be fixed
+  by other ops in the same patch); `remove_field` deletes the field
+  and its leading-trivia seam (a comment in that seam refuses the
+  op); `rename_field` rewrites the decl plus every resolved
+  `base.field` access, `D { field: v }` literal name, and
+  `place.field = v` projection in the workspace; `set_field_type`
+  replaces the declared type.
 
 Rejection codes, in pipeline order: `E_MALFORMED_PATCH` (spec shape,
 payload bounds, overlapping edits), `E_BASELINE_ERRORS`,
 `E_UNKNOWN_SYMBOL` / `E_AMBIGUOUS_SYMBOL` / `E_UNKNOWN_MODULE` /
-`E_UNSUPPORTED_TARGET` (resolution — a comment between signature and
-`{` also refuses), `E_PATCH_REJECTED` (shadow compile surfaced new
-errors, carrying them), `E_STALE_REVISION` and `E_PLAN_MISMATCH` at
-apply. Every rejection writes nothing.
+`E_UNKNOWN_FIELD` / `E_UNSUPPORTED_TARGET` / `E_NAME_CONFLICT`
+(resolution — a comment between signature and `{`, inside `-> T`,
+or in a removed field's seam also refuses), `E_PATCH_REJECTED`
+(shadow compile surfaced new errors, carrying them),
+`E_STALE_REVISION` and `E_PLAN_MISMATCH` at apply. Every rejection
+writes nothing.
 
 Honest limits: a patch guarantees *compile integrity*, not semantic
 preservation — there is no binding-correspondence check (the patch
-is meant to change behavior). Ops cannot touch `use` declarations,
-reorder items, edit comments, or create/delete files; layout seams
-are normalized minimally and `ontixa fmt` owns canonical form.
+is meant to change behavior). Ops cannot reorder items, edit
+comments, or create/delete files; `use` edits are whole-declaration
+splices, not arbitrary header edits; layout seams are normalized
+minimally and `ontixa fmt` owns canonical form.
 
 ## Planned (roadmap)
 
