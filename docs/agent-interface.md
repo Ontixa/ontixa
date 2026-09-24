@@ -86,8 +86,13 @@ Files provide modules named by their stem; `use m;` / `use m::x [as
 y]` / `m::x` resolve through the workspace's per-file envs — never
 text matching. `check`/`explain`/`graph`/`run` on a root file follow
 `use` edges across `.ixa` siblings; diagnostics are file-tagged and
-render against their own `SourceFile`. `DefKey(root:file:name)` is
-the cross-revision symbol identity an agent should hold.
+render against their own `SourceFile`. `explain` carries the same
+attribution: every entry in `result.defs`, every `symbol` record, and
+every `details.candidates` entry of `E_AMBIGUOUS_SYMBOL` names the
+`file` it was resolved in (the same display tag diagnostics use),
+and human output groups the def listing per file.
+`DefKey(root:file:name)` is the cross-revision symbol identity an
+agent should hold.
 
 Renames are transactions, not edits (ADR-0014, ADR-0015):
 

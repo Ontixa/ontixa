@@ -215,11 +215,11 @@ fn handle(s: &mut Session, req: &Json) -> Json {
             Ok(f) => {
                 let (mut a, ev) = compile(s, f);
                 a.diags.sort();
-                let (mut result, extra) = explain_result(&a, req["symbol"].as_str(), path);
+                let sfs = s.source_files();
+                let (mut result, extra) = explain_result(&a, &sfs, req["symbol"].as_str(), path);
                 if let Json::Object(m) = &mut result {
                     m.insert("evaluated".into(), ev);
                 }
-                let sfs = s.source_files();
                 let mut e = Envelope::new("explain")
                     .diagnostics(&a.diags, &sfs)
                     .result(result);
