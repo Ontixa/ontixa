@@ -150,6 +150,7 @@ impl Checker<'_> {
             Ty::F32 => "f32".into(),
             Ty::F64 => "f64".into(),
             Ty::Str => "str".into(),
+            Ty::Char => "char".into(),
             Ty::Unit => "unit".into(),
             Ty::Struct(d) => self
                 .interner
@@ -556,6 +557,7 @@ impl Checker<'_> {
                 _ => Ty::F64,
             },
             LitValue::Str(_) => Ty::Str,
+            LitValue::Char(_) => Ty::Char,
             LitValue::Bool(_) => Ty::Bool,
         }
     }
@@ -879,7 +881,9 @@ impl Checker<'_> {
                         .primary(span),
                     );
                     Ty::Poison
-                } else if l != Ty::Poison && !(l.is_numeric() || l == Ty::Bool || l == Ty::Str) {
+                } else if l != Ty::Poison
+                    && !(l.is_numeric() || l == Ty::Bool || l == Ty::Str || l == Ty::Char)
+                {
                     self.diags.push(
                         Diagnostic::error(
                             Code::UnsupportedOperation,
@@ -893,8 +897,9 @@ impl Checker<'_> {
                 }
             }
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                if (l.is_numeric() || l == Ty::Str) && l.compatible(r) {
-                    // Numeric ordering, or lexicographic `str` ordering.
+                if (l.is_numeric() || l == Ty::Str || l == Ty::Char) && l.compatible(r) {
+                    // Numeric ordering, lexicographic `str` ordering, or
+                    // `char` ordering by Unicode scalar value.
                     Ty::Bool
                 } else if l == Ty::Poison || r == Ty::Poison {
                     Ty::Poison

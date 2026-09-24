@@ -513,6 +513,8 @@ pub enum Literal {
     Float(f64),
     /// String literal (escapes decoded).
     Str(String),
+    /// Character literal (escapes decoded; exactly one scalar).
+    Char(char),
     /// Boolean literal.
     Bool(bool),
 }

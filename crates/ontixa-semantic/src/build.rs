@@ -337,6 +337,7 @@ impl Builder<'_> {
             Ty::F32 => "f32".into(),
             Ty::F64 => "f64".into(),
             Ty::Str => "str".into(),
+            Ty::Char => "char".into(),
             Ty::Unit => "unit".into(),
             Ty::Struct(d) => self.sym_name(None, self.module.scope.def(d).name),
             Ty::Array(e) => {

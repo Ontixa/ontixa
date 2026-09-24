@@ -560,6 +560,7 @@ impl Parser<'_> {
             SyntaxKind::INT_NUMBER
                 | SyntaxKind::FLOAT_NUMBER
                 | SyntaxKind::STRING
+                | SyntaxKind::CHAR
                 | SyntaxKind::TRUE_KW
                 | SyntaxKind::FALSE_KW
                 | SyntaxKind::IDENT
@@ -664,6 +665,7 @@ impl Parser<'_> {
             SyntaxKind::INT_NUMBER
             | SyntaxKind::FLOAT_NUMBER
             | SyntaxKind::STRING
+            | SyntaxKind::CHAR
             | SyntaxKind::TRUE_KW
             | SyntaxKind::FALSE_KW => {
                 self.start(SyntaxKind::LITERAL);

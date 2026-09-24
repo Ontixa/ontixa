@@ -53,6 +53,8 @@ pub enum Const {
     Float(f64),
     /// String.
     Str(String),
+    /// Character.
+    Char(char),
     /// Boolean.
     Bool(bool),
     /// Unit value.

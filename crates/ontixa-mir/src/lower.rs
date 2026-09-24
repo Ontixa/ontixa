@@ -306,6 +306,7 @@ impl FnLowerer<'_> {
                 ontixa_hir::Literal::Int(v) => Const::Int(v),
                 ontixa_hir::Literal::Float(v) => Const::Float(v),
                 ontixa_hir::Literal::Str(s) => Const::Str(s),
+                ontixa_hir::Literal::Char(c) => Const::Char(c),
                 ontixa_hir::Literal::Bool(b) => Const::Bool(b),
             }),
             HirExprKind::Var(_) | HirExprKind::Field { .. } => Operand::Place(self.eval_place(id)),

@@ -38,6 +38,8 @@ pub enum Ty {
     F64,
     /// `str`
     Str,
+    /// `char` — a single Unicode scalar.
+    Char,
     /// `unit`
     Unit,
     /// A user `data` type.
@@ -72,6 +74,8 @@ pub enum ElemTy {
     F64,
     /// `str`
     Str,
+    /// `char` — a single Unicode scalar.
+    Char,
     /// A user `data` type.
     Struct(DefId),
 }
@@ -88,6 +92,7 @@ impl ElemTy {
             ElemTy::F32 => Ty::F32,
             ElemTy::F64 => Ty::F64,
             ElemTy::Str => Ty::Str,
+            ElemTy::Char => Ty::Char,
             ElemTy::Struct(d) => Ty::Struct(d),
         }
     }
@@ -103,6 +108,7 @@ impl ElemTy {
             ElemRef::F32 => ElemTy::F32,
             ElemRef::F64 => ElemTy::F64,
             ElemRef::Str => ElemTy::Str,
+            ElemRef::Char => ElemTy::Char,
             ElemRef::Struct(d) => ElemTy::Struct(d),
         }
     }
@@ -120,6 +126,7 @@ impl Ty {
             TypeRef::F32 => Ty::F32,
             TypeRef::F64 => Ty::F64,
             TypeRef::Str => Ty::Str,
+            TypeRef::Char => Ty::Char,
             TypeRef::Unit => Ty::Unit,
             TypeRef::Struct(d) => Ty::Struct(d),
             TypeRef::Array { elem } => Ty::Array(ElemTy::from_ref(elem)),
@@ -139,6 +146,7 @@ impl Ty {
             Ty::F32 => ElemTy::F32,
             Ty::F64 => ElemTy::F64,
             Ty::Str => ElemTy::Str,
+            Ty::Char => ElemTy::Char,
             Ty::Struct(d) => ElemTy::Struct(d),
             Ty::Unit | Ty::Array(_) | Ty::Poison => return None,
         })
@@ -183,6 +191,7 @@ impl Ty {
             Ty::F32 => "f32",
             Ty::F64 => "f64",
             Ty::Str => "str",
+            Ty::Char => "char",
             Ty::Unit => "unit",
             Ty::Struct(_) => "struct",
             Ty::Array(_) => "array",
