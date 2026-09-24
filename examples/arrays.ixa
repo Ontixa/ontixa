@@ -1,0 +1,38 @@
+// Arrays and `for` loops (M3).
+//
+//   [e, ...]         homogeneous array literal; element type inferred
+//   [T]              element-type annotation, required for `[]`
+//   a.len            element count (i32)
+//   a[i]             the i-th element; out-of-bounds traps
+//   a[lo..hi]        slice into a fresh array — consumes the base
+//                    (arrays are never Copy; iterate first, slice last)
+//   for x in a       element iteration over a snapshot of the iterable
+//   for i in lo..hi  counted range; a literal bound adopts the other
+//                    bound's integer type
+//   for mut x        mutable loop variable
+//
+// Unbounded ranges are rejected; there is no `break` yet.
+//
+// `ontixa run examples/arrays.ixa` prints 42.
+fn main() -> i32 {
+    let nums = [4, 1, 5];
+    let empty: [i32] = []; // annotation required on empty literals
+    let first = nums[0]; // 4
+
+    let mut sum = empty.len; // 0
+    for x in nums {
+        sum = sum + x; // +4+1+5
+    }
+    for i in 0..first {
+        sum = sum + i; // +0+1+2+3
+    }
+    for mut x in nums {
+        x = x * 2; // loop variable mutable; iterable untouched
+        sum = sum + x; // +8+2+10
+    }
+    let tail = nums[1..]; // [1, 5] — slicing moves `nums`, so slice last
+    for x in tail {
+        sum = sum + x; // +1+5
+    }
+    return sum;
+}
