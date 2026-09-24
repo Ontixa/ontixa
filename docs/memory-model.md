@@ -73,7 +73,16 @@ fn bump(mut p: Point) { ... }    // mutable parameter
 `return p.x` where `x: i32` only *reads* `p` — a `Copy` field carries
 no ownership, so `p` stays `borrow`. When the field type is not
 `Copy`, `p` is the carrier and taints accordingly. Struct literals
-propagate the same way field-by-field.
+propagate the same way field-by-field. Variant construction
+(`Opt::Some(v)`) moves `v` like a call argument. `match` **borrows**
+its scrutinee — it never consumes — and each pattern binding is a
+fresh owner holding an independent copy of the payload (or, for a
+bare-identifier arm, of the whole scrutinee). Carriers propagate
+through non-`Copy` binds, so `match o { Opt::Some(v) => return v }`
+taints the scrutinee's source for escape when `v` is not `Copy` —
+a `Copy` payload bind is a pure read, like a `Copy` field. Arm
+bindings are scoped to their arm and post-match state merges only
+the arms that can fall through.
 
 ## Places, loans, and regions
 

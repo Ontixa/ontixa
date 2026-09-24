@@ -59,6 +59,8 @@ Codes are a public contract. Never reuse; retire instead.
 | `E_MISSING_RETURN`     | types     | non-unit fn can fall through     |
 | `E_LITERAL_OVERFLOW`   | types     | literal exceeds its type         |
 | `E_UNSUPPORTED_OP`     | types     | op not defined for operand types |
+| `E_NON_EXHAUSTIVE`     | types     | `match` misses variants and has no catch-all (`details.missing` lists them) |
+| `W_UNREACHABLE_ARM`    | types     | match arm shadowed by earlier coverage |
 | `I_INTERNAL`           | any       | compiler bug (ICE); exit 3       |
 
 ## JSON schema (version 1)

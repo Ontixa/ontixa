@@ -341,3 +341,126 @@ fn bare_name_finds_unimported_def() {
     assert!(new_text(&plan, 1).contains("fn h()"));
     assert!(new_text(&plan, 0).contains("dep::h()"));
 }
+
+// ---------- enum variants and `match` ----------
+
+/// Renaming an enum `data` rewrites the *data* segment of every
+/// `T::V` constructor and pattern path — the variant names stay.
+#[test]
+fn data_rename_covers_variant_constructor_and_pattern_sites() {
+    let mut db = ws(&[
+        (
+            "main",
+            "use dep::Opt;\n\
+             fn main() -> i32 {\n\
+             \x20   let o = Opt::Some(1);\n\
+             \x20   return match o { Opt::Some(v) => v, Opt::None => 0 };\n\
+             }\n",
+        ),
+        ("dep", "data Opt { Some(i32); None; }\n"),
+    ]);
+    let plan = db.plan_rename(0, "dep::Opt", "Maybe").unwrap();
+    // decl + `use dep::Opt` + `Opt::Some(1)` + two pattern paths.
+    assert!(new_text(&plan, 1).contains("data Maybe {"));
+    assert!(new_text(&plan, 0).contains("use dep::Maybe;"));
+    assert!(new_text(&plan, 0).contains("let o = Maybe::Some(1);"));
+    assert!(new_text(&plan, 0).contains("Maybe::Some(v) => v, Maybe::None => 0"));
+    // The variant names themselves are never sites.
+    assert!(!new_text(&plan, 0).contains("Maybe::Some(val)"));
+}
+
+/// `m::T::V` — the data segment rewrites inside a module-qualified
+/// variant path.
+#[test]
+fn data_rename_covers_module_qualified_variant_sites() {
+    let mut db = ws(&[
+        (
+            "main",
+            "use dep;\n\
+             fn main() -> i32 {\n\
+             \x20   let o = dep::Opt::Some(1);\n\
+             \x20   return match o { dep::Opt::Some(v) => v, dep::Opt::None => 0 };\n\
+             }\n",
+        ),
+        ("dep", "data Opt { Some(i32); None; }\n"),
+    ]);
+    let plan = db.plan_rename(0, "dep::Opt", "Maybe").unwrap();
+    assert!(new_text(&plan, 0).contains("dep::Maybe::Some(1)"));
+    assert!(new_text(&plan, 0).contains("dep::Maybe::Some(v) => v, dep::Maybe::None => 0"));
+}
+
+/// A variant's payload type paths are rename sites like any other
+/// type position in a `data` declaration.
+#[test]
+fn data_rename_covers_variant_payload_types() {
+    let mut db = ws(&[
+        (
+            "main",
+            "use dep;\n\
+             fn main() -> i32 {\n\
+             \x20   let o = dep::Opt::Some(dep::P { x: 1 });\n\
+             \x20   return match o { dep::Opt::Some(p) => p.x, dep::Opt::None => 0 };\n\
+             }\n",
+        ),
+        ("dep", "data P { x: i32; }\ndata Opt { Some(P); None; }\n"),
+    ]);
+    let plan = db.plan_rename(0, "dep::P", "Point").unwrap();
+    assert!(new_text(&plan, 1).contains("data Point {"));
+    assert!(
+        new_text(&plan, 1).contains("Some(Point)"),
+        "payload type should rewrite: {}",
+        new_text(&plan, 1)
+    );
+    assert!(new_text(&plan, 0).contains("dep::Point { x: 1 }"));
+    // `Opt` sites untouched.
+    assert!(new_text(&plan, 0).contains("dep::Opt::Some"));
+}
+
+/// Renaming a data def keeps `use m::T as U` aliases stable — the
+/// variant path through the alias does not rewrite.
+#[test]
+fn aliased_data_import_keeps_variant_paths() {
+    let mut db = ws(&[
+        (
+            "main",
+            "use dep::Opt as O;\n\
+             fn main() -> i32 {\n\
+             \x20   let o = O::Some(1);\n\
+             \x20   return match o { O::Some(v) => v, O::None => 0 };\n\
+             }\n",
+        ),
+        ("dep", "data Opt { Some(i32); None; }\n"),
+    ]);
+    let plan = db.plan_rename(0, "dep::Opt", "Maybe").unwrap();
+    // decl + `use` member segment — the alias `O` and `O::V` paths
+    // stay exactly as written.
+    assert!(new_text(&plan, 0).contains("use dep::Maybe as O;"));
+    assert!(new_text(&plan, 0).contains("let o = O::Some(1);"));
+    assert!(new_text(&plan, 0).contains("O::Some(v) => v, O::None => 0"));
+}
+
+/// `dep::Opt::Some` is a variant path and `dep::double` a call —
+/// renaming `double` edits only the call member, never the variant
+/// path's `Opt`/`Some` segments.
+#[test]
+fn variant_paths_do_not_confuse_fn_rename() {
+    let mut db = ws(&[
+        (
+            "main",
+            "use dep;\n\
+             fn main() -> i32 {\n\
+             \x20   let o = dep::Opt::Some(1);\n\
+             \x20   return match o { dep::Opt::Some(v) => v, dep::Opt::None => dep::double(0) };\n\
+             }\n",
+        ),
+        (
+            "dep",
+            "data Opt { Some(i32); None; }\n\
+             fn double(x: i32) -> i32 { return x * 2; }\n",
+        ),
+    ]);
+    let plan = db.plan_rename(0, "dep::double", "twice").unwrap();
+    assert!(new_text(&plan, 0).contains("dep::twice(0)"));
+    assert!(new_text(&plan, 0).contains("dep::Opt::Some(1)"));
+    assert!(new_text(&plan, 0).contains("dep::Opt::Some(v) => v, dep::Opt::None"));
+}

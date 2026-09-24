@@ -34,9 +34,9 @@
 
 use std::sync::Arc;
 
-use ontixa_ast::{AstModule, Expr, Item, Path, Stmt};
+use ontixa_ast::{AstModule, Expr, Item, Path, Pattern, Stmt};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
-use ontixa_hir::{FileEnv, HirBody, HirExprKind, HirStmt, ModuleScope};
+use ontixa_hir::{FileEnv, HirBody, HirExprKind, HirPat, HirStmt, ModuleScope};
 use ontixa_source::{DefId, DefKey, FileId, InternId, Interner, Span, SymbolId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -777,8 +777,26 @@ fn binding_seq(body: &HirBody) -> Vec<Binding> {
     for e in &body.exprs {
         match &e.kind {
             HirExprKind::Var(s) => seq.push(Binding::Local(*s)),
-            HirExprKind::Call { def, .. } | HirExprKind::StructLit { def, .. } => {
+            HirExprKind::Call { def, .. }
+            | HirExprKind::StructLit { def, .. }
+            | HirExprKind::VariantLit { def, .. } => {
                 seq.push(Binding::Def(*def));
+            }
+            HirExprKind::Match { arms, .. } => {
+                for a in arms {
+                    match &a.pat {
+                        HirPat::Variant { def, binds, .. } => {
+                            seq.push(Binding::Def(*def));
+                            for b in binds.iter().flatten() {
+                                seq.push(Binding::Local(*b));
+                            }
+                        }
+                        HirPat::Bind { sym: Some(s), .. } => {
+                            seq.push(Binding::Local(*s));
+                        }
+                        _ => {}
+                    }
+                }
             }
             HirExprKind::Block { stmts, .. } => {
                 for s in stmts.iter() {
@@ -1229,6 +1247,13 @@ impl<'a> Scan<'a> {
                             self.site(path);
                         }
                     }
+                    for v in &d.variants {
+                        for ty in &v.payload {
+                            for path in ty.paths() {
+                                self.site(path);
+                            }
+                        }
+                    }
                 }
                 Item::Fn(f) => {
                     for p in &f.params {
@@ -1246,6 +1271,80 @@ impl<'a> Scan<'a> {
             }
         }
         self.edits
+    }
+
+    /// Whether `path` resolves to any def through the file env —
+    /// the `path_def` half of the caller's resolution. Lowering
+    /// tries `path_def` before `resolve_variant`, so a `T::V` that
+    /// also parses as `module::member` is never a variant site.
+    fn path_resolves(&self, path: &Path) -> bool {
+        match path.segs.as_slice() {
+            [one] => {
+                let id = interner_lookup(self.interner, &one.name);
+                self.env.fns.contains_key(&id)
+                    || self.env.datas.contains_key(&id)
+                    || self.env.imports.contains_key(&id)
+            }
+            [module, member] => self
+                .env
+                .modules
+                .get(&interner_lookup(self.interner, &module.name))
+                .and_then(|&mf| self.scope.env(mf))
+                .is_some_and(|e| {
+                    let mid = interner_lookup(self.interner, &member.name);
+                    e.fns.contains_key(&mid) || e.datas.contains_key(&mid)
+                }),
+            _ => false,
+        }
+    }
+
+    /// Records an edit when `path` is a variant path `T::V` /
+    /// `m::T::V` whose data segment resolves to the target — the
+    /// variant name itself is never the rename site (a data rename
+    /// rewrites `T`, not `V`). `check_path_def` mirrors lowering
+    /// precedence for expression paths; patterns resolve variants
+    /// directly, so their callers pass `false`.
+    fn variant_site(&mut self, path: &Path, check_path_def: bool) {
+        let segs = path.segs.as_slice();
+        let [.., data_seg, variant_seg] = segs else {
+            return;
+        };
+        if check_path_def && self.path_resolves(path) {
+            return;
+        }
+        let data_id = interner_lookup(self.interner, &data_seg.name);
+        let data_def = if segs.len() == 2 {
+            match self.env.datas.get(&data_id).copied() {
+                Some(d) => Some(d),
+                None if self.unaliased.contains(&data_id) => {
+                    self.env.imports.get(&data_id).copied()
+                }
+                None => None,
+            }
+        } else if segs.len() == 3 {
+            self.env
+                .modules
+                .get(&interner_lookup(self.interner, &segs[0].name))
+                .and_then(|&mf| self.scope.env(mf))
+                .and_then(|e| e.datas.get(&data_id))
+                .copied()
+        } else {
+            None
+        };
+        let Some(data_def) = data_def else { return };
+        if data_def != self.target {
+            return;
+        }
+        // The tail must name a variant of this data — otherwise the
+        // path was never a variant reference.
+        let vid = interner_lookup(self.interner, &variant_seg.name);
+        let is_variant = self
+            .scope
+            .data_shape(data_def)
+            .is_some_and(|s| s.variant_index.contains_key(&vid));
+        if is_variant {
+            self.edit(data_seg.span);
+        }
     }
 
     /// Records an edit when `path`'s final segment resolves to the
@@ -1329,6 +1428,9 @@ impl<'a> Scan<'a> {
         match expr {
             Expr::Call { callee, args, .. } => {
                 self.site(callee);
+                // `T::V(args)` is a variant constructor when
+                // `path_def` fails — the `T` segment is the site.
+                self.variant_site(callee, true);
                 for a in args {
                     self.expr(a);
                 }
@@ -1339,7 +1441,25 @@ impl<'a> Scan<'a> {
                     self.expr(&f.value);
                 }
             }
-            Expr::Path { path } => self.site(path),
+            Expr::Path { path } => {
+                self.site(path);
+                // A bare `T::V` unit variant — same rule as `Call`.
+                self.variant_site(path, true);
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr(scrutinee);
+                for arm in arms {
+                    // Pattern paths resolve variants directly (no
+                    // `path_def` precedence); payload binds are
+                    // body-local names — never def sites.
+                    if let Pattern::Variant { path, .. } = &arm.pat {
+                        self.variant_site(path, false);
+                    }
+                    self.expr(&arm.body);
+                }
+            }
             Expr::Field { base, .. } => self.expr(base),
             Expr::Index { base, index, .. } => {
                 self.expr(base);

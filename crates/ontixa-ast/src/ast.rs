@@ -100,18 +100,22 @@ impl Item {
     }
 }
 
-/// A `data` declaration.
+/// A `data` declaration — either a record (`fields`) or an enum
+/// (`variants`); the parser reports mixing, so at most one is
+/// populated for valid source.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DataDecl {
     /// Declared name.
     pub name: Ident,
-    /// Fields in declaration order.
+    /// Record fields in declaration order.
     pub fields: Vec<Field>,
+    /// Enum variants in declaration order.
+    pub variants: Vec<Variant>,
     /// Span of the whole declaration.
     pub span: Span,
 }
 
-/// One field inside a `data` declaration.
+/// One `name: Type;` field inside a record `data` declaration.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Field {
     /// Field name.
@@ -119,6 +123,18 @@ pub struct Field {
     /// Declared type.
     pub ty: TypeExpr,
     /// Span of the field entry.
+    pub span: Span,
+}
+
+/// One `Name(T, ..)` / `Name` variant inside an enum `data`
+/// declaration. A unit variant has an empty `payload`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Variant {
+    /// Variant name.
+    pub name: Ident,
+    /// Payload element types in order.
+    pub payload: Vec<TypeExpr>,
+    /// Span of the variant entry.
     pub span: Span,
 }
 
@@ -254,6 +270,39 @@ pub enum Stmt {
     },
 }
 
+/// One `pat => expr` arm of a `match`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MatchArm {
+    /// The pattern guarding the arm.
+    pub pat: Pattern,
+    /// The arm's value expression.
+    pub body: Expr,
+    /// Span covering `pat => expr`.
+    pub span: Span,
+}
+
+/// A match pattern.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind")]
+pub enum Pattern {
+    /// `x` binds the whole scrutinee; `_` ignores it (wildcard).
+    Bind {
+        /// The bound name — `"_"` marks a wildcard.
+        name: Ident,
+    },
+    /// `T::V`, `T::V(b, ..)`, `m::T::V(..)` — matches one variant of an
+    /// enum `data` and binds payload elements positionally. A `binds`
+    /// entry whose `name` is `"_"` skips that element.
+    Variant {
+        /// The variant path as written (`T::V` or `m::T::V`).
+        path: Path,
+        /// Payload bindings in order.
+        binds: Vec<Ident>,
+        /// Pattern span.
+        span: Span,
+    },
+}
+
 /// A `name: expr` pair inside a struct literal.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FieldInit {
@@ -339,6 +388,17 @@ pub enum Expr {
         /// Optional upper bound (`hi` in `lo..hi`; `lo..` is
         /// unbounded and rejected by the checker).
         hi: Option<Box<Expr>>,
+        /// Expression span.
+        span: Span,
+    },
+    /// `match e { pat => v, .. }` — selection over `data` variants.
+    /// The scrutinee must be an enum `data` value; arms are tried in
+    /// order and the whole match is the matched arm's value.
+    Match {
+        /// The matched value.
+        scrutinee: Box<Expr>,
+        /// Arms in written order.
+        arms: Vec<MatchArm>,
         /// Expression span.
         span: Span,
     },
@@ -429,6 +489,7 @@ impl Expr {
             | Expr::Slice { span, .. }
             | Expr::ArrayLit { span, .. }
             | Expr::Range { span, .. }
+            | Expr::Match { span, .. }
             | Expr::For { span, .. }
             | Expr::Binary { span, .. }
             | Expr::Unary { span, .. }

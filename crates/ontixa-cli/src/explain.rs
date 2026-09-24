@@ -165,9 +165,12 @@ fn resolve_symbol(a: &Artifacts, name: &str) -> Resolved {
         }
     }
     let mut cands: Vec<(DefId, SymbolId)> = Vec::new();
-    // Module-level symbols: `data` fields (defs already returned).
+    // Module-level symbols: `data` fields and enum variants (defs
+    // already returned).
     for s in a.module.scope.symbols.iter() {
-        if s.kind == SymbolKind::Field && a.interner.resolve(s.name) == name {
+        if matches!(s.kind, SymbolKind::Field | SymbolKind::Variant)
+            && a.interner.resolve(s.name) == name
+        {
             if let Some(owner) = s.owner {
                 cands.push((owner, s.id));
             }
@@ -237,6 +240,10 @@ fn describe_symbol(m: &HirModule, interner: &Interner, s: &ontixa_hir::Symbol) -
             Some(o) => format!("field `{name}` of `{}`", def_name(m, interner, o)),
             None => format!("field `{name}`"),
         },
+        SymbolKind::Variant => match s.owner {
+            Some(o) => format!("variant `{name}` of `{}`", def_name(m, interner, o)),
+            None => format!("variant `{name}`"),
+        },
         SymbolKind::Function => format!("fn `{name}`"),
         SymbolKind::Data => format!("data `{name}`"),
     }
@@ -247,6 +254,7 @@ fn kind_str(k: SymbolKind) -> &'static str {
         SymbolKind::Function => "fn",
         SymbolKind::Data => "data",
         SymbolKind::Field => "field",
+        SymbolKind::Variant => "variant",
         SymbolKind::Param => "param",
         SymbolKind::Local => "local",
     }
@@ -324,7 +332,28 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
                     })
                 })
                 .collect();
-            json!({"kind": "data", "name": name, "fields": fields})
+            let variants: Vec<Json> = shape
+                .variants
+                .iter()
+                .map(|v| {
+                    json!({
+                        "name": a.interner.resolve(m.scope.symbols.get(v.symbol).name),
+                        "discriminant": v.index,
+                        "payload": v
+                            .payload
+                            .iter()
+                            .map(|t| ty_name(m, &a.interner, Ty::from_ref(*t)))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            json!({
+                "kind": "data",
+                "name": name,
+                "shape": shape.shape_name(),
+                "fields": fields,
+                "variants": variants,
+            })
         }
     }
 }
@@ -380,6 +409,18 @@ fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
             if ty.is_none() {
                 obj["type"] = json!(ty_name(m, &a.interner, Ty::from_ref(f.ty)));
             }
+        }
+        if let Some(v) = shape.variants.iter().find(|v| v.symbol == sym) {
+            // A variant's type is its enum; payload types are the
+            // constructor's argument list.
+            obj["type"] = json!(ty_name(m, &a.interner, Ty::Struct(owner)));
+            obj["discriminant"] = json!(v.index);
+            obj["payload"] = json!(
+                v.payload
+                    .iter()
+                    .map(|t| ty_name(m, &a.interner, Ty::from_ref(*t)))
+                    .collect::<Vec<_>>()
+            );
         }
     }
     obj
@@ -441,6 +482,36 @@ fn print_defs(defs: &[Json]) {
                 d["returns"].as_str().unwrap_or("unit"),
             );
         } else {
+            let variants: Vec<String> = d["variants"]
+                .as_array()
+                .map(|vs| {
+                    vs.iter()
+                        .map(|v| {
+                            let payload: Vec<&str> = v["payload"]
+                                .as_array()
+                                .map(|ps| ps.iter().filter_map(|t| t.as_str()).collect())
+                                .unwrap_or_default();
+                            if payload.is_empty() {
+                                v["name"].as_str().unwrap_or("?").to_string()
+                            } else {
+                                format!(
+                                    "{}({})",
+                                    v["name"].as_str().unwrap_or("?"),
+                                    payload.join(", ")
+                                )
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !variants.is_empty() {
+                println!(
+                    "  data {} {{ {} }}",
+                    d["name"].as_str().unwrap_or("?"),
+                    variants.join(", ")
+                );
+                continue;
+            }
             let fields: Vec<String> = d["fields"]
                 .as_array()
                 .map(|fs| {
@@ -483,6 +554,13 @@ fn print_symbol(s: &Json) {
     }
     if let Some(m) = s["mutable"].as_bool() {
         println!("  binding: {}", if m { "mutable" } else { "immutable" });
+    }
+    if let Some(d) = s["discriminant"].as_u64() {
+        println!("  discriminant: {d}");
+    }
+    if let Some(p) = s["payload"].as_array() {
+        let ts: Vec<&str> = p.iter().filter_map(|t| t.as_str()).collect();
+        println!("  payload: ({})", ts.join(", "));
     }
     if let Some(b) = s["behavior"].as_str() {
         println!("  behavior: {b}");

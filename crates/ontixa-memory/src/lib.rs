@@ -686,4 +686,117 @@ mod tests {
             ParamBehavior::Escape
         );
     }
+
+    // ---------- enum variants and `match` ----------
+
+    /// `match` borrows the scrutinee — it stays live afterwards and
+    /// the param contract is `borrow`, not `move`.
+    #[test]
+    fn matching_borrows_the_scrutinee() {
+        let c = codes(
+            "data Opt { Some(i32); None; } \
+             fn unwrap(o: Opt) -> i32 { return match o { Opt::Some(v) => v, Opt::None => 0 }; } \
+             fn main() -> i32 { let q = Opt::Some(1); let a = unwrap(q); let b = unwrap(q); return a + b; }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+        assert_eq!(
+            behavior(
+                "data Opt { Some(i32); None; } \
+                 fn unwrap(o: Opt) -> i32 { return match o { Opt::Some(v) => v, Opt::None => 0 }; } \
+                 fn main() -> i32 { return 0; }",
+                "unwrap",
+                0
+            ),
+            ParamBehavior::Borrow
+        );
+    }
+
+    /// Payload moves into a variant constructor — using the source
+    /// afterwards is use-after-move, exactly like a moving call.
+    #[test]
+    fn variant_construction_moves_payload() {
+        let c = codes(
+            "data P { x: i32; } data Opt { Some(P); None; } \
+             fn main() -> i32 { let q = P { x: 1 }; let o = Opt::Some(q); return q.x; }",
+        );
+        assert!(c.contains(&ontixa_diagnostics::Code::UseAfterMove), "{c:?}");
+    }
+
+    /// A pattern bind is an owned copy — moving it out does not
+    /// consume the scrutinee, and the scrutinee survives.
+    #[test]
+    fn pattern_binds_are_independent_owners() {
+        let c = codes(
+            "data P { x: i32; } data Opt { Some(P); None; } \
+             fn eat(p: P) -> i32 { return 0; } \
+             fn main() -> i32 { let o = Opt::Some(P { x: 1 }); let a = match o { Opt::Some(p) => eat(p), Opt::None => 0 }; return a + match o { Opt::Some(p) => p.x, Opt::None => 1 }; }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    /// A whole-scrutinee bind also owns its copy — moving `other`
+    /// leaves `o` live.
+    #[test]
+    fn whole_scrutinee_bind_is_independent() {
+        let c = codes(
+            "data Opt { Some(i32); None; } \
+             fn eat(o: Opt) -> i32 { return 0; } \
+             fn main() -> i32 { let o = Opt::Some(1); let a = match o { other => eat(other) }; return match o { Opt::Some(v) => v, Opt::None => 0 } + a; }",
+        );
+        assert!(c.is_empty(), "{c:?}");
+    }
+
+    /// A pattern-bound name with a non-`Copy` payload type carries
+    /// the scrutinee's carriers: `return v` where `v` came out of
+    /// `o`'s payload escapes `o` — the same precision rule as field
+    /// access. A `Copy` payload binds nothing (a pure read).
+    #[test]
+    fn payload_bind_escape_marks_scrutinee_carrier() {
+        assert_eq!(
+            behavior(
+                "data P { x: i32; } data Opt { Some(P); None; } \
+                 fn id(o: Opt) -> Opt { return match o { Opt::Some(v) => Opt::Some(v), Opt::None => Opt::None }; } \
+                 fn main() -> i32 { return 0; }",
+                "id",
+                0
+            ),
+            ParamBehavior::Escape
+        );
+        assert_eq!(
+            behavior(
+                "data Opt { Some(i32); None; } \
+                 fn id(o: Opt) -> Opt { return match o { Opt::Some(v) => Opt::Some(v), Opt::None => Opt::None }; } \
+                 fn main() -> i32 { return 0; }",
+                "id",
+                0
+            ),
+            ParamBehavior::Borrow
+        );
+        // Same through a whole-scrutinee bind.
+        assert_eq!(
+            behavior(
+                "data Opt { Some(i32); None; } \
+                 fn id(o: Opt) -> Opt { return match o { other => other }; } \
+                 fn main() -> i32 { return 0; }",
+                "id",
+                0
+            ),
+            ParamBehavior::Escape
+        );
+    }
+
+    /// An arm-local binding cannot leak: `v` is only live inside its
+    /// arm, so a use in a *later* arm is an unknown binding at HIR
+    /// time — never a moved state leak.
+    #[test]
+    fn arm_bindings_do_not_leak_between_arms() {
+        let c = codes(
+            "data Opt { Some(i32); None; } \
+             fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some(v) => v, Opt::None => v }; }",
+        );
+        assert!(
+            c.contains(&ontixa_diagnostics::Code::UnknownSymbol),
+            "{c:?}"
+        );
+    }
 }

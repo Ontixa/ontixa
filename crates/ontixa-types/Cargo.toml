@@ -14,3 +14,4 @@ ontixa-ast.workspace = true
 ontixa-hir.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
+serde_json.workspace = true

@@ -15,8 +15,8 @@ mod lower;
 mod rebase;
 
 pub use ast::{
-    AstModule, BinOp, Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Literal, Param,
-    Path, Place, Stmt, TypeExpr, UnOp, UseDecl,
+    AstModule, BinOp, Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Literal,
+    MatchArm, Param, Path, Pattern, Place, Stmt, TypeExpr, UnOp, UseDecl, Variant,
 };
 pub use lower::lower_module;
 pub use rebase::rebase_item;
@@ -355,6 +355,57 @@ mod tests {
                     other => panic!("expected unary not, got {other:?}"),
                 }
             }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn lowers_data_variants() {
+        let m = module("data Option { Some(i32); None; } fn f() -> i32 { return 0; }");
+        match &m.items[0] {
+            Item::Data(d) => {
+                assert!(d.fields.is_empty());
+                assert_eq!(d.variants.len(), 2);
+                assert_eq!(d.variants[0].name.name, "Some");
+                assert_eq!(d.variants[0].payload.len(), 1);
+                assert_eq!(d.variants[1].name.name, "None");
+                assert!(d.variants[1].payload.is_empty());
+            }
+            _ => panic!("expected data"),
+        }
+    }
+
+    #[test]
+    fn lowers_match_arms_and_patterns() {
+        let m = module(
+            "data Option { Some(i32); None; }\nfn f(o: Option) -> i32 { return match o { Option::Some(v) => v, Option::None => 0, _ => 9, }; }",
+        );
+        match &m.items[1] {
+            Item::Fn(f) => match &f.body.stmts[0] {
+                Stmt::Return {
+                    value:
+                        Some(Expr::Match {
+                            scrutinee, arms, ..
+                        }),
+                    ..
+                } => {
+                    assert!(matches!(**scrutinee, Expr::Var { .. }));
+                    assert_eq!(arms.len(), 3);
+                    match &arms[0].pat {
+                        Pattern::Variant { path, binds, .. } => {
+                            assert_eq!(path.display(), "Option::Some");
+                            assert_eq!(binds.len(), 1);
+                            assert_eq!(binds[0].name, "v");
+                        }
+                        other => panic!("expected variant pattern, got {other:?}"),
+                    }
+                    match &arms[2].pat {
+                        Pattern::Bind { name } => assert_eq!(name.name, "_"),
+                        other => panic!("expected wildcard, got {other:?}"),
+                    }
+                }
+                other => panic!("expected match return, got {other:?}"),
+            },
             _ => panic!(),
         }
     }

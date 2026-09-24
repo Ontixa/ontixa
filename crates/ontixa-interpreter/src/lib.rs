@@ -544,4 +544,118 @@ mod tests {
             other => panic!("expected trap, got {other:?}"),
         }
     }
+
+    // ---- enum variants and `match` ----------------------------------
+
+    #[test]
+    fn runs_variant_construction_and_match() {
+        let src = "data Opt { Some(i32); None; }
+                   fn unwrap_or(o: Opt, fallback: i32) -> i32 {
+                       return match o { Opt::Some(v) => v, Opt::None => fallback };
+                   }
+                   fn main() -> i32 {
+                       return unwrap_or(Opt::Some(40), 0) + unwrap_or(Opt::None, 2);
+                   }";
+        assert_eq!(eval_int(src), 42);
+    }
+
+    #[test]
+    fn match_dispatches_on_discriminant_and_binds_positionally() {
+        let src = "data Shape { Circle(i32); Rect(i32, i32); Point; }
+                   fn area(s: Shape) -> i32 {
+                       return match s {
+                           Shape::Circle(r) => 3 * r * r,
+                           Shape::Rect(w, h) => w * h,
+                           Shape::Point => 0,
+                       };
+                   }
+                   fn main() -> i32 {
+                       return area(Shape::Circle(2)) + area(Shape::Rect(3, 4)) + area(Shape::Point);
+                   }";
+        assert_eq!(eval_int(src), 24);
+    }
+
+    #[test]
+    fn match_reads_but_does_not_move_scrutinee() {
+        // Matching borrows the scrutinee: `o` stays live and can be
+        // matched again — and passed on afterwards.
+        let src = "data Opt { Some(i32); None; }
+                   fn unwrap(o: Opt) -> i32 {
+                       return match o { Opt::Some(v) => v, Opt::None => 0 };
+                   }
+                   fn main() -> i32 {
+                       let o = Opt::Some(5);
+                       let a = match o { Opt::Some(v) => v, Opt::None => 0 };
+                       let b = match o { Opt::Some(v) => v + 1, Opt::None => 1 };
+                       return a + b;
+                   }";
+        assert_eq!(eval_int(src), 11);
+    }
+
+    #[test]
+    fn whole_scrutinee_binding_is_an_independent_copy() {
+        // `other` binds a copy of the scrutinee — it is usable while
+        // `o` remains live, and the two never alias.
+        let src = "data Opt { Some(i32); None; }
+                   fn main() -> i32 {
+                       let o = Opt::Some(9);
+                       let p = match o { other => other };
+                       let a = match o { Opt::Some(v) => v, Opt::None => 0 };
+                       let b = match p { Opt::Some(v) => v, Opt::None => 1 };
+                       return a + b;
+                   }";
+        assert_eq!(eval_int(src), 18);
+    }
+
+    #[test]
+    fn variant_display_renders_constructor_form() {
+        let src = "data Opt { Some(i32); None; }
+                   fn main() -> Opt { return Opt::Some(3); }";
+        let (v, mir, module, interner, diags) = run_src(src, "main").expect("run");
+        assert!(diags.is_empty(), "{diags:?}");
+        let interp = Interp::new(&mir, &module, &interner);
+        assert_eq!(interp.show(&v), "Opt::Some(3)");
+    }
+
+    #[test]
+    fn unit_variant_display_has_no_parens() {
+        let src = "data Opt { Some(i32); None; }
+                   fn main() -> Opt { return Opt::None; }";
+        let (v, mir, module, interner, diags) = run_src(src, "main").expect("run");
+        assert!(diags.is_empty(), "{diags:?}");
+        let interp = Interp::new(&mir, &module, &interner);
+        assert_eq!(interp.show(&v), "Opt::None");
+    }
+
+    #[test]
+    fn match_on_nested_variants() {
+        // A payload can itself be an enum — matching is per-level.
+        let src = "data Opt { Some(i32); None; }
+                   data OptOpt { Outer(Opt); Empty; }
+                   fn deep(o: OptOpt) -> i32 {
+                       return match o {
+                           OptOpt::Outer(inner) => match inner {
+                               Opt::Some(v) => v,
+                               Opt::None => 0,
+                           },
+                           OptOpt::Empty => 1,
+                       };
+                   }
+                   fn main() -> i32 {
+                       return deep(OptOpt::Outer(Opt::Some(41))) + deep(OptOpt::Empty);
+                   }";
+        assert_eq!(eval_int(src), 42);
+    }
+
+    #[test]
+    fn match_arm_with_return_diverges() {
+        // An arm that returns never reaches the join — the function's
+        // result is the surviving arm's.
+        let src = "data Opt { Some(i32); None; }
+                   fn f(o: Opt) -> i32 {
+                       match o { Opt::Some(v) => { return v; }, Opt::None => { return 7; } }
+                   }
+                   fn main() -> i32 { return f(Opt::None); }";
+        assert_eq!(eval_int(src), 7);
+    }
 }

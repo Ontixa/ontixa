@@ -28,9 +28,9 @@ mod lower;
 mod resolve;
 
 pub use hir::{
-    BinOp, DataShape, Def, DefKind, ElemRef, FieldDef, FileEnv, FnSig, HirBody, HirExpr,
-    HirExprKind, HirModule, HirPlace, HirStmt, LitValue, Literal, ModuleScope, Name, ParamDef,
-    Symbol, SymbolKind, SymbolTable, TypeRef, UnOp,
+    BinOp, DataShape, Def, DefKind, ElemRef, FieldDef, FileEnv, FnSig, HirArm, HirBody, HirExpr,
+    HirExprKind, HirModule, HirPat, HirPlace, HirStmt, LitValue, Literal, ModuleScope, Name,
+    ParamDef, Symbol, SymbolKind, SymbolTable, TypeRef, UnOp, VariantDef,
 };
 pub use lower::{lower_bodies, lower_body};
 pub use resolve::{WorkspaceFile, resolve_module, resolve_workspace};
@@ -390,5 +390,119 @@ mod tests {
         };
         assert!(!sym(i).mutable);
         assert!(sym(j).mutable);
+    }
+
+    #[test]
+    fn resolves_data_variants() {
+        let (m, mut interner, diags) =
+            parse_hir("data Option { Some(i32); None; } fn f() -> i32 { return 0; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        let data = m.scope.root_env().datas[&interner.intern("Option")];
+        let shape = m.scope.data_shape(data).expect("data shape");
+        assert!(shape.is_enum());
+        assert_eq!(shape.variants.len(), 2);
+        assert_eq!(shape.variants[0].payload, vec![TypeRef::I32]);
+        assert!(shape.variants[1].payload.is_empty());
+        assert_eq!(shape.variant_index[&interner.intern("None")], 1);
+        // Variant symbols are module-level, owned by the data def.
+        let sym = m.scope.symbols.get(shape.variants[0].symbol);
+        assert_eq!(sym.kind, SymbolKind::Variant);
+        assert_eq!(sym.owner, Some(data));
+    }
+
+    #[test]
+    fn resolves_variant_constructors() {
+        let (m, mut interner, diags) = parse_hir(
+            "data Option { Some(i32); None; }\nfn f() -> i32 { let a = Option::Some(1); let b = Option::None; return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let data = m.scope.root_env().datas[&interner.intern("Option")];
+        let f = fn_def(&m, "f", &mut interner);
+        let body = m.body(f).expect("body");
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
+            panic!()
+        };
+        let HirStmt::Let {
+            init: Some(init), ..
+        } = &stmts[0]
+        else {
+            panic!()
+        };
+        let HirExprKind::VariantLit { def, variant, args } = &body.expr(*init).kind else {
+            panic!("expected variant lit, got {:?}", body.expr(*init).kind)
+        };
+        assert_eq!(*def, data);
+        assert_eq!(*variant, 0);
+        assert_eq!(args.len(), 1);
+        let HirStmt::Let {
+            init: Some(init), ..
+        } = &stmts[1]
+        else {
+            panic!()
+        };
+        let HirExprKind::VariantLit { variant, args, .. } = &body.expr(*init).kind else {
+            panic!("expected variant lit")
+        };
+        assert_eq!(*variant, 1);
+        assert!(args.is_empty());
+    }
+
+    /// Arm scopes are per-arm: `v` bound in arm 1 does not leak into
+    /// arm 2's body, and a same-named outer binding is shadowed only
+    /// within the arm.
+    #[test]
+    fn match_arm_bindings_are_arm_scoped() {
+        let (m, mut interner, diags) = parse_hir(
+            "data Option { Some(i32); None; }\nfn f(o: Option) -> i32 { let v = 9; return match o { Option::Some(v) => v, _ => v }; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let f = fn_def(&m, "f", &mut interner);
+        let body = m.body(f).expect("body");
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
+            panic!()
+        };
+        let HirStmt::Return { value: Some(v), .. } = &stmts[1] else {
+            panic!("expected return")
+        };
+        let HirExprKind::Match { arms, .. } = &body.expr(*v).kind else {
+            panic!("expected match")
+        };
+        let HirPat::Variant { binds, .. } = &arms[0].pat else {
+            panic!("expected variant pat")
+        };
+        let bound_v = binds[0].expect("v binds");
+        // arm 1 body `v` resolves to the pattern binding.
+        let HirExprKind::Var(sym) = &body.expr(arms[0].body).kind else {
+            panic!("expected var")
+        };
+        assert_eq!(*sym, bound_v);
+        // arm 2 body `v` resolves to the *outer* let binding.
+        let v_id = interner.intern("v");
+        let outer_v = body
+            .local_symbols
+            .iter()
+            .find(|s| s.name == v_id && s.id != bound_v)
+            .expect("outer v")
+            .id;
+        let HirExprKind::Var(sym) = &body.expr(arms[1].body).kind else {
+            panic!("expected var")
+        };
+        assert_eq!(*sym, outer_v);
+        assert_ne!(*sym, bound_v);
+    }
+
+    #[test]
+    fn unknown_variant_reports() {
+        let (_, _, diags) = parse_hir(
+            "data Option { Some(i32); None; }\nfn f(o: Option) -> i32 { return match o { Option::Nope => 0, _ => 1 }; }",
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == ontixa_diagnostics::Code::UnknownSymbol),
+            "{diags:?}"
+        );
+        let (_, _, diags) = parse_hir("fn f() -> i32 { let x = Option::Some(1); return 0; }");
+        assert!(diags.has_errors());
     }
 }

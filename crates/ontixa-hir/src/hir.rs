@@ -121,6 +121,8 @@ pub enum SymbolKind {
     Data,
     /// A field of a `data` definition.
     Field,
+    /// A variant of an enum `data` definition.
+    Variant,
     /// A function parameter.
     Param,
     /// A `let` binding.
@@ -242,13 +244,44 @@ pub struct ParamDef {
     pub span: Span,
 }
 
-/// A `data` definition's shape.
+/// A `data` definition's shape — either a record (`fields`) or an
+/// enum (`variants`); the parser reports mixing, so at most one is
+/// populated for valid source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataShape {
     /// Fields in declaration order (index = field position).
     pub fields: Vec<FieldDef>,
     /// Field name → position index.
     pub field_index: FxHashMap<InternId, u32>,
+    /// Variants in declaration order (index = discriminant).
+    pub variants: Vec<VariantDef>,
+    /// Variant name → discriminant index.
+    pub variant_index: FxHashMap<InternId, u32>,
+}
+
+impl DataShape {
+    /// Whether this `data` is an enum (has variants) rather than a
+    /// record (has fields).
+    pub fn is_enum(&self) -> bool {
+        !self.variants.is_empty()
+    }
+
+    /// `"enum"` or `"record"` — the shape's stable name for
+    /// diagnostics and graph attrs.
+    pub fn shape_name(&self) -> &'static str {
+        if self.is_enum() { "enum" } else { "record" }
+    }
+}
+
+/// A variant of an enum `data` definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariantDef {
+    /// The variant's symbol (module-level, owned by the data def).
+    pub symbol: SymbolId,
+    /// Resolved payload element types in order.
+    pub payload: Vec<TypeRef>,
+    /// Discriminant index (declaration order).
+    pub index: u32,
 }
 
 /// A field of a `data` definition.
@@ -527,7 +560,62 @@ pub enum HirExprKind {
         /// `(field name, value)` pairs in written order.
         fields: Vec<(Name, ExprId)>,
     },
+    /// `T::V(args)` — a variant constructor. `args` may be empty for a
+    /// bare `T::V` path; arity is validated by type checking.
+    VariantLit {
+        /// The enum `data` being constructed.
+        def: DefId,
+        /// Discriminant index into the def's `variants`.
+        variant: u32,
+        /// Payload arguments in order.
+        args: Vec<ExprId>,
+    },
+    /// `match e { pat => v, .. }` — selection over `data` variants.
+    Match {
+        /// The matched value.
+        scrutinee: ExprId,
+        /// Arms in written order.
+        arms: Vec<HirArm>,
+    },
     /// Poisoned expression — an upstream diagnostic already exists.
+    Poison,
+}
+
+/// One `pat => expr` arm of a [`HirExprKind::Match`]. `span` covers
+/// the whole arm.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirArm {
+    /// The resolved pattern.
+    pub pat: HirPat,
+    /// The arm's value expression.
+    pub body: ExprId,
+    /// Arm span (`pat => expr`).
+    pub span: Span,
+}
+
+/// A resolved match pattern.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HirPat {
+    /// `T::V(b0, ..)` / `m::T::V(..)` — matches discriminant `variant`
+    /// of `def`. `binds[i]` is the payload-`i` binding (`None` = `_`).
+    Variant {
+        /// The enum `data` the pattern selects.
+        def: DefId,
+        /// Discriminant index.
+        variant: u32,
+        /// Payload bindings, aligned with the variant's payload.
+        binds: Vec<Option<SymbolId>>,
+        /// Pattern span.
+        span: Span,
+    },
+    /// `x` binds the whole scrutinee (`Some`); `_` ignores it (`None`).
+    Bind {
+        /// The bound body-local symbol, or `None` for `_`.
+        sym: Option<SymbolId>,
+        /// Pattern span.
+        span: Span,
+    },
+    /// Resolution failed upstream — a diagnostic already exists.
     Poison,
 }
 

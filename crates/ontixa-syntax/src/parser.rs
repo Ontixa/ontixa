@@ -301,26 +301,61 @@ impl Parser<'_> {
             self.finish();
             return;
         }
+        // A `data` body holds either record fields (`name: T;`) or
+        // enum variants (`Name(T, ..);` / `Name;`) — never both. The
+        // parser accepts both shapes and reports mixing so downstream
+        // stages see a well-formed tree either way.
+        let mut saw_fields = false;
+        let mut saw_variants = false;
         while !self.at_end() && !self.at(SyntaxKind::R_BRACE) {
             match self.current() {
-                SyntaxKind::IDENT => self.field(),
+                SyntaxKind::IDENT => match self.nth(1) {
+                    SyntaxKind::COLON => {
+                        if saw_variants {
+                            self.error(
+                                "a `data` declaration cannot mix record fields and variants",
+                            );
+                        }
+                        saw_fields = true;
+                        self.field();
+                    }
+                    SyntaxKind::L_PAREN | SyntaxKind::SEMICOLON => {
+                        if saw_fields {
+                            self.error(
+                                "a `data` declaration cannot mix record fields and variants",
+                            );
+                        }
+                        saw_variants = true;
+                        self.variant();
+                    }
+                    // `x T` is most likely a field missing its `:` —
+                    // `field()` reports exactly that, consumes the
+                    // name, and keeps the member shaped for the AST.
+                    _ => self.field(),
+                },
                 k if k.is_keyword() => {
                     self.start(SyntaxKind::FIELD);
                     self.error(format!(
-                        "keyword {} cannot be used as a field name",
+                        "keyword {} cannot be used as a member name",
                         k.describe()
                     ));
                     self.bump();
-                    self.expect(SyntaxKind::COLON, "after field name");
+                    self.expect(SyntaxKind::COLON, "after member name");
                     if !self.at_any(&[SyntaxKind::SEMICOLON, SyntaxKind::R_BRACE]) {
                         self.type_ref();
                     }
                     self.eat(SyntaxKind::SEMICOLON);
                     self.finish();
                 }
+                SyntaxKind::SEMICOLON => {
+                    // Stray `;` — consume quietly like an empty member;
+                    // `err_recover` would never consume a recovery token
+                    // and the member loop must always make progress.
+                    self.bump();
+                }
                 _ => self.err_recover(
                     format!(
-                        "expected a field declaration, found {}",
+                        "expected a field or variant declaration, found {}",
                         self.current().describe()
                     ),
                     &[
@@ -341,6 +376,35 @@ impl Parser<'_> {
         self.expect(SyntaxKind::COLON, "after field name");
         self.type_ref();
         self.expect(SyntaxKind::SEMICOLON, "after field type");
+        self.finish();
+    }
+
+    /// `Name(T, ..)` / `Name` — one enum variant inside a `data` decl.
+    /// Payload elements are type positions; `V()` (empty parens) is a
+    /// unit variant.
+    fn variant(&mut self) {
+        self.start(SyntaxKind::VARIANT);
+        self.name();
+        if self.at(SyntaxKind::L_PAREN) {
+            self.bump(); // (
+            while !self.at_end() && !self.at(SyntaxKind::R_PAREN) {
+                match self.current() {
+                    SyntaxKind::IDENT | SyntaxKind::L_BRACKET => self.type_ref(),
+                    _ => self.err_recover(
+                        format!(
+                            "expected a payload type, found {}",
+                            self.current().describe()
+                        ),
+                        &[SyntaxKind::COMMA, SyntaxKind::R_PAREN],
+                    ),
+                }
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+            }
+            self.expect(SyntaxKind::R_PAREN, "to close the variant payload");
+        }
+        self.expect(SyntaxKind::SEMICOLON, "after variant");
         self.finish();
     }
 
@@ -418,9 +482,9 @@ impl Parser<'_> {
         match self.current() {
             SyntaxKind::LET_KW => self.let_stmt(),
             SyntaxKind::RETURN_KW => self.return_stmt(),
-            SyntaxKind::IF_KW | SyntaxKind::L_BRACE | SyntaxKind::FOR_KW => {
-                // `if`-, `for`-, and block-expressions used as statements
-                // do not require a trailing semicolon.
+            SyntaxKind::IF_KW | SyntaxKind::L_BRACE | SyntaxKind::FOR_KW | SyntaxKind::MATCH_KW => {
+                // `if`-, `for`-, `match`-, and block-expressions used as
+                // statements do not require a trailing semicolon.
                 let cp = self.checkpoint();
                 self.expr(0, true);
                 self.start_at(cp, SyntaxKind::EXPR_STMT);
@@ -504,6 +568,7 @@ impl Parser<'_> {
                 | SyntaxKind::L_BRACKET
                 | SyntaxKind::IF_KW
                 | SyntaxKind::FOR_KW
+                | SyntaxKind::MATCH_KW
                 | SyntaxKind::MINUS
                 | SyntaxKind::NOT
                 | SyntaxKind::DOT2
@@ -607,6 +672,7 @@ impl Parser<'_> {
             }
             SyntaxKind::IF_KW => self.if_expr(),
             SyntaxKind::FOR_KW => self.for_expr(),
+            SyntaxKind::MATCH_KW => self.match_expr(),
             SyntaxKind::L_BRACKET => self.array_lit(),
             SyntaxKind::L_PAREN => {
                 self.start(SyntaxKind::PAREN_EXPR);
@@ -738,6 +804,122 @@ impl Parser<'_> {
             }
         }
         self.finish();
+    }
+
+    /// `match e { pat => expr, .. }` — selection over `data` variants.
+    /// The scrutinee can't open a struct literal — `match S { }` reads
+    /// `{` as the arm list, the same rule as `if` conditions and `for`
+    /// iterables (parenthesize to match a literal: `match (S { .. })`).
+    fn match_expr(&mut self) {
+        self.start(SyntaxKind::MATCH_EXPR);
+        self.bump(); // match
+        if Self::can_start_expr(self.current()) {
+            self.expr(0, false);
+        } else {
+            self.error(format!(
+                "expected a scrutinee expression after `match`, found {}",
+                self.current().describe()
+            ));
+        }
+        self.start(SyntaxKind::MATCH_ARM_LIST);
+        if self.at(SyntaxKind::L_BRACE) {
+            self.bump(); // {
+            while !self.at_end() && !self.at(SyntaxKind::R_BRACE) {
+                self.match_arm();
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+            }
+            self.expect(SyntaxKind::R_BRACE, "to close the match arms");
+        } else {
+            self.error(format!(
+                "expected `{{` to start the match arms, found {}",
+                self.current().describe()
+            ));
+        }
+        self.finish(); // MATCH_ARM_LIST
+        self.finish(); // MATCH_EXPR
+    }
+
+    /// `pat => expr` — one arm of a `match`.
+    fn match_arm(&mut self) {
+        self.start(SyntaxKind::MATCH_ARM);
+        self.pattern();
+        self.expect(SyntaxKind::FAT_ARROW, "after the pattern");
+        if Self::can_start_expr(self.current()) {
+            self.expr(0, true);
+        } else {
+            self.error(format!(
+                "expected an expression after `=>`, found {}",
+                self.current().describe()
+            ));
+        }
+        self.finish();
+    }
+
+    /// A match pattern. `T::V`, `T::V(b, ..)`, `m::T::V(..)` select a
+    /// `data` variant; a bare `name` or `_` binds (or ignores) the
+    /// whole scrutinee. A one-segment `V(..)` is legal syntax — name
+    /// resolution reports that it names no variant.
+    fn pattern(&mut self) {
+        match self.current() {
+            SyntaxKind::IDENT
+                if self.nth(1) == SyntaxKind::COLON2 || self.nth(1) == SyntaxKind::L_PAREN =>
+            {
+                // Variant pattern. `NAME_REF` segments sit directly in
+                // the PAT_VARIANT node; AST lowering collects them.
+                self.start(SyntaxKind::PAT_VARIANT);
+                self.name_ref();
+                while self.at(SyntaxKind::COLON2) {
+                    self.bump(); // ::
+                    self.name_ref();
+                }
+                if self.at(SyntaxKind::L_PAREN) {
+                    self.bump(); // (
+                    while !self.at_end() && !self.at(SyntaxKind::R_PAREN) {
+                        if self.at(SyntaxKind::IDENT) {
+                            self.start(SyntaxKind::PAT_BIND);
+                            self.name();
+                            self.finish();
+                        } else {
+                            self.err_recover(
+                                format!(
+                                    "expected a binding or `_`, found {}",
+                                    self.current().describe()
+                                ),
+                                &[SyntaxKind::COMMA, SyntaxKind::R_PAREN],
+                            );
+                        }
+                        if !self.eat(SyntaxKind::COMMA) {
+                            break;
+                        }
+                    }
+                    self.expect(SyntaxKind::R_PAREN, "to close the pattern bindings");
+                }
+                self.finish();
+            }
+            SyntaxKind::IDENT => {
+                // `x` binds the scrutinee; `_` ignores it.
+                self.start(SyntaxKind::PAT_BIND);
+                self.name();
+                self.finish();
+            }
+            k if k.is_keyword() => {
+                self.error(format!(
+                    "keyword {} cannot be used as a pattern",
+                    k.describe()
+                ));
+                self.bump();
+            }
+            _ => self.err_recover(
+                format!("expected a pattern, found {}", self.current().describe()),
+                &[
+                    SyntaxKind::FAT_ARROW,
+                    SyntaxKind::COMMA,
+                    SyntaxKind::R_BRACE,
+                ],
+            ),
+        }
     }
 
     fn arg_list(&mut self) {

@@ -14,7 +14,7 @@ use crate::mir::{
     BasicBlock, BlockId, Const, Local, LocalDecl, MirBody, MirModule, MirStmt, Operand, Place,
     Rvalue, Terminator,
 };
-use ontixa_hir::{HirBody, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope};
+use ontixa_hir::{HirArm, HirBody, HirExprKind, HirModule, HirPat, HirPlace, HirStmt, ModuleScope};
 use ontixa_memory::OwnershipTables;
 use ontixa_source::{ExprId, SymbolId};
 use ontixa_types::{ModuleTypes, Ty, TypeTables};
@@ -468,8 +468,114 @@ impl FnLowerer<'_> {
                 });
                 Operand::Place(t)
             }
+            HirExprKind::VariantLit { def, variant, args } => {
+                let ops: Vec<Operand> = args.iter().map(|a| self.eval(*a)).collect();
+                let t = self.temp(self.ty_of(id));
+                self.emit(MirStmt::Assign {
+                    dst: t.clone(),
+                    val: Rvalue::VariantLit {
+                        def,
+                        variant,
+                        args: ops,
+                    },
+                });
+                Operand::Place(t)
+            }
+            HirExprKind::Match { scrutinee, arms } => self.match_expr(id, scrutinee, &arms),
             HirExprKind::Poison => Operand::Const(Const::Unit),
         }
+    }
+
+    /// `match e { pat => v, .. }` compiles to a discriminant switch:
+    ///
+    /// ```text
+    ///   <scrutinee evaluated once into an operand>
+    ///   Match(scrutinee, [(disc, arm_bb), ..], default_bb?)
+    ///   arm_bb: [binds = VariantPayload(scrutinee, i)]; <body>;
+    ///           result = v; Goto(join)
+    ///   join:   (result temp reads as the match value)
+    /// ```
+    ///
+    /// `x`/`_` arms land on `default`; a `Poison` pattern's block is
+    /// emitted but unreachable (a diagnostic already exists). Arms
+    /// that end in `return` never reach the join — like `if` branch
+    /// tails.
+    fn match_expr(&mut self, id: ExprId, scrutinee: ExprId, arms: &[HirArm]) -> Operand {
+        let scrut_op = self.eval(scrutinee);
+        let scrut_ty = self.ty_of(scrutinee);
+        let ty = self.ty_of(id);
+        let result = if ty == Ty::Unit {
+            None
+        } else {
+            Some(self.temp(ty))
+        };
+        let join = self.new_block();
+        let mut arms_map: Vec<(u32, BlockId)> = Vec::new();
+        let mut default: Option<BlockId> = None;
+        let mut arm_bbs = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let bb = self.new_block();
+            arm_bbs.push(bb);
+            match &arm.pat {
+                HirPat::Variant { variant, .. } => arms_map.push((*variant, bb)),
+                HirPat::Bind { .. } if default.is_none() => default = Some(bb),
+                _ => {}
+            }
+        }
+        self.close(Terminator::Match {
+            scrutinee: scrut_op.clone(),
+            arms: arms_map,
+            default,
+        });
+        for (arm, bb) in arms.iter().zip(arm_bbs) {
+            self.cur = bb;
+            self.cur_closed = false;
+            match &arm.pat {
+                HirPat::Variant { binds, .. } => {
+                    for (i, b) in binds.iter().enumerate() {
+                        if let Some(sym) = b {
+                            let bty = self
+                                .types
+                                .local_types
+                                .get(sym)
+                                .copied()
+                                .unwrap_or(Ty::Poison);
+                            let l = self.local(*sym, bty);
+                            self.emit(MirStmt::Assign {
+                                dst: Place::local(l),
+                                val: Rvalue::VariantPayload {
+                                    base: scrut_op.clone(),
+                                    index: i as u32,
+                                },
+                            });
+                        }
+                    }
+                }
+                HirPat::Bind { sym: Some(sym), .. } => {
+                    // `x => ..` binds the whole scrutinee value —
+                    // an owned copy, since matching only borrows.
+                    let l = self.local(*sym, scrut_ty);
+                    self.emit(MirStmt::Assign {
+                        dst: Place::local(l),
+                        val: Rvalue::Duplicate(scrut_op.clone()),
+                    });
+                }
+                _ => {}
+            }
+            let v = self.eval(arm.body);
+            if let Some(r) = &result {
+                self.emit(MirStmt::Assign {
+                    dst: r.clone(),
+                    val: Rvalue::Use(v),
+                });
+            }
+            if !self.cur_closed {
+                self.close(Terminator::Goto { target: join });
+            }
+        }
+        self.cur = join;
+        self.cur_closed = false;
+        result.map_or(Operand::Const(Const::Unit), Operand::Place)
     }
 
     /// `for x in iter { body }` desugars to a counted loop:

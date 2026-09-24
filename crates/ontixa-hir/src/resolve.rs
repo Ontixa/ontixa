@@ -19,7 +19,7 @@
 
 use crate::hir::{
     DataShape, Def, DefKind, ElemRef, FieldDef, FileEnv, FnSig, ModuleScope, ParamDef, Symbol,
-    SymbolKind, SymbolTable, TypeRef,
+    SymbolKind, SymbolTable, TypeRef, VariantDef,
 };
 use ontixa_ast::{AstModule, Item, TypeExpr, UseDecl};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
@@ -179,6 +179,8 @@ impl Resolver<'_> {
                         Item::Data(_) => DefKind::Data(DataShape {
                             fields: Vec::new(),
                             field_index: FxHashMap::default(),
+                            variants: Vec::new(),
+                            variant_index: FxHashMap::default(),
                         }),
                         Item::Fn(_) => DefKind::Function(FnSig {
                             params: Vec::new(),
@@ -254,9 +256,56 @@ impl Resolver<'_> {
                                 index: fields.len() as u32,
                             });
                         }
+                        // Enum variants — `Name(T, ..);` members. The
+                        // discriminant is declaration order; payload
+                        // types resolve through this file's env like
+                        // field types.
+                        let mut variants: Vec<VariantDef> = Vec::new();
+                        let mut variant_index: FxHashMap<InternId, u32> = FxHashMap::default();
+                        let mut variant_spans: FxHashMap<InternId, Span> = FxHashMap::default();
+                        for v in &d.variants {
+                            let vname = self.interner.intern(&v.name.name);
+                            if variant_index.contains_key(&vname) {
+                                self.diags.push(
+                                    Diagnostic::error(
+                                        Code::DuplicateDef,
+                                        format!(
+                                            "variant `{}` is defined more than once",
+                                            v.name.name
+                                        ),
+                                    )
+                                    .primary(v.name.span)
+                                    .label(variant_spans[&vname], "previous definition here")
+                                    .subject(v.name.name.clone()),
+                                );
+                                continue;
+                            }
+                            let payload: Vec<TypeRef> = v
+                                .payload
+                                .iter()
+                                .map(|t| self.resolve_type(t, wf.file))
+                                .collect();
+                            let symbol = self.symbols.push(Symbol {
+                                id: SymbolId::new(0),
+                                name: vname,
+                                kind: SymbolKind::Variant,
+                                mutable: false,
+                                owner: Some(def_id),
+                                span: v.name.span.rel(base),
+                            });
+                            variant_index.insert(vname, variants.len() as u32);
+                            variant_spans.insert(vname, v.name.span);
+                            variants.push(VariantDef {
+                                symbol,
+                                payload,
+                                index: variants.len() as u32,
+                            });
+                        }
                         self.defs[def_id.index()].kind = DefKind::Data(DataShape {
                             fields,
                             field_index,
+                            variants,
+                            variant_index,
                         });
                     }
                     Item::Fn(f) => {

@@ -30,6 +30,15 @@ pub enum Value {
     Unit,
     /// A `data` value: fields as cells in declared order.
     Struct(DefId, Vec<Cell>),
+    /// An enum `data` value: discriminant index plus payload cells.
+    Variant {
+        /// The enum `data` definition.
+        def: DefId,
+        /// Discriminant (variant index in declaration order).
+        tag: u32,
+        /// Payload values, aligned with the variant's declaration.
+        payload: Vec<Cell>,
+    },
     /// A `[T]` value: elements as cells in order.
     Array(Vec<Cell>),
     /// A read of a never-initialized local. Unreachable in accepted
@@ -50,6 +59,14 @@ impl Value {
                     .map(|c| Rc::new(RefCell::new(c.borrow().deep_clone())))
                     .collect(),
             ),
+            Value::Variant { def, tag, payload } => Value::Variant {
+                def: *def,
+                tag: *tag,
+                payload: payload
+                    .iter()
+                    .map(|c| Rc::new(RefCell::new(c.borrow().deep_clone())))
+                    .collect(),
+            },
             Value::Array(elems) => Value::Array(
                 elems
                     .iter()
@@ -60,9 +77,14 @@ impl Value {
         }
     }
 
-    /// Renders a value for `run` output. `name_of` resolves the data
-    /// definition name for struct display.
-    pub fn show(&self, name_of: &dyn Fn(DefId) -> String) -> String {
+    /// Renders a value for `run` output. `name_of` resolves a data
+    /// definition name; `variant_of` resolves `(def, discriminant)`
+    /// to a variant name.
+    pub fn show(
+        &self,
+        name_of: &dyn Fn(DefId) -> String,
+        variant_of: &dyn Fn(DefId, u32) -> String,
+    ) -> String {
         match self {
             Value::Int(v) => v.to_string(),
             Value::Float(v) => format!("{v}"),
@@ -71,11 +93,29 @@ impl Value {
             Value::Unit => "unit".into(),
             Value::Hole => "<uninitialized>".into(),
             Value::Struct(d, fields) => {
-                let inner: Vec<String> = fields.iter().map(|c| c.borrow().show(name_of)).collect();
+                let inner: Vec<String> = fields
+                    .iter()
+                    .map(|c| c.borrow().show(name_of, variant_of))
+                    .collect();
                 format!("{} {{ {} }}", name_of(*d), inner.join(", "))
             }
+            Value::Variant { def, tag, payload } => {
+                let name = format!("{}::{}", name_of(*def), variant_of(*def, *tag));
+                if payload.is_empty() {
+                    name
+                } else {
+                    let inner: Vec<String> = payload
+                        .iter()
+                        .map(|c| c.borrow().show(name_of, variant_of))
+                        .collect();
+                    format!("{name}({})", inner.join(", "))
+                }
+            }
             Value::Array(elems) => {
-                let inner: Vec<String> = elems.iter().map(|c| c.borrow().show(name_of)).collect();
+                let inner: Vec<String> = elems
+                    .iter()
+                    .map(|c| c.borrow().show(name_of, variant_of))
+                    .collect();
                 format!("[{}]", inner.join(", "))
             }
         }

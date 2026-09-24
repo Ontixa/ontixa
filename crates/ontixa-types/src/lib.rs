@@ -39,7 +39,7 @@ pub fn check_src(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ontixa_hir::{HirExprKind, HirStmt};
+    use ontixa_hir::{HirExprKind, HirPat, HirStmt};
 
     /// Finds the `let` binding named `name` in `main` and returns its
     /// inferred type.
@@ -430,5 +430,161 @@ mod tests {
             tables[main.index()].as_ref().unwrap().ty_of(*init),
             Ty::Struct(p_def)
         );
+    }
+
+    // ---- enum `data` and `match` ------------------------------------
+
+    #[test]
+    fn variant_construction_types_to_enum() {
+        let (m, tables, mut interner, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let opt = m.scope.root_env().datas[&interner.intern("Opt")];
+        let main = m.scope.root_env().fns[&interner.intern("main")];
+        let body = m.body(main).expect("body");
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
+            panic!()
+        };
+        let HirStmt::Let {
+            init: Some(init), ..
+        } = &stmts[0]
+        else {
+            panic!()
+        };
+        assert_eq!(
+            tables[main.index()].as_ref().unwrap().ty_of(*init),
+            Ty::Struct(opt)
+        );
+    }
+
+    #[test]
+    fn match_binds_payload_and_unifies_result() {
+        let (m, tables, mut interner, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some(v) => v, Opt::None => 0 }; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let main = m.scope.root_env().fns[&interner.intern("main")];
+        let body = m.body(main).expect("body");
+        let HirExprKind::Block { stmts, .. } = &body.expr(body.root).kind else {
+            panic!()
+        };
+        let HirStmt::Return { value: Some(v), .. } = &stmts[1] else {
+            panic!("expected return")
+        };
+        let HirExprKind::Match { arms, .. } = &body.expr(*v).kind else {
+            panic!("expected match")
+        };
+        let HirPat::Variant { binds, .. } = &arms[0].pat else {
+            panic!("expected variant pattern")
+        };
+        let bind = binds[0].expect("binding");
+        assert_eq!(
+            tables[main.index()].as_ref().unwrap().local_types[&bind],
+            Ty::I32
+        );
+        assert_eq!(tables[main.index()].as_ref().unwrap().ty_of(*v), Ty::I32);
+    }
+
+    #[test]
+    fn match_requires_exhaustive_arms() {
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some(v) => v }; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::NonExhaustive));
+        // A catch-all arm makes it exhaustive again.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some(v) => v, _ => 0 }; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn match_rejects_bad_scrutinees() {
+        // Record `data` is not matchable.
+        let (_, _, _, diags) = check_src(
+            "data P { x: i32; } fn main() -> i32 { let p = P { x: 1 }; return match p { _ => 0 }; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::UnsupportedOperation));
+        // Primitive scrutinee.
+        let (_, _, _, diags) = check_src("fn main() -> i32 { return match 5 { _ => 0 }; }");
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::UnsupportedOperation));
+        // Variant of a different enum mismatches the scrutinee.
+        let (_, _, _, diags) = check_src(
+            "data A { X; } data B { Y; } fn main() -> i32 { let a = A::X; return match a { B::Y => 0, _ => 1 }; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::TypeMismatch));
+    }
+
+    #[test]
+    fn match_checks_pattern_arity() {
+        // Too many payload bindings.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some(a, b) => a, Opt::None => 0 }; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::ArgCount));
+        // Too few.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some => 0, Opt::None => 1 }; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::ArgCount));
+    }
+
+    #[test]
+    fn match_arm_bodies_must_unify() {
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some(v) => v, Opt::None => true }; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::TypeMismatch));
+    }
+
+    #[test]
+    fn unreachable_arms_warn() {
+        // After a catch-all, every later arm is dead.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { _ => 0, Opt::None => 1 }; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::UnreachableArm));
+        // A repeated variant arm is dead too.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some(a) => a, Opt::Some(b) => b, Opt::None => 0 }; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::UnreachableArm));
+    }
+
+    #[test]
+    fn variant_constructor_checks_arity_and_types() {
+        // Wrong arity.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(); return 0; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::ArgCount));
+        // Wrong payload type.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(\"x\"); return 0; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::TypeMismatch));
+        // Unit variants take no call parens — `Opt::None` alone is a value.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::None; return match o { Opt::Some(v) => v, Opt::None => 0 }; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn enum_cannot_be_record_constructed() {
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt { x: 1 }; return 0; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::UnsupportedOperation));
+    }
+
+    #[test]
+    fn exhaustive_match_of_returns_diverges() {
+        // Every arm returns — the function needs no tail.
+        let (_, _, _, diags) = check_src(
+            "data Opt { Some(i32); None; } fn f(o: Opt) -> i32 { match o { Opt::Some(v) => { return v; }, Opt::None => { return 0; } } } fn main() -> i32 { return f(Opt::None); }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
     }
 }

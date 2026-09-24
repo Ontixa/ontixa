@@ -9,8 +9,8 @@
 //! item-local diagnostics stay valid until rebased at collection.
 
 use crate::ast::{
-    Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Param, Path, Place, Stmt,
-    TypeExpr,
+    Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, MatchArm, Param, Path, Pattern,
+    Place, Stmt, TypeExpr, Variant,
 };
 use ontixa_source::Span;
 
@@ -60,6 +60,15 @@ fn rebase_data(d: &DataDecl, base: u32) -> DataDecl {
                 name: ident(&f.name, base),
                 ty: type_expr(&f.ty, base),
                 span: rel(f.span, base),
+            })
+            .collect(),
+        variants: d
+            .variants
+            .iter()
+            .map(|v| Variant {
+                name: ident(&v.name, base),
+                payload: v.payload.iter().map(|t| type_expr(t, base)).collect(),
+                span: rel(v.span, base),
             })
             .collect(),
         span: rel(d.span, base),
@@ -192,6 +201,22 @@ fn expr(e: &Expr, base: u32) -> Expr {
             hi: hi.as_deref().map(|e| Box::new(expr(e, base))),
             span: rel(*span, base),
         },
+        Expr::Match {
+            scrutinee,
+            arms,
+            span,
+        } => Expr::Match {
+            scrutinee: Box::new(expr(scrutinee, base)),
+            arms: arms
+                .iter()
+                .map(|a| MatchArm {
+                    pat: pattern(&a.pat, base),
+                    body: expr(&a.body, base),
+                    span: rel(a.span, base),
+                })
+                .collect(),
+            span: rel(*span, base),
+        },
         Expr::For {
             var,
             mutable,
@@ -251,6 +276,23 @@ fn expr(e: &Expr, base: u32) -> Expr {
             path: path(p, base),
         },
         Expr::Error { span } => Expr::Error {
+            span: rel(*span, base),
+        },
+    }
+}
+
+fn pattern(p: &Pattern, base: u32) -> Pattern {
+    match p {
+        Pattern::Bind { name } => Pattern::Bind {
+            name: ident(name, base),
+        },
+        Pattern::Variant {
+            path: p,
+            binds,
+            span,
+        } => Pattern::Variant {
+            path: path(p, base),
+            binds: binds.iter().map(|b| ident(b, base)).collect(),
             span: rel(*span, base),
         },
     }

@@ -12,10 +12,12 @@
 //! guesses, so later passes never see fabricated semantics.
 
 use crate::hir::{
-    ElemRef, FileEnv, HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope,
-    Name, Symbol, SymbolKind, TypeRef,
+    ElemRef, FileEnv, HirArm, HirBody, HirExpr, HirExprKind, HirModule, HirPat, HirPlace, HirStmt,
+    ModuleScope, Name, Symbol, SymbolKind, TypeRef,
 };
-use ontixa_ast::{AstModule, Block, Expr, FnDecl, Ident, Item, Path, Place, Stmt, TypeExpr};
+use ontixa_ast::{
+    AstModule, Block, Expr, FnDecl, Ident, Item, Path, Pattern, Place, Stmt, TypeExpr,
+};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_source::{DefId, ExprId, InternId, Interner, Span, SymbolId};
 use rustc_hash::FxHashMap;
@@ -119,6 +121,17 @@ enum PathErr {
     NotFound,
 }
 
+/// How a `T::V`/`m::T::V` path failed to name a `data` variant.
+#[derive(Debug, Clone, Copy)]
+enum VariantErr {
+    /// The `m` in `m::T::V` is not a bound module.
+    UnknownModule,
+    /// Wrong shape, or the type segment is not a `data` def.
+    NotFound,
+    /// The data def exists but has no such variant.
+    NotVariant(DefId),
+}
+
 struct BodyLowerer<'a> {
     def: DefId,
     /// The file this body lives in — selects the [`FileEnv`] its
@@ -219,6 +232,91 @@ impl BodyLowerer<'_> {
             }
             _ => Err(PathErr::NotFound),
         }
+    }
+
+    /// Resolves a variant path `T::V` or `m::T::V` to `(data DefId,
+    /// discriminant index)`. `T` resolves through this file's data
+    /// env (own `data` defs and `use m::T` member imports); `m::T::V`
+    /// reaches into a bound module's data defs.
+    fn resolve_variant(&mut self, path: &Path) -> Result<(DefId, u32), VariantErr> {
+        match path.segs.as_slice() {
+            [t, v] => {
+                let tid = self.interner.intern(&t.name);
+                let env = self.env();
+                let data = env.datas.get(&tid).copied().or_else(|| {
+                    env.imports
+                        .get(&tid)
+                        .copied()
+                        .filter(|d| self.scope.data_shape(*d).is_some())
+                });
+                let Some(data) = data else {
+                    return Err(VariantErr::NotFound);
+                };
+                self.variant_index_of(data, v)
+            }
+            [m, t, v] => {
+                let mid = self.interner.intern(&m.name);
+                let Some(&mfile) = self.env().modules.get(&mid) else {
+                    return Err(VariantErr::UnknownModule);
+                };
+                let tid = self.interner.intern(&t.name);
+                let data = self
+                    .scope
+                    .env(mfile)
+                    .and_then(|e| e.datas.get(&tid).copied());
+                let Some(data) = data else {
+                    return Err(VariantErr::NotFound);
+                };
+                self.variant_index_of(data, v)
+            }
+            _ => Err(VariantErr::NotFound),
+        }
+    }
+
+    /// Looks up variant `v` in `data`'s shape.
+    fn variant_index_of(&mut self, data: DefId, v: &Ident) -> Result<(DefId, u32), VariantErr> {
+        let vid = self.interner.intern(&v.name);
+        let shape = self
+            .scope
+            .data_shape(data)
+            .expect("resolve_variant only returns data defs");
+        match shape.variant_index.get(&vid) {
+            Some(&idx) => Ok((data, idx)),
+            None => Err(VariantErr::NotVariant(data)),
+        }
+    }
+
+    /// The diagnostic for a failed [`Self::resolve_variant`].
+    fn variant_error(&mut self, path: &Path, err: VariantErr) {
+        let segs = &path.segs;
+        let d = match err {
+            VariantErr::UnknownModule => Diagnostic::error(
+                Code::UnknownModule,
+                format!("unknown module `{}`", segs[0].name),
+            )
+            .primary(segs[0].span)
+            .subject(segs[0].name.clone()),
+            VariantErr::NotVariant(def) => {
+                let data = self
+                    .interner
+                    .resolve(self.scope.symbols.get(self.scope.def(def).name).name)
+                    .to_string();
+                let last = segs.last().expect("variant paths have segments");
+                Diagnostic::error(
+                    Code::UnknownSymbol,
+                    format!("`{data}` has no variant `{}`", last.name),
+                )
+                .primary(last.span)
+                .subject(last.name.clone())
+            }
+            VariantErr::NotFound => Diagnostic::error(
+                Code::UnknownSymbol,
+                format!("`{}` does not name a `data` variant", path.display()),
+            )
+            .primary(path.span)
+            .subject(path.display()),
+        };
+        self.diags.push(d);
     }
 
     /// The diagnostic for a failed [`Self::path_def`] — `code` covers
@@ -399,10 +497,26 @@ impl BodyLowerer<'_> {
                         );
                         self.alloc_expr(HirExprKind::Poison, span)
                     }
-                    Err(e) => {
-                        self.path_error(callee, e, "function", Code::UnknownSymbol);
-                        self.alloc_expr(HirExprKind::Poison, span)
-                    }
+                    Err(e) => match self.resolve_variant(callee) {
+                        // `T::V(args)` / `m::T::V(args)` — a variant
+                        // constructor, not a function call.
+                        Ok((d, v)) => self.alloc_expr(
+                            HirExprKind::VariantLit {
+                                def: d,
+                                variant: v,
+                                args,
+                            },
+                            span,
+                        ),
+                        Err(e2 @ VariantErr::NotVariant(_)) => {
+                            self.variant_error(callee, e2);
+                            self.alloc_expr(HirExprKind::Poison, span)
+                        }
+                        Err(_) => {
+                            self.path_error(callee, e, "function", Code::UnknownSymbol);
+                            self.alloc_expr(HirExprKind::Poison, span)
+                        }
+                    },
                 }
             }
             Expr::Path { path } => {
@@ -421,10 +535,30 @@ impl BodyLowerer<'_> {
                             .primary(path.span)
                             .subject(path.display()),
                         );
+                        self.alloc_expr(HirExprKind::Poison, span)
                     }
-                    Err(e) => self.path_error(path, e, "symbol", Code::UnknownSymbol),
+                    Err(e) => match self.resolve_variant(path) {
+                        // A bare `T::V` constructs a variant with no
+                        // payload arguments — arity errors come from
+                        // the checker.
+                        Ok((d, v)) => self.alloc_expr(
+                            HirExprKind::VariantLit {
+                                def: d,
+                                variant: v,
+                                args: Vec::new(),
+                            },
+                            span,
+                        ),
+                        Err(e2 @ VariantErr::NotVariant(_)) => {
+                            self.variant_error(path, e2);
+                            self.alloc_expr(HirExprKind::Poison, span)
+                        }
+                        Err(_) => {
+                            self.path_error(path, e, "symbol", Code::UnknownSymbol);
+                            self.alloc_expr(HirExprKind::Poison, span)
+                        }
+                    },
                 }
-                self.alloc_expr(HirExprKind::Poison, span)
             }
             Expr::Field { base, name, .. } => {
                 let base = self.expr(base)?;
@@ -474,6 +608,34 @@ impl BodyLowerer<'_> {
                 let body = self.block(body);
                 self.scopes.pop();
                 self.alloc_expr(HirExprKind::For { var, iter, body }, span)
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                let scrutinee = self.expr(scrutinee)?;
+                let mut hir_arms = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    // Each arm is its own scope: pattern bindings are
+                    // visible in the arm body only, never across arms.
+                    self.scopes.push(FxHashMap::default());
+                    let pat = self.pattern(&arm.pat);
+                    let body = self
+                        .expr(&arm.body)
+                        .unwrap_or_else(|| self.alloc_expr(HirExprKind::Poison, arm.span));
+                    self.scopes.pop();
+                    hir_arms.push(HirArm {
+                        pat,
+                        body,
+                        span: arm.span,
+                    });
+                }
+                self.alloc_expr(
+                    HirExprKind::Match {
+                        scrutinee,
+                        arms: hir_arms,
+                    },
+                    span,
+                )
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let lhs = self.expr(lhs)?;
@@ -601,6 +763,52 @@ impl BodyLowerer<'_> {
                 self.path_error(path, e, "type", Code::UnknownType);
                 TypeRef::Poison
             }
+        }
+    }
+
+    /// Lowers a match pattern inside the current (arm) scope.
+    /// `T::V(b, ..)` resolves the variant and declares each payload
+    /// binding (`_` slots bind nothing); a bare `x` declares a binding
+    /// for the whole scrutinee and `_` is the wildcard.
+    fn pattern(&mut self, pat: &Pattern) -> HirPat {
+        match pat {
+            Pattern::Bind { name } => {
+                if name.name == "_" {
+                    HirPat::Bind {
+                        sym: None,
+                        span: name.span,
+                    }
+                } else {
+                    HirPat::Bind {
+                        sym: Some(self.declare_local(name, false)),
+                        span: name.span,
+                    }
+                }
+            }
+            Pattern::Variant { path, binds, span } => match self.resolve_variant(path) {
+                Ok((def, variant)) => {
+                    let binds = binds
+                        .iter()
+                        .map(|b| {
+                            if b.name == "_" {
+                                None
+                            } else {
+                                Some(self.declare_local(b, false))
+                            }
+                        })
+                        .collect();
+                    HirPat::Variant {
+                        def,
+                        variant,
+                        binds,
+                        span: *span,
+                    }
+                }
+                Err(e) => {
+                    self.variant_error(path, e);
+                    HirPat::Poison
+                }
+            },
         }
     }
 

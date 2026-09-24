@@ -217,6 +217,64 @@ mod tests {
     }
 
     #[test]
+    fn parses_data_variants() {
+        let root = parse_ok(
+            "data Option { Some(i32); None; }\ndata Shape { Circle(i32); Rect(i32, i32); Origin; }",
+        );
+        assert_eq!(
+            root.descendants()
+                .filter(|n| n.kind() == SyntaxKind::VARIANT)
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn parses_match_and_patterns() {
+        let root = parse_ok(
+            "data Option { Some(i32); None; }\nfn f(o: Option) -> i32 { return match o { Option::Some(v) => v, Option::None => 0, _ => 1 }; }",
+        );
+        assert!(find_kind(&root, SyntaxKind::MATCH_EXPR));
+        assert_eq!(
+            root.descendants()
+                .filter(|n| n.kind() == SyntaxKind::MATCH_ARM)
+                .count(),
+            3
+        );
+        assert_eq!(
+            root.descendants()
+                .filter(|n| n.kind() == SyntaxKind::PAT_VARIANT)
+                .count(),
+            2
+        );
+        assert!(find_kind(&root, SyntaxKind::PAT_BIND));
+    }
+
+    #[test]
+    fn match_scrutinee_never_opens_struct_lit() {
+        // `match s { ... }` — the `{` is the arm list even though `s`
+        // could otherwise read as a record literal's name.
+        let (root, diags) = parse_file(
+            "data E { A; B; }\nfn f(e: E) -> i32 { match e { E::A => 1, E::B => 2 } return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let m = root
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::MATCH_EXPR)
+            .expect("match expr");
+        assert!(m.children().any(|n| n.kind() == SyntaxKind::MATCH_ARM_LIST));
+        assert!(!m.children().any(|n| n.kind() == SyntaxKind::STRUCT_LIT));
+    }
+
+    #[test]
+    fn mixed_data_members_error() {
+        let (_, diags) = parse_file("data Bad { x: i32; V(i32); }");
+        assert!(diags.has_errors());
+        let (_, diags) = parse_file("data Bad { V(i32); x: i32; }");
+        assert!(diags.has_errors());
+    }
+
+    #[test]
     fn malformed_input_does_not_panic() {
         for src in [
             "",
@@ -244,6 +302,15 @@ mod tests {
             "fn f() { for i in }",
             "fn f() { [",
             "fn f() { for i in 0.. [1] }",
+            "fn f() { match }",
+            "fn f() { match x }",
+            "fn f() { match x { ",
+            "fn f() { match x { => }",
+            "fn f() { match x { T::V( => 1 } }",
+            "data D { V( }",
+            "data D { V(i32) }",
+            "data D { x i32; }",
+            "data D { ; }",
         ] {
             let _ = parse_file(src); // must not panic
         }

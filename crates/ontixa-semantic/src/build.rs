@@ -1,7 +1,7 @@
 //! Builds the [`SemanticGraph`] from the typed, analyzed module.
 
 use crate::graph::{EdgeKind, NodeId, NodeKind, SemanticGraph};
-use ontixa_hir::{DefKind, HirBody, HirExprKind, HirModule, HirStmt, SymbolKind};
+use ontixa_hir::{DefKind, HirBody, HirExprKind, HirModule, HirPat, HirStmt, SymbolKind};
 use ontixa_memory::{OwnershipTables, ParamBehavior};
 use ontixa_source::{DefId, ExprId, FileId, Interner, Span, SymbolId};
 use ontixa_types::{ModuleTypes, Ty, TypeTables};
@@ -102,14 +102,19 @@ impl Builder<'_> {
             self.g.set_attr(n, "file", json!(def.file.index()));
         }
         for sym in self.module.scope.symbols.iter() {
-            // Module-level symbols: defs (already added) and fields.
+            // Module-level symbols: defs (already added), fields, and
+            // enum variants.
             debug_assert!(!sym.id.is_local());
             if matches!(sym.kind, SymbolKind::Function | SymbolKind::Data) {
                 continue; // already added as def nodes
             }
+            let kind = match sym.kind {
+                SymbolKind::Variant => NodeKind::Variant,
+                _ => NodeKind::Field,
+            };
             let owner = sym.owner.unwrap_or(DefId::new(0));
             let n = self.g.add_node(
-                NodeKind::Field,
+                kind,
                 self.sym_name(None, sym.id),
                 Some(self.abs(owner, sym.span)),
             );
@@ -123,6 +128,7 @@ impl Builder<'_> {
                 DefKind::Function(sig) => self.function_body_graph(def.id, sig.clone()),
                 DefKind::Data(shape) => {
                     let dnode = self.symbol_nodes[&(def.id, def.name)];
+                    self.g.set_attr(dnode, "shape", json!(shape.shape_name()));
                     for f in &shape.fields {
                         let fnode = self.symbol_nodes[&(def.id, f.symbol)];
                         self.g.add_edge_attr(
@@ -135,6 +141,27 @@ impl Builder<'_> {
                         let ty = Ty::from_ref(f.ty);
                         let tnode = self.type_node(ty);
                         self.g.add_edge(fnode, tnode, EdgeKind::TypedAs);
+                    }
+                    for v in &shape.variants {
+                        let vnode = self.symbol_nodes[&(def.id, v.symbol)];
+                        self.g.add_edge_attr(
+                            dnode,
+                            vnode,
+                            EdgeKind::HasVariant,
+                            "discriminant",
+                            json!(v.index),
+                        );
+                        // Payload element types, in order.
+                        for (i, t) in v.payload.iter().enumerate() {
+                            let tnode = self.type_node(Ty::from_ref(*t));
+                            self.g.add_edge_attr(
+                                vnode,
+                                tnode,
+                                EdgeKind::TypedAs,
+                                "position",
+                                json!(i),
+                            );
+                        }
                     }
                 }
             }
@@ -351,6 +378,8 @@ impl Builder<'_> {
             HirExprKind::If { .. } => "if",
             HirExprKind::Block { .. } => "block",
             HirExprKind::StructLit { .. } => "struct_lit",
+            HirExprKind::VariantLit { .. } => "variant_lit",
+            HirExprKind::Match { .. } => "match",
             HirExprKind::Poison => "poison",
         };
         let n = self.g.add_node(
@@ -526,6 +555,98 @@ impl Builder<'_> {
                         "field",
                         json!(self.interner.resolve(name.id)),
                     );
+                }
+            }
+            HirExprKind::VariantLit { def, variant, args } => {
+                // Construction targets the variant symbol (its parent
+                // data def is one `has_variant` edge away).
+                if let Some(vdef) = self
+                    .module
+                    .scope
+                    .data_shape(def)
+                    .and_then(|s| s.variants.get(variant as usize))
+                {
+                    let vsym = vdef.symbol;
+                    if let Some(vn) = self.symbol_nodes.get(&(def, vsym)) {
+                        let vn = *vn;
+                        self.g.add_edge(n, vn, EdgeKind::Constructs);
+                    }
+                    self.g.set_attr(n, "variant", json!(variant));
+                }
+                for (i, a) in args.iter().enumerate() {
+                    let an = self.expr_node(body, tables, *a);
+                    self.g
+                        .add_edge_attr(n, an, EdgeKind::Contains, "position", json!(i));
+                }
+            }
+            HirExprKind::Match { scrutinee, arms } => {
+                let sn = self.expr_node(body, tables, scrutinee);
+                self.g
+                    .add_edge_attr(n, sn, EdgeKind::Contains, "role", json!("scrutinee"));
+                for (i, arm) in arms.iter().enumerate() {
+                    let an = self.g.add_node(
+                        NodeKind::Arm,
+                        "arm".to_string(),
+                        Some(self.abs(body.def, arm.span)),
+                    );
+                    self.g
+                        .add_edge_attr(n, an, EdgeKind::Contains, "position", json!(i));
+                    match &arm.pat {
+                        HirPat::Variant {
+                            def,
+                            variant,
+                            binds,
+                            ..
+                        } => {
+                            self.g.set_attr(an, "pattern", json!("variant"));
+                            self.g.set_attr(an, "variant", json!(variant));
+                            if let Some(vdef) = self
+                                .module
+                                .scope
+                                .data_shape(*def)
+                                .and_then(|s| s.variants.get(*variant as usize))
+                            {
+                                let vsym = vdef.symbol;
+                                if let Some(vn) = self.symbol_nodes.get(&(*def, vsym)) {
+                                    let vn = *vn;
+                                    self.g.add_edge(an, vn, EdgeKind::Matches);
+                                }
+                            }
+                            for (j, b) in binds.iter().enumerate() {
+                                if let Some(sym) = b {
+                                    if let Some(bn) = self.symbol_nodes.get(&(body.def, *sym)) {
+                                        let bn = *bn;
+                                        self.g.add_edge_attr(
+                                            an,
+                                            bn,
+                                            EdgeKind::Binds,
+                                            "position",
+                                            json!(j),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        HirPat::Bind { sym, .. } => {
+                            self.g.set_attr(
+                                an,
+                                "pattern",
+                                json!(if sym.is_some() { "bind" } else { "wildcard" }),
+                            );
+                            if let Some(sym) = sym {
+                                if let Some(bn) = self.symbol_nodes.get(&(body.def, *sym)) {
+                                    let bn = *bn;
+                                    self.g.add_edge(an, bn, EdgeKind::Binds);
+                                }
+                            }
+                        }
+                        HirPat::Poison => {
+                            self.g.set_attr(an, "pattern", json!("poison"));
+                        }
+                    }
+                    let bn = self.expr_node(body, tables, arm.body);
+                    self.g
+                        .add_edge_attr(an, bn, EdgeKind::Contains, "role", json!("body"));
                 }
             }
             HirExprKind::Literal(_) | HirExprKind::Poison => {}
