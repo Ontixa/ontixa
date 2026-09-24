@@ -1,16 +1,20 @@
 //! `ontixa explain` — semantic introspection.
 //!
 //! Without a symbol: one summary per top-level definition (signature +
-//! inferred ownership contracts). With a symbol: resolves the name
-//! against the module's semantic symbol table — not source text — and
-//! explains the single match, or emits `E_AMBIGUOUS_SYMBOL` /
-//! `E_UNKNOWN_SYMBOL` as appropriate.
+//! inferred ownership contracts), grouped by the file the def lives
+//! in. With a symbol: resolves the name against the module's semantic
+//! symbol table — not source text — and explains the single match, or
+//! emits `E_AMBIGUOUS_SYMBOL` / `E_UNKNOWN_SYMBOL` as appropriate.
+//!
+//! A workspace explain spans every `use`-reachable file, so every def,
+//! symbol, and ambiguity candidate carries a `file` tag — the same
+//! display name diagnostics put in `primary.file`.
 
 use crate::envelope::{Envelope, emit_human_diags, print_timings};
 use ontixa_db::Artifacts;
 use ontixa_diagnostics::{Code, Diagnostic};
 use ontixa_hir::{DefKind, HirModule, SymbolKind};
-use ontixa_source::{DefId, Interner, SourceFile, SymbolId};
+use ontixa_source::{DefId, FileId, Interner, SourceFile, SymbolId};
 use ontixa_types::Ty;
 use serde_json::{Value as Json, json};
 use std::process::ExitCode;
@@ -26,7 +30,7 @@ pub fn run(
     timings: bool,
 ) -> ExitCode {
     a.diags.sort();
-    let (result, extra) = explain_result(&a, symbol, &file.display().to_string());
+    let (result, extra) = explain_result(&a, &sfs, symbol, &file.display().to_string());
 
     if json {
         let mut e = Envelope::new("explain")
@@ -46,9 +50,10 @@ pub fn run(
         }
         let code = emit_human_diags(&a.diags, &sfs);
         match symbol {
+            // Defs arrive file-tagged — group them under each file's
+            // display name (a single file prints exactly one header).
             None => {
-                println!("{}", file.display());
-                print_defs(&def_summaries(&a));
+                print_workspace_defs(result["defs"].as_array().map(Vec::as_slice).unwrap_or(&[]))
             }
             Some(_) => print_symbol(&result["symbol"]),
         }
@@ -60,9 +65,12 @@ pub fn run(
 }
 
 /// The pure query: symbol name → `(result, extra_diagnostic)`.
-/// Daemon/CLI agnostic — `run` wraps it in output modes.
+/// Daemon/CLI agnostic — `run` wraps it in output modes. `files` tags
+/// each def/symbol/candidate with the source file it lives in (the
+/// same display names diagnostics use).
 pub fn explain_result(
     a: &Artifacts,
+    files: &[SourceFile],
     symbol: Option<&str>,
     file_name: &str,
 ) -> (Json, Option<Diagnostic>) {
@@ -70,14 +78,14 @@ pub fn explain_result(
         None => (
             json!({
                 "file": file_name,
-                "defs": def_summaries(a),
+                "defs": def_summaries(a, files),
             }),
             None,
         ),
         Some(name) => match resolve_symbol(a, name) {
-            Resolved::Def(def) => (json!({"symbol": def_json(a, def)}), None),
-            Resolved::Sym(owner, sym) => (json!({"symbol": sym_json(a, owner, sym)}), None),
-            Resolved::Ambiguous(cands) => (Json::Null, Some(ambiguous(a, name, &cands))),
+            Resolved::Def(def) => (json!({"symbol": def_json(a, files, def)}), None),
+            Resolved::Sym(owner, sym) => (json!({"symbol": sym_json(a, files, owner, sym)}), None),
+            Resolved::Ambiguous(cands) => (Json::Null, Some(ambiguous(a, files, name, &cands))),
             Resolved::Unknown => (
                 Json::Null,
                 Some(
@@ -200,9 +208,34 @@ fn item_base(a: &Artifacts, def: DefId) -> u32 {
     a.asts[&d.file].items[d.item as usize].span().start
 }
 
+/// The display name `file` carries in explain output — the same tag
+/// diagnostics put in `primary.file`. Falls back to the interned
+/// module (file-stem) name when the file is absent from `files`;
+/// every compiled file registers one, so that path is defensive.
+fn file_tag(a: &Artifacts, files: &[SourceFile], file: FileId) -> String {
+    files
+        .iter()
+        .find(|s| s.id() == file)
+        .map(|s| s.name().to_string())
+        .or_else(|| {
+            a.module
+                .scope
+                .file_name(file)
+                .map(|n| a.interner.resolve(n).to_string())
+        })
+        .unwrap_or_else(|| "?".to_string())
+}
+
 /// Builds the ambiguity diagnostic: one label per candidate so both
-/// humans and machines see every match.
-fn ambiguous(a: &Artifacts, name: &str, cands: &[(DefId, SymbolId)]) -> Diagnostic {
+/// humans and machines see every match. Candidates may live in
+/// different files — `details.candidates` tags each with its `file`
+/// (label spans index into that file's text).
+fn ambiguous(
+    a: &Artifacts,
+    files: &[SourceFile],
+    name: &str,
+    cands: &[(DefId, SymbolId)],
+) -> Diagnostic {
     let mut d = Diagnostic::error(
         Code::AmbiguousSymbol,
         format!("`{name}` is ambiguous: {} candidates", cands.len()),
@@ -218,6 +251,7 @@ fn ambiguous(a: &Artifacts, name: &str, cands: &[(DefId, SymbolId)]) -> Diagnost
         cand_json.push(json!({
             "kind": kind_str(s.kind),
             "owner": owner_name,
+            "file": file_tag(a, files, a.module.scope.def(owner).file),
             "span": {"start": abs.start, "end": abs.end},
             "description": desc,
         }));
@@ -276,11 +310,13 @@ fn ty_name(m: &HirModule, interner: &Interner, ty: Ty) -> String {
     }
 }
 
-/// A `fn` def as `{name, params:[{name,type,mutable,behavior}], returns}`.
-fn def_json(a: &Artifacts, def: DefId) -> Json {
+/// A def (`fn` or `data`) as its explanation record — `file` names
+/// the workspace file the def was resolved in.
+fn def_json(a: &Artifacts, files: &[SourceFile], def: DefId) -> Json {
     let m = &a.module;
     let d = m.scope.def(def);
     let name = def_name(m, &a.interner, def);
+    let file = file_tag(a, files, d.file);
     match &d.kind {
         DefKind::Function(sig) => {
             let contract = a.ownership.contract(def);
@@ -317,6 +353,7 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
             json!({
                 "kind": "fn",
                 "name": name,
+                "file": file,
                 "params": params,
                 "returns": ty_name(m, &a.interner, Ty::from_ref(sig.ret)),
             })
@@ -350,6 +387,7 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
             json!({
                 "kind": "data",
                 "name": name,
+                "file": file,
                 "shape": shape.shape_name(),
                 "fields": fields,
                 "variants": variants,
@@ -360,8 +398,9 @@ fn def_json(a: &Artifacts, def: DefId) -> Json {
 
 /// A non-def symbol (param / local / field) as an explanation record.
 /// `owner` is the def the symbol belongs to — required because
-/// body-local ids are only meaningful within their owning body.
-fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
+/// body-local ids are only meaningful within their owning body. The
+/// `file` tag names the owner def's file.
+fn sym_json(a: &Artifacts, files: &[SourceFile], owner: DefId, sym: SymbolId) -> Json {
     let m = &a.module;
     let s = sym_of(m, owner, sym);
     let name = a.interner.resolve(s.name);
@@ -378,6 +417,7 @@ fn sym_json(a: &Artifacts, owner: DefId, sym: SymbolId) -> Json {
         "name": name,
         "mutable": s.mutable,
         "owner": def_name(m, &a.interner, owner),
+        "file": file_tag(a, files, m.scope.def(owner).file),
         "span": {"start": span.start, "end": span.end},
     });
     if let Some(t) = ty {
@@ -441,18 +481,37 @@ fn evidence_json(s: &ontixa_memory::ParamSummary, base: u32) -> Json {
     )
 }
 
-fn def_summaries(a: &Artifacts) -> Vec<Json> {
+fn def_summaries(a: &Artifacts, files: &[SourceFile]) -> Vec<Json> {
     a.module
         .scope
         .defs
         .iter()
-        .map(|d| def_json(a, d.id))
+        .map(|d| def_json(a, files, d.id))
         .collect()
 }
 
 // ---------- human output ----------
 
-fn print_defs(defs: &[Json]) {
+/// Prints defs grouped under their `file` tag — a workspace explain
+/// shows each file's defs under that file's display name. Group order
+/// is first-seen, so a single-file explain prints exactly what it did
+/// before file tags existed.
+fn print_workspace_defs(defs: &[Json]) {
+    let mut groups: Vec<(&str, Vec<&Json>)> = Vec::new();
+    for d in defs {
+        let file = d["file"].as_str().unwrap_or("?");
+        match groups.iter_mut().find(|(f, _)| *f == file) {
+            Some((_, ds)) => ds.push(d),
+            None => groups.push((file, vec![d])),
+        }
+    }
+    for (file, ds) in groups {
+        println!("{file}");
+        print_defs(&ds);
+    }
+}
+
+fn print_defs(defs: &[&Json]) {
     for d in defs {
         if d["kind"] == "fn" {
             let params: Vec<String> = d["params"]
@@ -539,15 +598,19 @@ fn print_symbol(s: &Json) {
     if s.is_null() {
         return;
     }
-    // Defs share the def_summaries shape — reuse the same renderer.
+    // Defs share the def_summaries shape — reuse the same renderer
+    // (the file header comes with it, same as the listing form).
     if matches!(s["kind"].as_str(), Some("fn" | "data")) {
-        print_defs(std::slice::from_ref(s));
+        print_workspace_defs(std::slice::from_ref(s));
         return;
     }
     println!("symbol: {}", s["name"].as_str().unwrap_or("?"));
     println!("  kind: {}", s["kind"].as_str().unwrap_or("?"));
     if let Some(o) = s["owner"].as_str() {
         println!("  owner: {o}");
+    }
+    if let Some(f) = s["file"].as_str() {
+        println!("  file: {f}");
     }
     if let Some(t) = s["type"].as_str() {
         println!("  type: {t}");

@@ -538,6 +538,100 @@ fn daemon_dep_edit_reruns_only_dep_chain() {
     assert!(bodies[0].contains("DefKey(0:1:"), "{ev:?}");
 }
 
+/// A workspace `explain` tags every def with the file it lives in —
+/// `result.defs[].file` in JSON, per-file groups in human output —
+/// instead of listing every module under the root's name.
+#[test]
+fn explain_workspace_tags_defs_with_their_files() {
+    let main = ws_fixture(
+        "explfiles",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }\ndata P { x: i32; }",
+    );
+    let out = ontixa(&["explain", main.to_str().unwrap(), "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true, "{d}");
+    let defs = d["result"]["defs"].as_array().unwrap();
+    let file_of = |name: &str| {
+        defs.iter()
+            .find(|x| x["name"] == name)
+            .unwrap_or_else(|| panic!("no def {name} in {defs:?}"))["file"]
+            .as_str()
+            .unwrap_or_else(|| panic!("def {name} carries no file tag"))
+            .to_string()
+    };
+    assert!(file_of("main").ends_with("main.ixa"), "{defs:?}");
+    assert!(file_of("double").ends_with("math.ixa"), "{defs:?}");
+    assert!(file_of("P").ends_with("math.ixa"), "{defs:?}");
+
+    // Human mode groups each file's defs under its own header —
+    // math.ixa's defs no longer print under main.ixa's name.
+    let out = ontixa(&["explain", main.to_str().unwrap()]);
+    assert!(out.status.success(), "{out:?}");
+    let s = stdout_str(&out);
+    let main_hdr = s.find("main.ixa").expect("no main.ixa header");
+    let math_hdr = s.find("math.ixa").expect("no math.ixa header");
+    let main_def = s.find("fn main(").expect("no main def");
+    let double_def = s.find("fn double(").expect("no double def");
+    assert!(main_hdr < main_def && main_def < math_hdr, "{s}");
+    assert!(math_hdr < double_def, "{s}");
+}
+
+/// `explain m::sym` names the file the resolved def actually lives
+/// in — the same display tag diagnostics carry in `primary.file`.
+#[test]
+fn explain_symbol_names_its_own_file() {
+    let main = ws_fixture(
+        "explsymfile",
+        "use math; fn main() -> i32 { return math::double(21); }",
+        "fn double(x: i32) -> i32 { return x * 2; }",
+    );
+    let out = ontixa(&["explain", main.to_str().unwrap(), "math::double", "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], true, "{d}");
+    let f = d["result"]["symbol"]["file"]
+        .as_str()
+        .unwrap_or_else(|| panic!("symbol has no file tag: {d}"));
+    assert!(f.ends_with("math.ixa"), "{d}");
+}
+
+/// A bare name defined in two files is ambiguous — and every
+/// candidate names the file it was found in, so the report is
+/// actionable without re-resolving by hand.
+#[test]
+fn explain_cross_file_ambiguity_tags_candidates() {
+    let main = ws_fixture(
+        "explambig",
+        "use math; fn helper() -> i32 { return math::helper(); }\n\
+         fn main() -> i32 { return helper(); }",
+        "fn helper() -> i32 { return 1; }",
+    );
+    let out = ontixa(&["explain", main.to_str().unwrap(), "helper", "--json"]);
+    let d = envelope(&out);
+    assert_eq!(d["success"], false, "{d}");
+    assert_eq!(out.status.code(), Some(1));
+    let diag = d["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["code"] == "E_AMBIGUOUS_SYMBOL")
+        .unwrap_or_else(|| panic!("no E_AMBIGUOUS_SYMBOL in {d}"));
+    let cands = diag["details"]["candidates"].as_array().unwrap();
+    assert_eq!(cands.len(), 2, "{cands:?}");
+    assert!(
+        cands
+            .iter()
+            .any(|c| c["file"].as_str().is_some_and(|f| f.ends_with("main.ixa"))),
+        "{cands:?}"
+    );
+    assert!(
+        cands
+            .iter()
+            .any(|c| c["file"].as_str().is_some_and(|f| f.ends_with("math.ixa"))),
+        "{cands:?}"
+    );
+}
+
 // ---------- rename transactions ----------
 
 #[test]
