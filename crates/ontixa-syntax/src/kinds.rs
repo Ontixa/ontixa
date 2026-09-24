@@ -25,6 +25,8 @@ pub enum SyntaxKind {
     FLOAT_NUMBER,
     /// `"..."` string literal (raw token including quotes).
     STRING,
+    /// `'...'` character literal (raw token including quotes).
+    CHAR,
     /// A byte the lexer could not attribute to any token.
     ERROR_TOKEN,
 
@@ -230,6 +232,7 @@ impl SyntaxKind {
             SyntaxKind::INT_NUMBER => "integer literal",
             SyntaxKind::FLOAT_NUMBER => "float literal",
             SyntaxKind::STRING => "string literal",
+            SyntaxKind::CHAR => "character literal",
             SyntaxKind::ERROR_TOKEN => "unrecognized character",
             SyntaxKind::DATA_KW => "`data`",
             SyntaxKind::FN_KW => "`fn`",
@@ -407,6 +410,7 @@ static KIND_TABLE: &[SyntaxKind] = &[
     SyntaxKind::INT_NUMBER,
     SyntaxKind::FLOAT_NUMBER,
     SyntaxKind::STRING,
+    SyntaxKind::CHAR,
     SyntaxKind::ERROR_TOKEN,
     SyntaxKind::DATA_KW,
     SyntaxKind::FN_KW,

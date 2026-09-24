@@ -79,10 +79,16 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   arms a `W_UNREACHABLE_ARM` warning. Carriers propagate through
   non-`Copy` pattern binds, so `return v` still escapes the
   scrutinee's source. Demo: `examples/match.ixa`
+- `char` primitive: `'x'` literals (escapes `\n \t \r \0 \\ \' \"`,
+  exactly one Unicode scalar — `''`/`'ab'` are errors), `char` type in
+  annotations and `[char]` arrays, `==`/`!=` and scalar ordering,
+  `Copy` semantics. Not numeric — arithmetic is rejected; `str`
+  indexing keeps producing `str`. Demo: `examples/chars.ixa`
 
 Remaining:
 - `return`-less tail returns everywhere (blocks already tail-expr)
-- more primitives (`char` — `u*`/`f32`/`f64`/`str` already resolve)
+- more primitives (all of `u*`/`f32`/`f64`/`str`/`char` resolve now —
+  e.g. byte-level `u8`/`u16`, `i8`/`i16`, or `isize`/`usize` if wanted)
 - still-wider patch ops — the protocol is general; each op adds
   resolution logic (item reordering, comment/header edits, and
   file-level create/delete are the standing boundary)

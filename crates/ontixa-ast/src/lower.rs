@@ -830,6 +830,19 @@ impl Lowerer<'_> {
                 }
             }
             SyntaxKind::STRING => Literal::Str(decode_string(tok.text())),
+            SyntaxKind::CHAR => match decode_char(tok.text()) {
+                Some(c) => Literal::Char(c),
+                None => {
+                    self.error(
+                        format!(
+                            "character literal {} must contain exactly one character",
+                            tok.text()
+                        ),
+                        tok.text_range().into(),
+                    );
+                    Literal::Char('\0')
+                }
+            },
             _ => Literal::Int(0),
         }
     }
@@ -938,4 +951,19 @@ fn decode_string(text: &str) -> String {
         }
     }
     out
+}
+
+/// Decodes a `'...'` token into its single character, or `None` when
+/// the decoded content is not exactly one scalar (empty `''` or a
+/// multi-character `'ab'`). The lexer already scanned the span and
+/// validated escape spellings; an escape always decodes to one char.
+fn decode_char(text: &str) -> Option<char> {
+    let inner = text.strip_prefix('\'').unwrap_or(text);
+    let inner = inner.strip_suffix('\'').unwrap_or(inner);
+    let decoded = decode_string(inner);
+    let mut chars = decoded.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
 }

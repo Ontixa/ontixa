@@ -257,6 +257,7 @@ impl<'a> Interp<'a> {
                 Const::Int(v) => Value::Int(*v),
                 Const::Float(v) => Value::Float(*v),
                 Const::Str(s) => Value::Str(Rc::from(s.as_str())),
+                Const::Char(c) => Value::Char(*c),
                 Const::Bool(b) => Value::Bool(*b),
                 Const::Unit => Value::Unit,
             }),
@@ -492,7 +493,7 @@ impl<'a> Interp<'a> {
 /// `(Int, Int)`/`(Float, Float)`/`(Bool, Bool)` pairs are the only
 /// reachable combinations.
 fn binary(op: BinOp, l: Value, r: Value) -> Result<Value, RuntimeError> {
-    use Value::{Bool, Float, Int, Str};
+    use Value::{Bool, Char, Float, Int, Str};
     Ok(match (op, l, r) {
         (BinOp::Add, Int(a), Int(b)) => Int(a + b),
         (BinOp::Add, Float(a), Float(b)) => Float(a + b),
@@ -518,15 +519,19 @@ fn binary(op: BinOp, l: Value, r: Value) -> Result<Value, RuntimeError> {
         (BinOp::Lt, Int(a), Int(b)) => Bool(a < b),
         (BinOp::Lt, Float(a), Float(b)) => Bool(a < b),
         (BinOp::Lt, Str(a), Str(b)) => Bool(a < b),
+        (BinOp::Lt, Char(a), Char(b)) => Bool(a < b),
         (BinOp::Le, Int(a), Int(b)) => Bool(a <= b),
         (BinOp::Le, Float(a), Float(b)) => Bool(a <= b),
         (BinOp::Le, Str(a), Str(b)) => Bool(a <= b),
+        (BinOp::Le, Char(a), Char(b)) => Bool(a <= b),
         (BinOp::Gt, Int(a), Int(b)) => Bool(a > b),
         (BinOp::Gt, Float(a), Float(b)) => Bool(a > b),
         (BinOp::Gt, Str(a), Str(b)) => Bool(a > b),
+        (BinOp::Gt, Char(a), Char(b)) => Bool(a > b),
         (BinOp::Ge, Int(a), Int(b)) => Bool(a >= b),
         (BinOp::Ge, Float(a), Float(b)) => Bool(a >= b),
         (BinOp::Ge, Str(a), Str(b)) => Bool(a >= b),
+        (BinOp::Ge, Char(a), Char(b)) => Bool(a >= b),
         (BinOp::And, Bool(a), Bool(b)) => Bool(a && b),
         (BinOp::Or, Bool(a), Bool(b)) => Bool(a || b),
         (BinOp::Add, Str(a), Str(b)) => Str(Rc::from(format!("{a}{b}").as_str())),
@@ -585,6 +590,7 @@ fn values_eq(a: &Value, b: &Value) -> bool {
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Char(x), Value::Char(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Unit, Value::Unit) => true,
         _ => false,

@@ -516,6 +516,7 @@ impl Resolver<'_> {
                 "f32" => return TypeRef::F32,
                 "f64" => return TypeRef::F64,
                 "str" => return TypeRef::Str,
+                "char" => return TypeRef::Char,
                 "unit" => return TypeRef::Unit,
                 _ => {}
             }

@@ -24,6 +24,8 @@ pub enum Value {
     Float(f64),
     /// String.
     Str(Rc<str>),
+    /// Character (a single Unicode scalar).
+    Char(char),
     /// Boolean.
     Bool(bool),
     /// Unit.
@@ -89,6 +91,7 @@ impl Value {
             Value::Int(v) => v.to_string(),
             Value::Float(v) => format!("{v}"),
             Value::Str(s) => format!("\"{s}\""),
+            Value::Char(c) => format!("'{}'", c.escape_default()),
             Value::Bool(b) => b.to_string(),
             Value::Unit => "unit".into(),
             Value::Hole => "<uninitialized>".into(),

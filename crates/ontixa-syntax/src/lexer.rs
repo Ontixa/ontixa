@@ -62,6 +62,7 @@ impl Lexer<'_> {
                 b'/' if self.peek(1) == Some(b'*') => self.block_comment(),
                 b'0'..=b'9' => self.number(),
                 b'"' => self.string(),
+                b'\'' => self.char_lit(),
                 _ if is_ident_start(b) => self.ident_or_keyword(),
                 _ => self.punctuation(),
             }
@@ -212,6 +213,63 @@ impl Lexer<'_> {
             }
         }
         self.push(SyntaxKind::STRING, start);
+    }
+
+    /// `'x'` / `'\n'` — scans the literal span (escape-aware so `'\\''`
+    /// does not close early). The arity check — exactly one character
+    /// after decoding — happens in lowering, which owns value semantics.
+    fn char_lit(&mut self) {
+        let start = self.pos;
+        self.pos += 1;
+        loop {
+            match self.peek(0) {
+                None | Some(b'\n') => {
+                    self.diags.push(
+                        Diagnostic::error(
+                            Code::UnterminatedString,
+                            "unterminated character literal",
+                        )
+                        .primary(Span::new(start as u32, self.pos as u32)),
+                    );
+                    break;
+                }
+                Some(b'\'') => {
+                    self.pos += 1;
+                    break;
+                }
+                Some(b'\\') => {
+                    self.pos += 1;
+                    match self.peek(0) {
+                        Some(b'n' | b't' | b'r' | b'0' | b'\\' | b'"' | b'\'') => {
+                            self.pos += 1;
+                        }
+                        Some(other) => {
+                            let esc_start = self.pos - 1;
+                            self.pos += 1;
+                            self.diags.push(
+                                Diagnostic::error(
+                                    Code::Parse,
+                                    format!("invalid escape sequence `\\{}`", other as char),
+                                )
+                                .primary(Span::new(esc_start as u32, self.pos as u32)),
+                            );
+                        }
+                        None => {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    Code::UnterminatedString,
+                                    "unterminated character literal",
+                                )
+                                .primary(Span::new(start as u32, self.pos as u32)),
+                            );
+                            break;
+                        }
+                    }
+                }
+                Some(_) => self.pos += 1,
+            }
+        }
+        self.push(SyntaxKind::CHAR, start);
     }
 
     fn ident_or_keyword(&mut self) {
@@ -469,6 +527,38 @@ mod tests {
         let (tokens, diags) = lex("\"a\\n\\t\\\\\\\"b\"");
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(tokens[0].kind, SyntaxKind::STRING);
+    }
+
+    #[test]
+    fn char_literals() {
+        use SyntaxKind as K;
+        let (tokens, diags) = lex("'a' '\\n' '\\'' '\\\\'");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            vec![
+                K::CHAR,
+                K::WHITESPACE,
+                K::CHAR,
+                K::WHITESPACE,
+                K::CHAR,
+                K::WHITESPACE,
+                K::CHAR
+            ]
+        );
+        // A multi-byte scalar is one character.
+        let (_, diags) = lex("'é'");
+        assert!(diags.is_empty(), "{diags:?}");
+        // `'ab'` lexes as one CHAR token — the arity error is lowering's.
+        assert_eq!(nontrivia("'ab'"), vec![K::CHAR]);
+    }
+
+    #[test]
+    fn unterminated_char_reports() {
+        let (_, diags) = lex("'a");
+        assert!(diags.has_errors());
+        let (_, diags) = lex("'a\n");
+        assert!(diags.has_errors());
     }
 
     #[test]

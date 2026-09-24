@@ -1,0 +1,37 @@
+// The `char` primitive (M3).
+//
+//   'x'          a single Unicode scalar (escapes: \n \t \r \0 \\ \' \")
+//   c == d       equality
+//   c < d        ordering by Unicode scalar value
+//   [char]       char arrays; `for` binds each element
+//
+// A `char` is exactly one scalar — '' and 'ab' are compile errors, and a
+// multi-byte scalar like 'é' is still one char. `char` is not numeric:
+// arithmetic on chars is rejected. `str` indexing keeps producing `str`
+// (a one-character string), not `char`.
+//
+// `ontixa run examples/chars.ixa` prints 42.
+fn vowel(c: char) -> bool {
+    return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u';
+}
+
+fn main() -> i32 {
+    let letters: [char] = ['a', 'b', 'i', 'z', 'o', 'q'];
+    let mut vowels: i32 = 0;
+    for c in letters {
+        if vowel(c) {
+            vowels = vowels + 1;
+        }
+    }
+    // 'a'..'z' ordering: every letter below is lowercase.
+    let mut lowercase: i32 = 0;
+    for c in letters {
+        if c >= 'a' && c <= 'z' {
+            lowercase = lowercase + 1;
+        }
+    }
+    let nl = '\n';
+    let tab = '\t';
+    // 3 vowels * 6 lowercase + escapes decode and order = 18 + 24 = 42
+    return vowels * lowercase + if tab < nl { 24 } else { 0 };
+}

@@ -465,6 +465,7 @@ fn value_json(v: &Value, a: &Artifacts) -> Json {
         Value::Int(i) => int_json(*i),
         Value::Float(f) => json!(f),
         Value::Str(s) => json!(s.as_ref()),
+        Value::Char(c) => json!(c.to_string()),
         Value::Bool(b) => json!(b),
         Value::Unit => Json::Null,
         Value::Hole => json!("<uninitialized>"),

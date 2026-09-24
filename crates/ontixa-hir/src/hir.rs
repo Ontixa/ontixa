@@ -51,6 +51,8 @@ pub enum TypeRef {
     F64,
     /// `str`
     Str,
+    /// `char` — a single Unicode scalar.
+    Char,
     /// `unit` (also the type of a function without `->`).
     Unit,
     /// A user `data` type.
@@ -88,6 +90,8 @@ pub enum ElemRef {
     F64,
     /// `str`
     Str,
+    /// `char` — a single Unicode scalar.
+    Char,
     /// A user `data` type.
     Struct(DefId),
 }
@@ -105,6 +109,7 @@ impl ElemRef {
             TypeRef::F32 => ElemRef::F32,
             TypeRef::F64 => ElemRef::F64,
             TypeRef::Str => ElemRef::Str,
+            TypeRef::Char => ElemRef::Char,
             TypeRef::Struct(d) => ElemRef::Struct(d),
             TypeRef::Unit | TypeRef::Array { .. } | TypeRef::Poison => return None,
         })

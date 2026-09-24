@@ -579,6 +579,49 @@ mod tests {
         assert!(codes(&diags).contains(&ontixa_diagnostics::Code::UnsupportedOperation));
     }
 
+    // ---- `char` ------------------------------------------------------
+
+    #[test]
+    fn char_literal_types_and_compares() {
+        assert_eq!(
+            local_ty("fn main() -> i32 { let c = 'x'; return 0; }", "c"),
+            Ty::Char
+        );
+        assert_eq!(
+            local_ty("fn main() -> i32 { let c: char = '\\n'; return 0; }", "c"),
+            Ty::Char
+        );
+        // Equality and scalar ordering.
+        let (_, _, _, diags) =
+            check_src("fn main() -> i32 { let a = 'a' < 'z'; let b = 'x' == 'x'; return 0; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        // Arrays of char and `for` binding.
+        assert_eq!(
+            local_ty(
+                "fn main() -> i32 { let a = ['a', 'b']; for c in a { let y = c; } return 0; }",
+                "y"
+            ),
+            Ty::Char
+        );
+    }
+
+    #[test]
+    fn char_rejects_bad_ops_and_arity() {
+        // No arithmetic on chars.
+        let (_, _, _, diags) = check_src("fn main() -> i32 { let c = 'a' + 'b'; return 0; }");
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::UnsupportedOperation));
+        // `char` vs `str` mismatches.
+        let (_, _, _, diags) = check_src("fn main() -> i32 { let c: char = \"a\"; return 0; }");
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::TypeMismatch));
+        let (_, _, _, diags) = check_src("fn main() -> i32 { let s: str = 'a'; return 0; }");
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::TypeMismatch));
+        // Empty and multi-character literals.
+        let (_, _, _, diags) = check_src("fn main() -> i32 { let c = ''; return 0; }");
+        assert!(diags.has_errors());
+        let (_, _, _, diags) = check_src("fn main() -> i32 { let c = 'ab'; return 0; }");
+        assert!(diags.has_errors());
+    }
+
     #[test]
     fn exhaustive_match_of_returns_diverges() {
         // Every arm returns — the function needs no tail.
