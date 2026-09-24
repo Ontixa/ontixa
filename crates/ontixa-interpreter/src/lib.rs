@@ -658,4 +658,47 @@ mod tests {
                    fn main() -> i32 { return f(Opt::None); }";
         assert_eq!(eval_int(src), 7);
     }
+
+    // ---- small and pointer-width integers ---------------------------
+
+    #[test]
+    fn runs_new_integer_primitives() {
+        // `u8` arithmetic and equality — the runtime carries `i128`,
+        // so every width evaluates the same way.
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let a: u8 = 40; let b: u8 = 2; return if a + b == 42 { 42 } else { 0 }; }"
+            ),
+            42
+        );
+        // Signed minimums are writable — `-128` folds against `i8`.
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let x: i8 = -128; let y: i8 = -1; return if x < y { 42 } else { 0 }; }"
+            ),
+            42
+        );
+        // `usize` loop math; a literal bound adopts the bound's type.
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let n: usize = 7; let mut t: usize = 1; for i in 1..n { t = t * i; } return if t == 720 { 42 } else { 0 }; }"
+            ),
+            42
+        );
+        // `u16` at its boundary value; `isize` holds negatives.
+        assert_eq!(
+            eval_int(
+                "fn main() -> i32 { let a: u16 = 65535; let s: isize = -9; return if a == 65535 && s < 0 { 42 } else { 0 }; }"
+            ),
+            42
+        );
+        // Byte arrays iterate like any other array.
+        assert_eq!(
+            eval_int(
+                "fn sum(bs: [u8]) -> u8 { let mut t: u8 = 0; for b in bs { t = t + b; } return t; }
+                 fn main() -> i32 { let s = sum([40, 2]); return if s == 42 { 42 } else { 0 }; }"
+            ),
+            42
+        );
+    }
 }

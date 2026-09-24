@@ -509,10 +509,16 @@ impl Resolver<'_> {
             let name = segs[0].name.as_str();
             match name {
                 "bool" => return TypeRef::Bool,
+                "i8" => return TypeRef::I8,
+                "i16" => return TypeRef::I16,
                 "i32" => return TypeRef::I32,
                 "i64" => return TypeRef::I64,
+                "isize" => return TypeRef::Isize,
+                "u8" => return TypeRef::U8,
+                "u16" => return TypeRef::U16,
                 "u32" => return TypeRef::U32,
                 "u64" => return TypeRef::U64,
+                "usize" => return TypeRef::Usize,
                 "f32" => return TypeRef::F32,
                 "f64" => return TypeRef::F64,
                 "str" => return TypeRef::Str,

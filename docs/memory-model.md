@@ -22,8 +22,9 @@ copy < borrow < borrow_mut < move < escape
 | `escape`     | consume it; it may reach the return  | moved — unusable  |
 | `unknown`    | anything (analysis inconclusive)     | moved — unusable  |
 
-`copy` applies only to `Copy` types (today: `i32`/`i64`/`f64`/`bool`
-and friends). `data` values and arrays (`[T]`) are never `Copy`.
+`copy` applies only to `Copy` types (today: all primitives — the
+integer types `i8`…`usize`, `f32`/`f64`, `bool`, `char`, `str`).
+`data` values and arrays (`[T]`) are never `Copy`.
 
 ## How inference works
 

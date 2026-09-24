@@ -622,6 +622,129 @@ mod tests {
         assert!(diags.has_errors());
     }
 
+    // ---- small and pointer-width integers ---------------------------
+
+    #[test]
+    fn int_primitives_type_and_adopt_literals() {
+        for (name, ty) in [
+            ("i8", Ty::I8),
+            ("i16", Ty::I16),
+            ("u8", Ty::U8),
+            ("u16", Ty::U16),
+            ("isize", Ty::Isize),
+            ("usize", Ty::Usize),
+        ] {
+            let src = format!("fn main() -> i32 {{ let x: {name} = 1; return 0; }}");
+            assert_eq!(local_ty(&src, "x"), ty, "{name}");
+        }
+        // Literals adopt the annotation width; arithmetic stays
+        // in-width.
+        assert_eq!(
+            local_ty(
+                "fn main() -> i32 { let a: u8 = 200; let b = a + 55; return 0; }",
+                "b"
+            ),
+            Ty::U8
+        );
+        // `[u8]` arrays and `for` bind the element type.
+        assert_eq!(
+            local_ty(
+                "fn main() -> i32 { let a: [u8] = [1, 2]; for x in a { let y = x; } return 0; }",
+                "y"
+            ),
+            Ty::U8
+        );
+        // A typed range bound types the loop var; the literal bound
+        // adopts it.
+        assert_eq!(
+            local_ty(
+                "fn main() -> i32 { let n: u8 = 3; for i in 0..n { let y = i; } return 0; }",
+                "y"
+            ),
+            Ty::U8
+        );
+    }
+
+    #[test]
+    fn int_literals_are_range_checked() {
+        for (ty, lit) in [
+            ("u8", "256"),
+            ("u16", "65536"),
+            ("i8", "128"),
+            ("i16", "32768"),
+            ("usize", "18446744073709551616"),
+            ("isize", "9223372036854775808"),
+        ] {
+            let src = format!("fn main() -> i32 {{ let x: {ty} = {lit}; return 0; }}");
+            let (_, _, _, diags) = check_src(&src);
+            assert!(
+                codes(&diags).contains(&ontixa_diagnostics::Code::LiteralOverflow),
+                "{ty} = {lit}: {diags:?}"
+            );
+        }
+        // Boundary values still fit.
+        for (ty, lit) in [
+            ("u8", "255"),
+            ("u16", "65535"),
+            ("i8", "127"),
+            ("i16", "32767"),
+            ("usize", "18446744073709551615"),
+            ("isize", "9223372036854775807"),
+        ] {
+            let src = format!("fn main() -> i32 {{ let x: {ty} = {lit}; return 0; }}");
+            let (_, _, _, diags) = check_src(&src);
+            assert!(diags.is_empty(), "{ty} = {lit}: {diags:?}");
+        }
+    }
+
+    /// `-<int-literal>` folds the sign into the range check: the
+    /// *negated* value must fit, so each signed minimum is writable
+    /// and unsigned types reject negated literals outright.
+    #[test]
+    fn negated_int_literals_fold_against_expected() {
+        assert_eq!(
+            local_ty("fn main() -> i32 { let x: i8 = -128; return 0; }", "x"),
+            Ty::I8
+        );
+        assert_eq!(
+            local_ty(
+                "fn main() -> i64 { let x: i64 = -9223372036854775808; return x; }",
+                "x"
+            ),
+            Ty::I64
+        );
+        let (_, _, _, diags) = check_src("fn main() -> i32 { let x: i8 = -129; return 0; }");
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::LiteralOverflow));
+        let (_, _, _, diags) = check_src("fn main() -> i32 { let x: u8 = -1; return 0; }");
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::LiteralOverflow));
+        // Adopted widths flow through `return` too.
+        let (_, _, _, diags) = check_src("fn f() -> i16 { return -32768; }");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn int_widths_do_not_mix_implicitly() {
+        // Same-width arithmetic and comparison are fine.
+        let (_, _, _, diags) = check_src(
+            "fn main() -> i32 { let a: u8 = 1; let b: u8 = 2; let c = a + b; let d = a < b; return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        // Mixed widths error even though both sides are integers.
+        let (_, _, _, diags) = check_src(
+            "fn main() -> i32 { let a: u8 = 1; let b: i32 = 2; let c = a + b; return 0; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::TypeMismatch));
+        let (_, _, _, diags) = check_src(
+            "fn main() -> i32 { let a: u8 = 1; let b: i32 = 2; let c = a == b; return 0; }",
+        );
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::TypeMismatch));
+        // Assigning across widths is a mismatch too — there are no
+        // implicit conversions.
+        let (_, _, _, diags) =
+            check_src("fn main() -> i32 { let a: u8 = 1; let b: i32 = a; return 0; }");
+        assert!(codes(&diags).contains(&ontixa_diagnostics::Code::TypeMismatch));
+    }
+
     #[test]
     fn exhaustive_match_of_returns_diverges() {
         // Every arm returns — the function needs no tail.

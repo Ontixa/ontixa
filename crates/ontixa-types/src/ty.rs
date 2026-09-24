@@ -24,14 +24,26 @@ use serde::Serialize;
 pub enum Ty {
     /// `bool`
     Bool,
+    /// `i8`
+    I8,
+    /// `i16`
+    I16,
     /// `i32`
     I32,
     /// `i64`
     I64,
+    /// `isize` — pointer-width signed (64-bit semantics).
+    Isize,
+    /// `u8`
+    U8,
+    /// `u16`
+    U16,
     /// `u32`
     U32,
     /// `u64`
     U64,
+    /// `usize` — pointer-width unsigned (64-bit semantics).
+    Usize,
     /// `f32`
     F32,
     /// `f64`
@@ -60,14 +72,26 @@ pub enum Ty {
 pub enum ElemTy {
     /// `bool`
     Bool,
+    /// `i8`
+    I8,
+    /// `i16`
+    I16,
     /// `i32`
     I32,
     /// `i64`
     I64,
+    /// `isize` — pointer-width signed (64-bit semantics).
+    Isize,
+    /// `u8`
+    U8,
+    /// `u16`
+    U16,
     /// `u32`
     U32,
     /// `u64`
     U64,
+    /// `usize` — pointer-width unsigned (64-bit semantics).
+    Usize,
     /// `f32`
     F32,
     /// `f64`
@@ -85,10 +109,16 @@ impl ElemTy {
     pub const fn ty(self) -> Ty {
         match self {
             ElemTy::Bool => Ty::Bool,
+            ElemTy::I8 => Ty::I8,
+            ElemTy::I16 => Ty::I16,
             ElemTy::I32 => Ty::I32,
             ElemTy::I64 => Ty::I64,
+            ElemTy::Isize => Ty::Isize,
+            ElemTy::U8 => Ty::U8,
+            ElemTy::U16 => Ty::U16,
             ElemTy::U32 => Ty::U32,
             ElemTy::U64 => Ty::U64,
+            ElemTy::Usize => Ty::Usize,
             ElemTy::F32 => Ty::F32,
             ElemTy::F64 => Ty::F64,
             ElemTy::Str => Ty::Str,
@@ -101,10 +131,16 @@ impl ElemTy {
     pub fn from_ref(e: ElemRef) -> Self {
         match e {
             ElemRef::Bool => ElemTy::Bool,
+            ElemRef::I8 => ElemTy::I8,
+            ElemRef::I16 => ElemTy::I16,
             ElemRef::I32 => ElemTy::I32,
             ElemRef::I64 => ElemTy::I64,
+            ElemRef::Isize => ElemTy::Isize,
+            ElemRef::U8 => ElemTy::U8,
+            ElemRef::U16 => ElemTy::U16,
             ElemRef::U32 => ElemTy::U32,
             ElemRef::U64 => ElemTy::U64,
+            ElemRef::Usize => ElemTy::Usize,
             ElemRef::F32 => ElemTy::F32,
             ElemRef::F64 => ElemTy::F64,
             ElemRef::Str => ElemTy::Str,
@@ -119,10 +155,16 @@ impl Ty {
     pub fn from_ref(t: TypeRef) -> Self {
         match t {
             TypeRef::Bool => Ty::Bool,
+            TypeRef::I8 => Ty::I8,
+            TypeRef::I16 => Ty::I16,
             TypeRef::I32 => Ty::I32,
             TypeRef::I64 => Ty::I64,
+            TypeRef::Isize => Ty::Isize,
+            TypeRef::U8 => Ty::U8,
+            TypeRef::U16 => Ty::U16,
             TypeRef::U32 => Ty::U32,
             TypeRef::U64 => Ty::U64,
+            TypeRef::Usize => Ty::Usize,
             TypeRef::F32 => Ty::F32,
             TypeRef::F64 => Ty::F64,
             TypeRef::Str => Ty::Str,
@@ -139,10 +181,16 @@ impl Ty {
     pub fn elem(self) -> Option<ElemTy> {
         Some(match self {
             Ty::Bool => ElemTy::Bool,
+            Ty::I8 => ElemTy::I8,
+            Ty::I16 => ElemTy::I16,
             Ty::I32 => ElemTy::I32,
             Ty::I64 => ElemTy::I64,
+            Ty::Isize => ElemTy::Isize,
+            Ty::U8 => ElemTy::U8,
+            Ty::U16 => ElemTy::U16,
             Ty::U32 => ElemTy::U32,
             Ty::U64 => ElemTy::U64,
+            Ty::Usize => ElemTy::Usize,
             Ty::F32 => ElemTy::F32,
             Ty::F64 => ElemTy::F64,
             Ty::Str => ElemTy::Str,
@@ -155,16 +203,25 @@ impl Ty {
     /// Whether this is a numeric type (supports `+ - * / %` and
     /// ordering comparisons).
     pub fn is_numeric(self) -> bool {
-        matches!(
-            self,
-            Ty::I32 | Ty::I64 | Ty::U32 | Ty::U64 | Ty::F32 | Ty::F64
-        )
+        self.is_integer() || matches!(self, Ty::F32 | Ty::F64)
     }
 
     /// Whether this is an integer type (supports `%` and literal
     /// range checks).
     pub fn is_integer(self) -> bool {
-        matches!(self, Ty::I32 | Ty::I64 | Ty::U32 | Ty::U64)
+        matches!(
+            self,
+            Ty::I8
+                | Ty::I16
+                | Ty::I32
+                | Ty::I64
+                | Ty::Isize
+                | Ty::U8
+                | Ty::U16
+                | Ty::U32
+                | Ty::U64
+                | Ty::Usize
+        )
     }
 
     /// Whether a value of this type is copied bitwise on use
@@ -184,10 +241,16 @@ impl Ty {
     pub const fn as_str(self) -> &'static str {
         match self {
             Ty::Bool => "bool",
+            Ty::I8 => "i8",
+            Ty::I16 => "i16",
             Ty::I32 => "i32",
             Ty::I64 => "i64",
+            Ty::Isize => "isize",
+            Ty::U8 => "u8",
+            Ty::U16 => "u16",
             Ty::U32 => "u32",
             Ty::U64 => "u64",
+            Ty::Usize => "usize",
             Ty::F32 => "f32",
             Ty::F64 => "f64",
             Ty::Str => "str",
