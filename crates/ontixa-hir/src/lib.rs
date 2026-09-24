@@ -505,4 +505,38 @@ mod tests {
         let (_, _, diags) = parse_hir("fn f() -> i32 { let x = Option::Some(1); return 0; }");
         assert!(diags.has_errors());
     }
+
+    /// The small and pointer-width integer names resolve in both
+    /// signature (`resolve.rs`) and body (`lower.rs`) type positions,
+    /// including as `[T]` elements.
+    #[test]
+    fn resolves_small_and_pointer_int_types() {
+        let (m, mut interner, diags) = parse_hir(
+            "data B { byte: u8; off: isize; } fn f(a: u8, n: isize) -> u16 { return 0; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let f = fn_def(&m, "f", &mut interner);
+        let sig = m.scope.fn_sig(f).expect("fn sig");
+        assert_eq!(sig.params[0].ty, TypeRef::U8);
+        assert_eq!(sig.params[1].ty, TypeRef::Isize);
+        assert_eq!(sig.ret, TypeRef::U16);
+        let b = m.scope.root_env().datas[&interner.intern("B")];
+        let shape = m.scope.data_shape(b).expect("data shape");
+        assert_eq!(shape.fields[0].ty, TypeRef::U8);
+        assert_eq!(shape.fields[1].ty, TypeRef::Isize);
+        // As array elements and in a `let` annotation inside a body.
+        let (m, mut interner, diags) =
+            parse_hir("fn g(a: [u16], b: [usize]) -> i8 { let x: i16 = 0; return 0; }");
+        assert!(diags.is_empty(), "{diags:?}");
+        let g = fn_def(&m, "g", &mut interner);
+        let sig = m.scope.fn_sig(g).expect("fn sig");
+        assert_eq!(sig.params[0].ty, TypeRef::Array { elem: ElemRef::U16 });
+        assert_eq!(
+            sig.params[1].ty,
+            TypeRef::Array {
+                elem: ElemRef::Usize
+            }
+        );
+        assert_eq!(sig.ret, TypeRef::I8);
+    }
 }

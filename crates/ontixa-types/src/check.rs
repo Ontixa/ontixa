@@ -143,10 +143,16 @@ impl Checker<'_> {
     fn show(&self, ty: Ty) -> String {
         match ty {
             Ty::Bool => "bool".into(),
+            Ty::I8 => "i8".into(),
+            Ty::I16 => "i16".into(),
             Ty::I32 => "i32".into(),
             Ty::I64 => "i64".into(),
+            Ty::Isize => "isize".into(),
+            Ty::U8 => "u8".into(),
+            Ty::U16 => "u16".into(),
             Ty::U32 => "u32".into(),
             Ty::U64 => "u64".into(),
+            Ty::Usize => "usize".into(),
             Ty::F32 => "f32".into(),
             Ty::F64 => "f64".into(),
             Ty::Str => "str".into(),
@@ -500,7 +506,7 @@ impl Checker<'_> {
             }
             HirExprKind::For { var, iter, body } => self.for_ty(var, iter, body),
             HirExprKind::Binary { op, lhs, rhs } => self.binary_ty(op, lhs, rhs, span),
-            HirExprKind::Unary { op, expr } => self.unary_ty(op, expr, span),
+            HirExprKind::Unary { op, expr } => self.unary_ty(op, expr, expected, span),
             HirExprKind::If { cond, then, else_ } => self.if_ty(cond, then, else_, expected, span),
             HirExprKind::Block { stmts, tail } => {
                 for s in &stmts {
@@ -943,7 +949,35 @@ impl Checker<'_> {
         }
     }
 
-    fn unary_ty(&mut self, op: UnOp, expr: ExprId, span: Span) -> Ty {
+    fn unary_ty(&mut self, op: UnOp, expr: ExprId, expected: Option<Ty>, span: Span) -> Ty {
+        // Fold `-<int-literal>` against the expected type: the
+        // *negated* value is range-checked, so `let x: i8 = -128`
+        // works (its operand `128` alone would overflow `i8`) while
+        // `-129` and `-1` in `u8` report `E_LITERAL_OVERFLOW` instead
+        // of silently wrapping.
+        let fold = match (&self.node(expr).kind, expected) {
+            (HirExprKind::Literal(LitValue::Int(v)), Some(t))
+                if op == UnOp::Neg && t.is_integer() =>
+            {
+                Some((*v, t))
+            }
+            _ => None,
+        };
+        if let Some((v, t)) = fold {
+            if int_fits(-v, t) {
+                self.set_ty(expr, t);
+                return t;
+            }
+            self.diags.push(
+                Diagnostic::error(
+                    Code::LiteralOverflow,
+                    format!("integer literal `-{v}` does not fit {}", self.show(t)),
+                )
+                .primary(span),
+            );
+            self.set_ty(expr, Ty::Poison);
+            return Ty::Poison;
+        }
         let t = self.expr_ty(expr, None);
         match op {
             UnOp::Neg => {
@@ -1432,10 +1466,16 @@ fn op_str(op: BinOp) -> &'static str {
 
 fn int_fits(v: i128, ty: Ty) -> bool {
     match ty {
+        Ty::I8 => (i8::MIN as i128..=i8::MAX as i128).contains(&v),
+        Ty::I16 => (i16::MIN as i128..=i16::MAX as i128).contains(&v),
         Ty::I32 => (i32::MIN as i128..=i32::MAX as i128).contains(&v),
-        Ty::I64 => (i64::MIN as i128..=i64::MAX as i128).contains(&v),
+        // `isize`/`usize` are pointer-width; the reference
+        // implementation fixes them at 64 bits.
+        Ty::I64 | Ty::Isize => (i64::MIN as i128..=i64::MAX as i128).contains(&v),
+        Ty::U8 => (0..=u8::MAX as i128).contains(&v),
+        Ty::U16 => (0..=u16::MAX as i128).contains(&v),
         Ty::U32 => (0..=u32::MAX as i128).contains(&v),
-        Ty::U64 => (0..=u64::MAX as i128).contains(&v),
+        Ty::U64 | Ty::Usize => (0..=u64::MAX as i128).contains(&v),
         _ => true,
     }
 }

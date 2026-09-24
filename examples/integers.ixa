@@ -1,0 +1,41 @@
+// The byte- and pointer-width integer primitives (M3).
+//
+//   i8 i16 i32 i64 isize    signed integers
+//   u8 u16 u32 u64 usize    unsigned integers
+//
+// `isize`/`usize` are pointer-width; the reference implementation
+// fixes them at 64 bits. Integer literals adopt the expected width
+// and are range-checked at compile time — `let b: u8 = 256` is an
+// E_LITERAL_OVERFLOW error. A negated literal checks the *negated*
+// value, so `i8` admits `-128` but `-129` overflows, and `-1` never
+// fits `u8`. Widths never mix implicitly: `u8 + i32` is a type error.
+//
+// `ontixa run examples/integers.ixa` prints 42.
+fn checksum(bytes: [u8]) -> u8 {
+    let mut acc: u8 = 0;
+    for b in bytes {
+        acc = acc + b;
+    }
+    return acc;
+}
+
+fn factorial(n: usize) -> usize {
+    let mut acc: usize = 1;
+    // `..` binds loosest: this is `1..(n + 1)`, a `usize` range.
+    for i in 1..n + 1 {
+        acc = acc * i;
+    }
+    return acc;
+}
+
+fn main() -> i32 {
+    let sum = checksum([40, 2]); // u8 arithmetic
+    let floor: i8 = -128; // the i8 minimum — the sign folds
+    let f = factorial(4); // usize loop math: 24
+    // Every width gates the i32 result; nothing mixes implicitly.
+    return if sum == 42 && floor == -128 && f == 24 {
+        42
+    } else {
+        0
+    };
+}

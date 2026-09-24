@@ -330,10 +330,16 @@ impl Builder<'_> {
         }
         let label = match ty {
             Ty::Bool => "bool".into(),
+            Ty::I8 => "i8".into(),
+            Ty::I16 => "i16".into(),
             Ty::I32 => "i32".into(),
             Ty::I64 => "i64".into(),
+            Ty::Isize => "isize".into(),
+            Ty::U8 => "u8".into(),
+            Ty::U16 => "u16".into(),
             Ty::U32 => "u32".into(),
             Ty::U64 => "u64".into(),
+            Ty::Usize => "usize".into(),
             Ty::F32 => "f32".into(),
             Ty::F64 => "f64".into(),
             Ty::Str => "str".into(),

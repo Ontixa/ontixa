@@ -37,14 +37,26 @@ pub struct Name {
 pub enum TypeRef {
     /// `bool`
     Bool,
+    /// `i8`
+    I8,
+    /// `i16`
+    I16,
     /// `i32`
     I32,
     /// `i64`
     I64,
+    /// `isize` — pointer-width signed (64-bit semantics).
+    Isize,
+    /// `u8`
+    U8,
+    /// `u16`
+    U16,
     /// `u32`
     U32,
     /// `u64`
     U64,
+    /// `usize` — pointer-width unsigned (64-bit semantics).
+    Usize,
     /// `f32`
     F32,
     /// `f64`
@@ -76,14 +88,26 @@ pub enum TypeRef {
 pub enum ElemRef {
     /// `bool`
     Bool,
+    /// `i8`
+    I8,
+    /// `i16`
+    I16,
     /// `i32`
     I32,
     /// `i64`
     I64,
+    /// `isize` — pointer-width signed (64-bit semantics).
+    Isize,
+    /// `u8`
+    U8,
+    /// `u16`
+    U16,
     /// `u32`
     U32,
     /// `u64`
     U64,
+    /// `usize` — pointer-width unsigned (64-bit semantics).
+    Usize,
     /// `f32`
     F32,
     /// `f64`
@@ -102,10 +126,16 @@ impl ElemRef {
     pub fn of(ty: TypeRef) -> Option<ElemRef> {
         Some(match ty {
             TypeRef::Bool => ElemRef::Bool,
+            TypeRef::I8 => ElemRef::I8,
+            TypeRef::I16 => ElemRef::I16,
             TypeRef::I32 => ElemRef::I32,
             TypeRef::I64 => ElemRef::I64,
+            TypeRef::Isize => ElemRef::Isize,
+            TypeRef::U8 => ElemRef::U8,
+            TypeRef::U16 => ElemRef::U16,
             TypeRef::U32 => ElemRef::U32,
             TypeRef::U64 => ElemRef::U64,
+            TypeRef::Usize => ElemRef::Usize,
             TypeRef::F32 => ElemRef::F32,
             TypeRef::F64 => ElemRef::F64,
             TypeRef::Str => ElemRef::Str,

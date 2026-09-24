@@ -84,11 +84,19 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   annotations and `[char]` arrays, `==`/`!=` and scalar ordering,
   `Copy` semantics. Not numeric — arithmetic is rejected; `str`
   indexing keeps producing `str`. Demo: `examples/chars.ixa`
+- the rest of the integer primitives — `i8`/`i16`, `u8`/`u16`, and
+  pointer-width `isize`/`usize` (fixed at 64 bits): every name
+  resolves in both type paths, in `[T]` elements, and as `for`-range
+  bound types. Literals adopt the expected width and are
+  range-checked (`E_LITERAL_OVERFLOW`); `-<literal>` folds the sign
+  into that check, so `i8` admits `-128` but not `-129`, and `-1`
+  never fits `u8`. Widths still never mix implicitly. Demo:
+  `examples/integers.ixa`
 
 Remaining:
 - `return`-less tail returns everywhere (blocks already tail-expr)
-- more primitives (all of `u*`/`f32`/`f64`/`str`/`char` resolve now —
-  e.g. byte-level `u8`/`u16`, `i8`/`i16`, or `isize`/`usize` if wanted)
+- more primitives only if wanted (`u128`/`i128` — the lexer already
+  stores `i128`; the integer family is otherwise complete)
 - still-wider patch ops — the protocol is general; each op adds
   resolution logic (item reordering, comment/header edits, and
   file-level create/delete are the standing boundary)
