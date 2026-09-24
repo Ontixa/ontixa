@@ -12,8 +12,9 @@
 //!
 //! * four spaces per nesting level — `{` of a block/`data`/struct
 //!   literal and `(`/`[` open a level, their closers end it;
-//! * every item, statement, and field starts on its own line —
-//!   one-line `if` bodies and `data` field lists always expand;
+//! * every item, statement, `data` member, and match arm starts on
+//!   its own line — one-line `if` bodies, `data` member lists, and
+//!   `match` arm lists always expand;
 //! * `} else {` stays joined; empty brace pairs glue to `{}`;
 //! * exactly one blank line between top-level items, except `use`
 //!   declarations which group without blank lines;
@@ -82,18 +83,21 @@ enum LinePos {
     Top(SyntaxKind),
 }
 
-/// Node kinds whose leading token starts a fresh line. `FIELD` is the
-/// `name: Type;` member of `data`; `STRUCT_LIT_FIELD` is deliberately
-/// absent so struct literals stay inline.
+/// Node kinds whose leading token starts a fresh line. `FIELD` and
+/// `VARIANT` are the `name: Type;` / `Name(..);` members of `data`;
+/// `STRUCT_LIT_FIELD` is deliberately absent so struct literals stay
+/// inline.
 const LINE_KINDS: &[SyntaxKind] = &[
     SyntaxKind::USE_DECL,
     SyntaxKind::DATA_DECL,
     SyntaxKind::FN_DECL,
     SyntaxKind::FIELD,
+    SyntaxKind::VARIANT,
     SyntaxKind::LET_STMT,
     SyntaxKind::ASSIGN_STMT,
     SyntaxKind::RETURN_STMT,
     SyntaxKind::EXPR_STMT,
+    SyntaxKind::MATCH_ARM,
 ];
 
 /// The `{`/`}`-style parents that open an indentation level.
@@ -103,7 +107,10 @@ const LINE_KINDS: &[SyntaxKind] = &[
 fn braced(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        SyntaxKind::BLOCK | SyntaxKind::DATA_DECL | SyntaxKind::STRUCT_LIT
+        SyntaxKind::BLOCK
+            | SyntaxKind::DATA_DECL
+            | SyntaxKind::STRUCT_LIT
+            | SyntaxKind::MATCH_ARM_LIST
     )
 }
 
@@ -131,9 +138,12 @@ fn closes_indent(tok: &SyntaxToken) -> bool {
 /// Struct-literal braces stay inline (`P { x: 1 }`).
 fn is_block_close(tok: &SyntaxToken) -> bool {
     tok.kind() == SyntaxKind::R_BRACE
-        && tok
-            .parent()
-            .is_some_and(|p| matches!(p.kind(), SyntaxKind::BLOCK | SyntaxKind::DATA_DECL))
+        && tok.parent().is_some_and(|p| {
+            matches!(
+                p.kind(),
+                SyntaxKind::BLOCK | SyntaxKind::DATA_DECL | SyntaxKind::MATCH_ARM_LIST
+            )
+        })
 }
 
 /// `-`/`!` used as a prefix operator glues to its operand (`-x`);
@@ -447,6 +457,21 @@ mod tests {
         let src2 = "fn f()->i32{let e: [i32]=[ ];for mut x in 1..{x=x;}return 0;}";
         let want2 = "fn f() -> i32 {\n    let e: [i32] = [];\n    for mut x in 1.. {\n        x = x;\n    }\n    return 0;\n}\n";
         assert_eq!(fmt(src2), want2);
+    }
+
+    /// Variants expand one-per-line inside `data`; match arms expand
+    /// one-per-line inside the arm list; `=>` and patterns space like
+    /// operators.
+    #[test]
+    fn variants_and_match_canonical() {
+        let src = "data Option{Some(i32);None;}\nfn f(o:Option)->i32{return match o{Option::Some(v)=>v,Option::None=>0,_=>1,};}";
+        let want = "data Option {\n    Some(i32);\n    None;\n}\n\nfn f(o: Option) -> i32 {\n    return match o {\n        Option::Some(v) => v,\n        Option::None => 0,\n        _ => 1,\n    };\n}\n";
+        assert_eq!(fmt(src), want);
+        // A comma-less last arm stays comma-less — `fmt` never inserts
+        // tokens, it only re-lays out the stream.
+        let src = "fn f(o:Option)->i32{return match o{_=>0};}";
+        let want = "fn f(o: Option) -> i32 {\n    return match o {\n        _ => 0\n    };\n}\n";
+        assert_eq!(fmt(src), want);
     }
 
     /// A file that doesn't parse is refused with the parser's own

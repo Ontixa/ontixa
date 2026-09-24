@@ -37,7 +37,7 @@ use crate::behavior::ParamBehavior;
 use crate::place::{Loan, LoanKind, Place, Region, place_of};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_hir::{
-    DefKind, HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, ModuleScope,
+    DefKind, HirBody, HirExpr, HirExprKind, HirModule, HirPat, HirPlace, HirStmt, ModuleScope,
 };
 use ontixa_source::{DefId, DefKey, ExprId, FileId, Interner, Span, SymbolId};
 use ontixa_types::{ModuleTypes, Ty, TypeTables};
@@ -540,6 +540,13 @@ fn callees_of(body: &HirBody) -> FxHashSet<DefId> {
             HirExprKind::StructLit { fields, .. } => {
                 stack.extend(fields.iter().map(|(_, e)| *e));
             }
+            HirExprKind::VariantLit { args, .. } => {
+                stack.extend(args.iter().copied());
+            }
+            HirExprKind::Match { scrutinee, arms } => {
+                stack.push(*scrutinee);
+                stack.extend(arms.iter().map(|a| a.body));
+            }
             HirExprKind::Literal(_) | HirExprKind::Var(_) | HirExprKind::Poison => {}
         }
     }
@@ -873,6 +880,46 @@ impl FactCollector<'_, '_> {
                 self.eval(body, Ctx::Move);
                 Carriers::default()
             }
+            HirExprKind::VariantLit { args, .. } => {
+                // Payload values move into the constructed variant —
+                // it carries whatever they carried.
+                let mut out = Carriers::default();
+                for a in &args {
+                    out.extend(self.eval(*a, Ctx::Move));
+                }
+                out
+            }
+            HirExprKind::Match { scrutinee, arms } => {
+                // Matching borrows the scrutinee: the discriminant is
+                // read and pattern binds hold owned copies, so the
+                // scrutinee itself is never moved. A bound name with a
+                // non-`Copy` type still *carries* the scrutinee's
+                // carriers — `return v` where `v` came out of `o`'s
+                // payload escapes `o`, the same way `return p.x`
+                // escapes `p` when `x` is not `Copy`. `Copy`-typed
+                // binds carry nothing (a pure read).
+                let scrut_carriers = self.eval(scrutinee, Ctx::Read);
+                let mut out = Carriers::default();
+                for arm in &arms {
+                    match &arm.pat {
+                        HirPat::Variant { binds, .. } => {
+                            for b in binds.iter().flatten() {
+                                let copy =
+                                    self.tables.local_types.get(b).is_some_and(|t| t.is_copy());
+                                if !copy {
+                                    self.carriers.insert(*b, scrut_carriers.clone());
+                                }
+                            }
+                        }
+                        HirPat::Bind { sym: Some(sym), .. } => {
+                            self.carriers.insert(*sym, scrut_carriers.clone());
+                        }
+                        _ => {}
+                    }
+                    out.extend(self.eval(arm.body, ctx));
+                }
+                out
+            }
         }
     }
 
@@ -1183,6 +1230,82 @@ impl Enforcer<'_> {
                 after.remove(&var);
                 self.state = merge(after, self.state.clone());
             }
+            HirExprKind::VariantLit { args, .. } => {
+                for a in &args {
+                    self.eval(*a, Ctx::Move);
+                }
+            }
+            HirExprKind::Match { scrutinee, arms } => {
+                // Matching borrows the scrutinee — pattern binds hold
+                // owned copies; nothing about `o` is consumed.
+                self.eval(scrutinee, Ctx::Read);
+                // Each arm starts from the pre-match state and merges
+                // into the post-match join, exactly like `if` — arms
+                // that can only `return` contribute nothing.
+                let saved = self.state.clone();
+                let mut joined: Option<FxHashMap<SymbolId, BindingState>> = None;
+                for arm in arms {
+                    self.state = saved.clone();
+                    match &arm.pat {
+                        HirPat::Variant { binds, .. } => {
+                            for b in binds.iter().flatten() {
+                                self.state.insert(
+                                    *b,
+                                    BindingState {
+                                        init: Init::Yes,
+                                        moved: Moved::No,
+                                    },
+                                );
+                            }
+                        }
+                        HirPat::Bind { sym: Some(sym), .. } => {
+                            self.state.insert(
+                                *sym,
+                                BindingState {
+                                    init: Init::Yes,
+                                    moved: Moved::No,
+                                },
+                            );
+                        }
+                        _ => {}
+                    }
+                    self.eval(arm.body, ctx);
+                    if self.can_complete(arm.body) {
+                        joined = Some(match joined {
+                            None => self.state.clone(),
+                            Some(j) => merge(j, self.state.clone()),
+                        });
+                    }
+                }
+                self.state = joined.unwrap_or(saved);
+            }
+        }
+    }
+
+    /// Whether evaluation of `id` can reach its end — false only when
+    /// every path leaves via `return`. Used to keep diverging match
+    /// arms out of the post-match state merge.
+    fn can_complete(&self, id: ExprId) -> bool {
+        match &self.expr(id).kind {
+            HirExprKind::Block { stmts, tail } => {
+                if tail.is_some() {
+                    return true;
+                }
+                match stmts.last() {
+                    Some(HirStmt::Return { .. }) => false,
+                    Some(HirStmt::Expr { expr, .. }) => self.can_complete(*expr),
+                    _ => true,
+                }
+            }
+            HirExprKind::If {
+                then,
+                else_: Some(e),
+                ..
+            } => self.can_complete(*then) || self.can_complete(*e),
+            HirExprKind::Match { arms, .. } => {
+                arms.is_empty() || arms.iter().any(|a| self.can_complete(a.body))
+            }
+            _ => true,
         }
     }
 

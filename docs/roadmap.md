@@ -69,9 +69,18 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   the loop variable requires `for mut x`. Out-of-bounds indices and
   invalid slices trap; unbounded ranges are rejected (no `break`
   yet). Demo: `examples/arrays.ixa`
+- enum `data` variants + `match` selection: `data Opt { Some(i32);
+  None; }` declares variants; `Opt::Some(v)` / `m::Opt::Some(v)`
+  construct; `match o { Opt::Some(v) => v, _ => 0 }` selects on the
+  discriminant and binds payload elements positionally. A bare
+  identifier arm binds the whole scrutinee (an owned copy — matching
+  borrows); `_` ignores it. Matches must be exhaustive (`E_NON_EXHAUSTIVE`
+  lists the missing variants); a catch-all makes unreachable later
+  arms a `W_UNREACHABLE_ARM` warning. Carriers propagate through
+  non-`Copy` pattern binds, so `return v` still escapes the
+  scrutinee's source. Demo: `examples/match.ixa`
 
 Remaining:
-- `match`-like selection over `data` variants (enum data)
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - more primitives (`char` — `u*`/`f32`/`f64`/`str` already resolve)
 - still-wider patch ops — the protocol is general; each op adds

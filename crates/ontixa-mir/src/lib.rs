@@ -320,4 +320,108 @@ mod tests {
             body.blocks[then.0 as usize].term
         );
     }
+
+    // ---- enum variants and `match` ----------------------------------
+
+    /// `T::V(args)` lowers to `Rvalue::VariantLit`; `match` to a
+    /// `Terminator::Match` dispatching on discriminants, and a payload
+    /// binding lowers to `Rvalue::VariantPayload`.
+    #[test]
+    fn lowers_variant_lit_and_match() {
+        let (mir, m, mut interner) = mir(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(3); return match o { Opt::Some(v) => v, Opt::None => 0 }; }",
+        );
+        let main = m.scope.root_env().fns[&interner.intern("main")];
+        let body = mir.body(main).expect("body");
+        let rvalues: Vec<&Rvalue> = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.stmts)
+            .map(|s| match s {
+                MirStmt::Assign { val, .. } | MirStmt::Eval { val } => val,
+            })
+            .collect();
+        assert!(
+            rvalues.iter().any(|r| matches!(
+                r,
+                Rvalue::VariantLit {
+                    variant: 0, args, ..
+                } if args.len() == 1
+            )),
+            "no VariantLit rvalue in {rvalues:?}"
+        );
+        assert!(
+            rvalues
+                .iter()
+                .any(|r| matches!(r, Rvalue::VariantPayload { index: 0, .. })),
+            "no VariantPayload rvalue for `v` in {rvalues:?}"
+        );
+        let (arms, default) = body
+            .blocks
+            .iter()
+            .find_map(|b| match &b.term {
+                Terminator::Match { arms, default, .. } => Some((arms, default)),
+                _ => None,
+            })
+            .expect("match terminator");
+        // Both variants dispatch explicitly; no default needed on an
+        // exhaustive match.
+        let mut tags: Vec<u32> = arms.iter().map(|(d, _)| *d).collect();
+        tags.sort();
+        assert_eq!(tags, [0, 1]);
+        assert!(default.is_none(), "exhaustive match needs no default");
+        // Every arm block ends at the shared join — the match yields
+        // a value, so each arm must Goto the same continuation.
+        let joins: Vec<BlockId> = arms
+            .iter()
+            .filter_map(|(_, b)| match &body.blocks[b.0 as usize].term {
+                Terminator::Goto { target } => Some(*target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(joins.len(), 2);
+        assert_eq!(joins[0], joins[1]);
+    }
+
+    /// A bare-identifier arm (`other => other`) binds an independent
+    /// copy — `Rvalue::Duplicate`, never an aliasing `Use`.
+    #[test]
+    fn whole_scrutinee_binding_duplicates() {
+        let (mir, m, mut interner) = mir(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(1); return match o { Opt::Some(_) => 1, other => 2 }; }",
+        );
+        let main = m.scope.root_env().fns[&interner.intern("main")];
+        let body = mir.body(main).expect("body");
+        assert!(
+            body.blocks.iter().flat_map(|b| &b.stmts).any(|s| matches!(
+                s,
+                MirStmt::Assign {
+                    val: Rvalue::Duplicate(_),
+                    ..
+                }
+            )),
+            "no Duplicate rvalue for `other` in {body:?}"
+        );
+    }
+
+    /// A wildcard/catch-all default lowers as `default`, not as a
+    /// discriminant arm.
+    #[test]
+    fn catch_all_lowers_to_default() {
+        let (mir, m, mut interner) = mir(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::None; return match o { Opt::Some(v) => v, _ => 0 }; }",
+        );
+        let main = m.scope.root_env().fns[&interner.intern("main")];
+        let body = mir.body(main).expect("body");
+        let (arms, default) = body
+            .blocks
+            .iter()
+            .find_map(|b| match &b.term {
+                Terminator::Match { arms, default, .. } => Some((arms, default)),
+                _ => None,
+            })
+            .expect("match terminator");
+        assert_eq!(arms.iter().map(|(d, _)| *d).collect::<Vec<_>>(), [0]);
+        assert!(default.is_some(), "catch-all should lower to `default`");
+    }
 }

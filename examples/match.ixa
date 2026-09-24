@@ -1,0 +1,59 @@
+// Enum `data` variants and `match` selection.
+//
+//   data Option { Some(i32); None; }   enum-style data
+//   Option::Some(1) / Option::None     variant constructors
+//   match v { T::V(x) => .., _ => .. } selection with payload binds
+//
+// A `data` is either a record (`x: i32;` fields) or an enum
+// (`Name(T, ..);` variants) — never both. Patterns may be
+// module-qualified (`m::T::V`), bind payload elements positionally
+// (`Some(x)`), bind the whole scrutinee (`other => ..`), or ignore
+// it (`_ => ..`). Matches must be exhaustive: cover every variant or
+// end in a catch-all arm.
+//
+// `ontixa run examples/match.ixa` prints 42.
+data Option {
+    Some(i32);
+    None;
+}
+
+data Shape {
+    Circle(i32);
+    Rect(i32, i32);
+    Point;
+}
+
+fn unwrap_or(o: Option, fallback: i32) -> i32 {
+    return match o {
+        Option::Some(v) => v,
+        Option::None => fallback,
+    };
+}
+
+fn area(s: Shape) -> i32 {
+    return match s {
+        Shape::Circle(r) => 3 * r * r,
+        Shape::Rect(w, h) => w * h,
+        Shape::Point => 0,
+    };
+}
+
+fn describe(o: Option) -> i32 {
+    // `Some(_)` ignores the payload; `other` binds the whole
+    // scrutinee — both arms read `o`, neither moves it.
+    return match o {
+        Option::Some(_) => 1,
+        other => 2,
+    };
+}
+
+fn main() -> i32 {
+    let a = Option::Some(19);
+    let shapes = [Shape::Circle(2), Shape::Rect(3, 4), Shape::Point];
+    let mut total = 0;
+    for s in shapes {
+        total = total + area(s);
+    }
+    // 19 + 7 + 1 + 2 + (12 + 12 + 0) = 53; print 42.
+    return unwrap_or(a, 7) + unwrap_or(Option::None, 7) + describe(a) + describe(Option::None) + total - 11;
+}

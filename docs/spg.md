@@ -24,10 +24,12 @@ as JSON; agents and tools consume it without parsing source.
 | ---------- | --------------------------------------- |
 | `module`   | one workspace file's module (stem-named); the root node owns the workspace |
 | `function` | a `fn` definition                       |
-| `data`     | a `data` definition                     |
+| `data`     | a `data` definition (attr `shape` = `record` \| `enum`) |
 | `param`    | a function parameter symbol (attrs: `behavior`, `position`, `escapes`, `evidence`) |
-| `local`    | a `let` binding                         |
+| `local`    | a `let` binding or `match` pattern binding |
 | `field`    | a `data` field                          |
+| `variant`  | an enum `data` variant                  |
+| `arm`      | a `match` arm (attrs: `pattern` = `variant` \| `bind` \| `wildcard`, `variant` = discriminant) |
 | `type`     | a canonical `Ty` (deduplicated)         |
 | `expr`     | a HIR expression node (`expr_kind` attr) |
 | `stmt`     | a HIR statement node (`stmt_kind` attr)  |
@@ -39,17 +41,19 @@ as JSON; agents and tools consume it without parsing source.
 | `declares`       | module → definition                            |
 | `has_param`      | function → param (attrs: `behavior`)           |
 | `returns`        | function → its return type node                |
-| `has_field`      | data → field                                   |
+| `has_field`      | data → field (attr: `position`)                |
+| `has_variant`    | data → variant (attr: `discriminant`)          |
 | `has_local`      | function → local                               |
-| `typed_as`       | symbol/expr/stmt → type node                   |
-| `contains`       | parent → child (block→stmt, expr→subexpr; attrs: `position` on array-literal elements, `role` = `lo`/`hi`/`iter`/`body` on ranges and loops) |
+| `typed_as`       | symbol/expr/stmt → type node (attr `position` on variant payload types) |
+| `contains`       | parent → child (block→stmt, expr→subexpr; attrs: `position` on array-literal elements and match arms, `role` = `lo`/`hi`/`iter`/`body` on ranges and loops, `role` = `scrutinee`/`body` on match exprs and arms) |
+| `matches`        | match arm → the variant its pattern selects    |
 | `calls`          | call expr → callee function                    |
 | `passes`         | call arg expr → callee param (attrs: `position`, `behavior`) — the ownership/memory edge |
 | `reads`          | var expr → referenced symbol                   |
 | `writes`         | assign stmt → written local/param              |
 | `accesses_field` | field expr → accessed field symbol             |
-| `constructs`     | struct-literal expr → constructed data def     |
-| `binds`          | let stmt → bound local                         |
+| `constructs`     | struct-literal expr → constructed data def; variant-literal expr → constructed variant (attr `variant` = discriminant on the expr node) |
+| `binds`          | let stmt → bound local; match arm → pattern-bound local (attr `position` for payload binds) |
 
 ## Inferred behavior on edges
 

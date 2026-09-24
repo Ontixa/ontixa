@@ -488,6 +488,36 @@ fn value_json(v: &Value, a: &Artifacts) -> Json {
         Value::Array(elems) => {
             Json::Array(elems.iter().map(|c| value_json(&c.borrow(), a)).collect())
         }
+        Value::Variant { def, tag, payload } => {
+            let name = a
+                .interner
+                .resolve(
+                    a.module
+                        .scope
+                        .symbols
+                        .get(a.module.scope.def(*def).name)
+                        .name,
+                )
+                .to_string();
+            let variant = a
+                .module
+                .scope
+                .data_shape(*def)
+                .and_then(|s| s.variants.get(*tag as usize))
+                .map(|v| {
+                    a.interner
+                        .resolve(a.module.scope.symbols.get(v.symbol).name)
+                        .to_string()
+                })
+                .unwrap_or_else(|| tag.to_string());
+            json!({
+                "data": name,
+                "variant": variant,
+                "payload": Json::Array(
+                    payload.iter().map(|c| value_json(&c.borrow(), a)).collect()
+                ),
+            })
+        }
     }
 }
 

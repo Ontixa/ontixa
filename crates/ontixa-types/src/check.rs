@@ -22,11 +22,11 @@
 use crate::ty::Ty;
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_hir::{
-    BinOp, HirBody, HirExpr, HirExprKind, HirModule, HirPlace, HirStmt, LitValue, ModuleScope,
-    Name, UnOp,
+    BinOp, HirArm, HirBody, HirExpr, HirExprKind, HirModule, HirPat, HirPlace, HirStmt, LitValue,
+    ModuleScope, Name, UnOp,
 };
 use ontixa_source::{DefId, ExprId, InternId, Interner, Span, SymbolId};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// The product of type checking **one body**: one type per
 /// expression in `body.exprs`, the type of every parameter and `let`
@@ -251,6 +251,13 @@ impl Checker<'_> {
                 else_: Some(e),
                 ..
             } => self.diverges(*then) && self.diverges(*e),
+            // A `match` diverges when it is exhaustive — some arm
+            // always runs — and every arm diverges.
+            HirExprKind::Match { scrutinee, arms } => {
+                !arms.is_empty()
+                    && self.match_is_exhaustive(*scrutinee, arms)
+                    && arms.iter().all(|a| self.diverges(a.body))
+            }
             _ => false,
         }
     }
@@ -504,6 +511,12 @@ impl Checker<'_> {
                 }
             }
             HirExprKind::StructLit { def, fields } => self.struct_lit_ty(id, def, &fields, span),
+            HirExprKind::VariantLit { def, variant, args } => {
+                self.variant_lit_ty(def, variant, &args, span)
+            }
+            HirExprKind::Match { scrutinee, arms } => {
+                self.match_ty(scrutinee, &arms, expected, span)
+            }
             HirExprKind::Poison => Ty::Poison,
         };
         self.set_ty(id, ty)
@@ -990,6 +1003,320 @@ impl Checker<'_> {
         }
     }
 
+    /// `T::V(args)` — constructs a variant of an enum `data`.
+    /// Payload arity and element types are checked against the
+    /// declaration; on any error the result is still the enum type so
+    /// later passes see a coherent value.
+    fn variant_lit_ty(&mut self, def: DefId, variant: u32, args: &[ExprId], span: Span) -> Ty {
+        let shape = self
+            .scope
+            .data_shape(def)
+            .expect("variant lit of a data def");
+        let Some(vdef) = shape.variants.get(variant as usize) else {
+            // Only reachable on an internal gap — HIR resolved `variant`.
+            return Ty::Struct(def);
+        };
+        let payload: Vec<Ty> = vdef.payload.iter().map(|t| Ty::from_ref(*t)).collect();
+        let vname = self
+            .interner
+            .resolve(self.scope.symbols.get(vdef.symbol).name)
+            .to_string();
+        let tname = self.show(Ty::Struct(def));
+        if args.len() != payload.len() {
+            self.diags.push(
+                Diagnostic::error(
+                    Code::ArgCount,
+                    format!(
+                        "variant `{tname}::{vname}` expects {} payload argument{}, found {}",
+                        payload.len(),
+                        if payload.len() == 1 { "" } else { "s" },
+                        args.len()
+                    ),
+                )
+                .primary(span)
+                .subject(format!("{tname}::{vname}")),
+            );
+        }
+        for (i, arg) in args.iter().enumerate() {
+            let expected = payload.get(i).copied();
+            let actual = self.expr_ty(*arg, expected);
+            if let Some(e) = expected {
+                let aspan = self.node(*arg).span;
+                self.unify(actual, e, aspan);
+            }
+        }
+        Ty::Struct(def)
+    }
+
+    /// `match e { pat => v, .. }` — selection over an enum `data`
+    /// value. The scrutinee must be an enum (`Ty::Struct` of a
+    /// variant shape); `T::V(..)` patterns must name *its* variants
+    /// with the right binding arity, and `x`/`_` arms catch the rest.
+    /// Every arm body unifies into the result type. An enum match
+    /// without a catch-all must cover every variant
+    /// (`E_NON_EXHAUSTIVE`); arms that can never run warn
+    /// (`W_UNREACHABLE_ARM`).
+    fn match_ty(
+        &mut self,
+        scrutinee: ExprId,
+        arms: &[HirArm],
+        expected: Option<Ty>,
+        span: Span,
+    ) -> Ty {
+        let sty = self.expr_ty(scrutinee, None);
+        // `Some(def)` only when the scrutinee is a well-formed enum —
+        // records and non-data types error here and stay out of the
+        // per-arm checks.
+        let scrut_def = match sty {
+            Ty::Struct(d) => match self.scope.data_shape(d) {
+                Some(shape) if shape.is_enum() => Some(d),
+                Some(_) => {
+                    self.diags.push(
+                        Diagnostic::error(
+                            Code::UnsupportedOperation,
+                            format!(
+                                "cannot match on {} — it is a record, not an enum",
+                                self.show(sty)
+                            ),
+                        )
+                        .primary(self.node(scrutinee).span),
+                    );
+                    None
+                }
+                None => None,
+            },
+            Ty::Poison => None,
+            other => {
+                self.diags.push(
+                    Diagnostic::error(
+                        Code::UnsupportedOperation,
+                        format!("cannot match on {}", self.show(other)),
+                    )
+                    .primary(self.node(scrutinee).span),
+                );
+                None
+            }
+        };
+        let mut covered: FxHashSet<u32> = FxHashSet::default();
+        let mut catchall = false;
+        let mut result: Option<Ty> = None;
+        for arm in arms {
+            // An arm is dead when an earlier catch-all ran, or its
+            // variant is already covered by an earlier arm.
+            let mut dead = catchall;
+            match &arm.pat {
+                HirPat::Variant {
+                    def,
+                    variant,
+                    binds,
+                    span: pspan,
+                } => {
+                    if !covered.insert(*variant) {
+                        dead = true;
+                    }
+                    let pspan = *pspan;
+                    match scrut_def {
+                        Some(d) if *def == d => {
+                            let shape = self.scope.data_shape(d).expect("enum scrutinee shape");
+                            let vdef = &shape.variants[*variant as usize];
+                            let vname = self
+                                .interner
+                                .resolve(self.scope.symbols.get(vdef.symbol).name)
+                                .to_string();
+                            if binds.len() != vdef.payload.len() {
+                                self.diags.push(
+                                    Diagnostic::error(
+                                        Code::ArgCount,
+                                        format!(
+                                            "variant `{vname}` takes {} payload binding{}, found {}",
+                                            vdef.payload.len(),
+                                            if vdef.payload.len() == 1 { "" } else { "s" },
+                                            binds.len()
+                                        ),
+                                    )
+                                    .primary(pspan)
+                                    .subject(vname),
+                                );
+                            }
+                            for (i, b) in binds.iter().enumerate() {
+                                if let Some(sym) = b {
+                                    let ty = vdef
+                                        .payload
+                                        .get(i)
+                                        .map(|t| Ty::from_ref(*t))
+                                        .unwrap_or(Ty::Poison);
+                                    self.locals.insert(*sym, ty);
+                                    self.tables.local_types.insert(*sym, ty);
+                                }
+                            }
+                        }
+                        Some(_) => {
+                            // A variant of a *different* enum.
+                            let pat_name = self.variant_name(*def, *variant);
+                            self.diags.push(
+                                Diagnostic::error(
+                                    Code::TypeMismatch,
+                                    format!(
+                                        "pattern `{pat_name}` does not match scrutinee type {}",
+                                        self.show(sty)
+                                    ),
+                                )
+                                .primary(pspan),
+                            );
+                            self.poison_binds(binds);
+                        }
+                        // Scrutinee already diagnosed — keep binds
+                        // typed (poison) so nothing downstream panics.
+                        None => self.poison_binds(binds),
+                    }
+                }
+                HirPat::Bind { sym, .. } => {
+                    catchall = true;
+                    if let Some(sym) = sym {
+                        self.locals.insert(*sym, sty);
+                        self.tables.local_types.insert(*sym, sty);
+                    }
+                }
+                HirPat::Poison => {}
+            }
+            if dead {
+                self.diags.push(
+                    Diagnostic::warning(
+                        Code::UnreachableArm,
+                        "unreachable arm — an earlier arm already covers it",
+                    )
+                    .primary(arm.span),
+                );
+            }
+            let t = self.expr_ty(arm.body, expected.or(result));
+            // An arm that only `return`s yields no value — like `!`
+            // it unifies with anything and does not constrain the
+            // result type.
+            if self.never_falls_through(arm.body) {
+                continue;
+            }
+            result = Some(match result {
+                None => t,
+                Some(r) => {
+                    let bspan = self.node(arm.body).span;
+                    self.unify(t, r, bspan)
+                }
+            });
+        }
+        // Exhaustiveness: a catch-all covers everything; otherwise
+        // every variant of the enum must appear.
+        if let Some(d) = scrut_def {
+            if !catchall {
+                let shape = self.scope.data_shape(d).expect("enum scrutinee shape");
+                let missing: Vec<String> = shape
+                    .variants
+                    .iter()
+                    .filter(|v| !covered.contains(&v.index))
+                    .map(|v| {
+                        self.interner
+                            .resolve(self.scope.symbols.get(v.symbol).name)
+                            .to_string()
+                    })
+                    .collect();
+                if !missing.is_empty() {
+                    self.diags.push(
+                        Diagnostic::error(
+                            Code::NonExhaustive,
+                            format!("match does not cover all variants of {}", self.show(sty)),
+                        )
+                        .primary(span)
+                        .note(format!("missing: {}", missing.join(", ")))
+                        .detail("missing", serde_json::json!(missing)),
+                    );
+                }
+            }
+        }
+        // No value-producing arm: every arm diverges, so the match
+        // type is the context's expected type (or `unit`).
+        result.or(expected).unwrap_or(Ty::Unit)
+    }
+
+    /// Whether evaluation of `id` can never reach its end — every
+    /// path leaves via `return`. Unlike `diverges`, a block that
+    /// *yields* a tail value still "falls through" to that tail.
+    fn never_falls_through(&self, id: ExprId) -> bool {
+        match &self.node(id).kind {
+            HirExprKind::Block { stmts, tail } => {
+                if tail.is_some() {
+                    return false;
+                }
+                match stmts.last() {
+                    Some(HirStmt::Return { .. }) => true,
+                    Some(HirStmt::Expr { expr, .. }) => self.never_falls_through(*expr),
+                    _ => false,
+                }
+            }
+            HirExprKind::If {
+                then,
+                else_: Some(e),
+                ..
+            } => self.never_falls_through(*then) && self.never_falls_through(*e),
+            HirExprKind::Match { scrutinee, arms } => {
+                !arms.is_empty()
+                    && self.match_is_exhaustive(*scrutinee, arms)
+                    && arms.iter().all(|a| self.never_falls_through(a.body))
+            }
+            _ => false,
+        }
+    }
+
+    /// `T::V` rendered for diagnostics.
+    fn variant_name(&self, def: DefId, variant: u32) -> String {
+        let tname = self.show(Ty::Struct(def));
+        self.scope
+            .data_shape(def)
+            .and_then(|s| s.variants.get(variant as usize))
+            .map(|v| {
+                format!(
+                    "{tname}::{}",
+                    self.interner.resolve(self.scope.symbols.get(v.symbol).name)
+                )
+            })
+            .unwrap_or(tname)
+    }
+
+    /// Types every pattern binding `Poison` — the scrutinee was
+    /// already diagnosed, so nothing further should cascade.
+    fn poison_binds(&mut self, binds: &[Option<SymbolId>]) {
+        for b in binds.iter().flatten() {
+            self.locals.insert(*b, Ty::Poison);
+            self.tables.local_types.insert(*b, Ty::Poison);
+        }
+    }
+
+    /// Whether every value of `scrutinee`'s type matches some arm —
+    /// a catch-all exists, or the enum's variants are all covered.
+    /// Used by `diverges`; the checker reports non-exhaustiveness
+    /// separately.
+    fn match_is_exhaustive(&self, scrutinee: ExprId, arms: &[HirArm]) -> bool {
+        if arms.iter().any(|a| matches!(a.pat, HirPat::Bind { .. })) {
+            return true;
+        }
+        let Ty::Struct(d) = self.tables.ty_of(scrutinee) else {
+            return false;
+        };
+        let Some(shape) = self.scope.data_shape(d) else {
+            return false;
+        };
+        if !shape.is_enum() {
+            return false;
+        }
+        let mut covered: FxHashSet<u32> = FxHashSet::default();
+        for arm in arms {
+            if let HirPat::Variant { def, variant, .. } = &arm.pat {
+                if *def == d {
+                    covered.insert(*variant);
+                }
+            }
+        }
+        covered.len() >= shape.variants.len()
+    }
+
     fn struct_lit_ty(
         &mut self,
         id: ExprId,
@@ -1001,6 +1328,25 @@ impl Checker<'_> {
             .scope
             .data_shape(def)
             .expect("struct lit of a data def");
+        if shape.is_enum() {
+            // `E { .. }` on an enum — fields don't exist; construct a
+            // variant with `E::V(..)` instead.
+            self.diags.push(
+                Diagnostic::error(
+                    Code::UnsupportedOperation,
+                    format!(
+                        "{} is an enum — construct a variant like `T::V(..)`",
+                        self.show(Ty::Struct(def))
+                    ),
+                )
+                .primary(span),
+            );
+            for (_, v) in fields {
+                self.expr_ty(*v, None);
+            }
+            self.tables.struct_lit_slots.insert(id, Vec::new());
+            return Ty::Struct(def);
+        }
         let index = &shape.field_index;
 
         let mut slots = Vec::with_capacity(fields.len());

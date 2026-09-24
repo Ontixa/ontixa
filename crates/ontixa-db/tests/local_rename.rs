@@ -178,6 +178,36 @@ fn comments_and_strings_never_rewrite() {
     assert!(out.contains("let n = 1; return n;"));
 }
 
+#[test]
+fn match_payload_binding_renames_decl_and_refs() {
+    // `v` inside `Opt::Some(v)` is a real body-local decl — renaming
+    // it rewrites the pattern bind and its `=> v` reference only.
+    let src = "data Opt { Some(i32); None; }\n\
+               fn f(o: Opt) -> i32 { return match o { Opt::Some(v) => v + 1, Opt::None => 0 }; }\n";
+    let mut db = db(src);
+    let plan = db.plan_rename_at(0, 0, at(src, "v) =>", 0), "val").unwrap();
+    assert_eq!(plan.edits().len(), 2, "edits: {:?}", plan.edits());
+    db.apply_rename(&plan).unwrap();
+    assert!(src_of(&db).contains("Opt::Some(val) => val + 1"));
+}
+
+#[test]
+fn match_arm_bindings_stay_arm_scoped_in_rename() {
+    // The `v` in arm 0 and the `v` in arm 1 are *different* symbols —
+    // renaming the first leaves the second alone.
+    let src = "data Opt { Some(i32); None; }\n\
+               fn f(o: Opt) -> i32 { return match o { Opt::Some(v) => v, other => 0 }; }\n\
+               fn g(o: Opt) -> i32 { return match o { Opt::Some(v) => v * 2, Opt::None => 0 }; }\n";
+    let mut db = db(src);
+    let plan = db
+        .plan_rename_at(0, 0, at(src, "v) => v *", 0), "w")
+        .unwrap();
+    assert_eq!(plan.edits().len(), 2, "edits: {:?}", plan.edits());
+    db.apply_rename(&plan).unwrap();
+    assert!(src_of(&db).contains("Opt::Some(v) => v,"));
+    assert!(src_of(&db).contains("Opt::Some(w) => w * 2"));
+}
+
 // ---------- capture / drift rejection ----------
 
 #[test]

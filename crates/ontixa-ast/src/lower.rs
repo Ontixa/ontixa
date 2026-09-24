@@ -7,8 +7,8 @@
 //! assignment target.
 
 use crate::ast::{
-    AstModule, BinOp, Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Literal, Param,
-    Path, Place, Stmt, TypeExpr, UnOp, UseDecl,
+    AstModule, BinOp, Block, DataDecl, Expr, Field, FieldInit, FnDecl, Ident, Item, Literal,
+    MatchArm, Param, Path, Pattern, Place, Stmt, TypeExpr, UnOp, UseDecl, Variant,
 };
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_source::Span;
@@ -167,9 +167,15 @@ impl Lowerer<'_> {
             .filter(|n| n.kind() == SyntaxKind::FIELD)
             .filter_map(|f| self.field(&f))
             .collect();
+        let variants = node
+            .children()
+            .filter(|n| n.kind() == SyntaxKind::VARIANT)
+            .map(|v| self.variant(&v))
+            .collect();
         DataDecl {
             name,
             fields,
+            variants,
             span: decl_span(node),
         }
     }
@@ -182,6 +188,19 @@ impl Lowerer<'_> {
             ty,
             span: node.text_range().into(),
         })
+    }
+
+    /// A `VARIANT` member: `NAME` then `TYPE_REF` payload elements.
+    fn variant(&mut self, node: &SyntaxNode) -> Variant {
+        Variant {
+            name: self.first_name(node),
+            payload: node
+                .children()
+                .filter(|n| n.kind() == SyntaxKind::TYPE_REF)
+                .map(|t| self.type_expr(&t))
+                .collect(),
+            span: node.text_range().into(),
+        }
     }
 
     fn fn_decl(&mut self, node: &SyntaxNode) -> FnDecl {
@@ -425,6 +444,7 @@ impl Lowerer<'_> {
                 span,
             },
             SyntaxKind::FOR_EXPR => self.for_expr(node)?,
+            SyntaxKind::MATCH_EXPR => self.match_expr(node)?,
             SyntaxKind::BIN_EXPR => self.bin_expr(node)?,
             SyntaxKind::PREFIX_EXPR => {
                 let mut elems = node.children_with_tokens();
@@ -581,6 +601,79 @@ impl Lowerer<'_> {
             }),
             span,
         })
+    }
+
+    /// `match e { pat => v, .. }` — MATCH_EXPR children: the scrutinee
+    /// (first value node) then MATCH_ARM_LIST holding MATCH_ARMs.
+    /// Each arm's pattern is its PAT_BIND/PAT_VARIANT child and the
+    /// body is the value node after it.
+    fn match_expr(&mut self, node: &SyntaxNode) -> Option<Expr> {
+        let mut scrutinee = None;
+        let mut arms = Vec::new();
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::MATCH_ARM_LIST => {
+                    for arm in child
+                        .children()
+                        .filter(|n| n.kind() == SyntaxKind::MATCH_ARM)
+                    {
+                        arms.push(self.match_arm(&arm));
+                    }
+                }
+                k if is_value_node(k) && scrutinee.is_none() => {
+                    scrutinee = self.expr(&child);
+                }
+                _ => {}
+            }
+        }
+        Some(Expr::Match {
+            scrutinee: Box::new(scrutinee.unwrap_or(Expr::Error {
+                span: node.text_range().into(),
+            })),
+            arms,
+            span: node.text_range().into(),
+        })
+    }
+
+    /// A `MATCH_ARM` node — `PAT_BIND`/`PAT_VARIANT`, `=>`, body.
+    fn match_arm(&mut self, node: &SyntaxNode) -> MatchArm {
+        let span: Span = node.text_range().into();
+        let mut pat = Pattern::Bind {
+            name: Ident::new("_", Span::empty(span.start)),
+        };
+        let mut body = Expr::Error { span };
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::PAT_BIND | SyntaxKind::PAT_VARIANT => {
+                    pat = self.pattern(&child);
+                }
+                k if is_value_node(k) => {
+                    body = self.expr(&child).unwrap_or(Expr::Error { span });
+                }
+                _ => {}
+            }
+        }
+        MatchArm { pat, body, span }
+    }
+
+    /// A pattern node: `PAT_BIND` wraps a `NAME` (`x` binds, `_`
+    /// ignores); `PAT_VARIANT`'s `NAME_REF` children are the variant
+    /// path and its `PAT_BIND` children the payload bindings.
+    fn pattern(&mut self, node: &SyntaxNode) -> Pattern {
+        match node.kind() {
+            SyntaxKind::PAT_BIND => Pattern::Bind {
+                name: self.first_name(node),
+            },
+            _ => Pattern::Variant {
+                path: self.path_of(node),
+                binds: node
+                    .children()
+                    .filter(|n| n.kind() == SyntaxKind::PAT_BIND)
+                    .map(|b| self.first_name(&b))
+                    .collect(),
+                span: node.text_range().into(),
+            },
+        }
     }
 
     fn bin_expr(&mut self, node: &SyntaxNode) -> Option<Expr> {
@@ -790,6 +883,7 @@ fn is_expr_kind(kind: SyntaxKind) -> bool {
             | SyntaxKind::PREFIX_EXPR
             | SyntaxKind::IF_EXPR
             | SyntaxKind::FOR_EXPR
+            | SyntaxKind::MATCH_EXPR
             | SyntaxKind::PAREN_EXPR
             | SyntaxKind::BLOCK
             | SyntaxKind::STRUCT_LIT

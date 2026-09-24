@@ -292,4 +292,140 @@ mod tests {
                 .any(|n| n.kind == NodeKind::Type && n.label == "[i64]")
         );
     }
+
+    // ---- enum variants and `match` ----------------------------------
+
+    #[test]
+    fn enum_variants_have_graph_nodes() {
+        let (g, _, _, _, _, diags) = graph_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(3); return match o { Opt::Some(v) => v, Opt::None => 0 }; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let opt = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Data && n.label == "Opt")
+            .expect("Opt data node");
+        assert_eq!(opt.attrs["shape"].as_str(), Some("enum"));
+        // Two `has_variant` edges, discriminant-tagged in order.
+        let mut edges: Vec<(u64, NodeId)> = g
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::HasVariant && e.from == opt.id)
+            .map(|e| (e.attrs["discriminant"].as_u64().unwrap(), e.to))
+            .collect();
+        edges.sort();
+        assert_eq!(edges.len(), 2);
+        let some = &g.nodes[edges[0].1 as usize];
+        assert_eq!(some.kind, NodeKind::Variant);
+        assert_eq!(some.label, "Some");
+        // `Some(i32)`'s payload links position 0 to the i32 type node.
+        assert!(g.edges.iter().any(|e| {
+            e.from == some.id
+                && e.kind == EdgeKind::TypedAs
+                && e.attrs.get("position").and_then(|v| v.as_u64()) == Some(0)
+                && g.nodes[e.to as usize].label == "i32"
+        }));
+    }
+
+    #[test]
+    fn variant_lit_constructs_variant_node() {
+        let (g, _, _, _, _, diags) = graph_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(3); return match o { _ => 0 }; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let lit = g
+            .nodes
+            .iter()
+            .find(|n| expr_kind(n) == "variant_lit")
+            .expect("variant_lit node");
+        assert_eq!(lit.attrs["variant"].as_u64(), Some(0));
+        let edge = g
+            .edges
+            .iter()
+            .find(|e| e.from == lit.id && e.kind == EdgeKind::Constructs)
+            .expect("constructs edge");
+        let target = &g.nodes[edge.to as usize];
+        assert_eq!(target.kind, NodeKind::Variant);
+        assert_eq!(target.label, "Some");
+    }
+
+    #[test]
+    fn match_arms_link_patterns_binds_and_bodies() {
+        let (g, _, _, _, _, diags) = graph_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::Some(3); return match o { Opt::Some(v) => v, other => 0 }; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let m = g
+            .nodes
+            .iter()
+            .find(|n| expr_kind(n) == "match")
+            .expect("match node");
+        // Scrutinee edge.
+        assert!(g.edges.iter().any(|e| {
+            e.from == m.id
+                && e.kind == EdgeKind::Contains
+                && e.attrs.get("role").and_then(|v| v.as_str()) == Some("scrutinee")
+        }));
+        // Two arm nodes, position-tagged.
+        let mut arms: Vec<(u64, NodeId)> = g
+            .edges
+            .iter()
+            .filter(|e| {
+                e.from == m.id && e.kind == EdgeKind::Contains && e.attrs.get("position").is_some()
+            })
+            .map(|e| (e.attrs["position"].as_u64().unwrap(), e.to))
+            .collect();
+        arms.sort();
+        assert_eq!(arms.len(), 2);
+        let arm0 = &g.nodes[arms[0].1 as usize];
+        let arm1 = &g.nodes[arms[1].1 as usize];
+        assert_eq!(arm0.kind, NodeKind::Arm);
+        assert_eq!(arm0.attrs["pattern"].as_str(), Some("variant"));
+        assert_eq!(arm0.attrs["variant"].as_u64(), Some(0));
+        // Arm 0: `matches` → the `Some` variant, `binds` → `v`.
+        let matched = g
+            .edges
+            .iter()
+            .find(|e| e.from == arm0.id && e.kind == EdgeKind::Matches)
+            .expect("matches edge");
+        assert_eq!(g.nodes[matched.to as usize].label, "Some");
+        let bound = g
+            .edges
+            .iter()
+            .find(|e| e.from == arm0.id && e.kind == EdgeKind::Binds)
+            .expect("binds edge");
+        assert_eq!(g.nodes[bound.to as usize].label, "v");
+        assert_eq!(g.nodes[bound.to as usize].kind, NodeKind::Local);
+        // Both arms contain their body expression.
+        for arm in [arm0, arm1] {
+            assert!(g.edges.iter().any(|e| {
+                e.from == arm.id
+                    && e.kind == EdgeKind::Contains
+                    && e.attrs.get("role").and_then(|v| v.as_str()) == Some("body")
+            }));
+        }
+        // Arm 1 is a whole-scrutinee bind.
+        assert_eq!(arm1.attrs["pattern"].as_str(), Some("bind"));
+        let bound1 = g
+            .edges
+            .iter()
+            .find(|e| e.from == arm1.id && e.kind == EdgeKind::Binds)
+            .expect("binds edge");
+        assert_eq!(g.nodes[bound1.to as usize].label, "other");
+    }
+
+    #[test]
+    fn wildcard_arm_pattern_is_tagged() {
+        let (g, _, _, _, _, diags) = graph_src(
+            "data Opt { Some(i32); None; } fn main() -> i32 { let o = Opt::None; return match o { _ => 0 }; }",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let arm = g
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Arm)
+            .expect("arm node");
+        assert_eq!(arm.attrs["pattern"].as_str(), Some("wildcard"));
+    }
 }

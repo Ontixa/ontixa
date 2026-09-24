@@ -33,8 +33,12 @@ pub enum NodeKind {
     Param,
     /// A `data` field symbol.
     Field,
+    /// A variant of an enum `data` definition.
+    Variant,
     /// A `let` binding symbol.
     Local,
+    /// A `match` arm (`pat => expr`); pattern details are attrs/edges.
+    Arm,
     /// A type occurrence (deduplicated per semantic type).
     Type,
     /// An expression node; `expr_kind` in attrs gives the HIR kind.
@@ -55,6 +59,10 @@ pub enum EdgeKind {
     Returns,
     /// Data → field symbol.
     HasField,
+    /// Data → variant symbol. `discriminant` attr = declaration index.
+    HasVariant,
+    /// Match arm → variant symbol the pattern selects.
+    Matches,
     /// Function → local binding symbol.
     HasLocal,
     /// Symbol/expr → its type node.

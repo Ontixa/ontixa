@@ -104,7 +104,7 @@ impl<'a> Interp<'a> {
 
     /// Pretty-prints a result value using source names.
     pub fn show(&self, v: &Value) -> String {
-        v.show(&|d| self.def_name(d))
+        v.show(&|d| self.def_name(d), &|d, t| self.variant_name(d, t))
     }
 
     fn def_name(&self, def: DefId) -> String {
@@ -118,6 +118,20 @@ impl<'a> Interp<'a> {
                     .to_string()
             })
             .unwrap_or_else(|| format!("<def {}>", def.index()))
+    }
+
+    /// The declared name of variant `tag` of enum `def`.
+    fn variant_name(&self, def: DefId, tag: u32) -> String {
+        self.module
+            .scope
+            .data_shape(def)
+            .and_then(|s| s.variants.get(tag as usize))
+            .map(|v| {
+                self.interner
+                    .resolve(self.module.scope.symbols.get(v.symbol).name)
+                    .to_string()
+            })
+            .unwrap_or_else(|| format!("<variant {tag}>"))
     }
 
     /// Calls a function with prepared argument cells.
@@ -165,6 +179,34 @@ impl<'a> Interp<'a> {
                                 "non-bool branch condition {v:?}"
                             )));
                         }
+                    };
+                }
+                Terminator::Match {
+                    scrutinee,
+                    arms,
+                    default,
+                } => {
+                    let v = self.operand(&locals, scrutinee)?;
+                    let tag = match v {
+                        Value::Variant { tag, .. } => tag,
+                        v => {
+                            return Err(RuntimeError::Trap(format!(
+                                "match on non-variant value {v:?}"
+                            )));
+                        }
+                    };
+                    pc = match arms.iter().find(|(d, _)| *d == tag).map(|(_, b)| *b) {
+                        Some(b) => b.0 as usize,
+                        None => match default {
+                            Some(b) => b.0 as usize,
+                            // Unreachable in accepted programs — the
+                            // checker requires exhaustive matches.
+                            None => {
+                                return Err(RuntimeError::Trap(format!(
+                                    "non-exhaustive match: no arm for discriminant {tag}"
+                                )));
+                            }
+                        },
                     };
                 }
             }
@@ -353,6 +395,32 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Value::Struct(*def, cells))
             }
+            Rvalue::VariantLit { def, variant, args } => {
+                let mut payload = Vec::with_capacity(args.len());
+                for op in args {
+                    payload.push(Rc::new(RefCell::new(self.operand(locals, op)?)));
+                }
+                Ok(Value::Variant {
+                    def: *def,
+                    tag: *variant,
+                    payload,
+                })
+            }
+            Rvalue::VariantPayload { base, index } => {
+                // Matching binds owned copies — the scrutinee is only
+                // read, so the payload cell is deep-cloned (a shallow
+                // copy would alias the scrutinee's cells).
+                match self.operand(locals, base)? {
+                    Value::Variant { payload, .. } => payload
+                        .get(*index as usize)
+                        .map(|c| c.borrow().deep_clone())
+                        .ok_or_else(|| {
+                            RuntimeError::Trap(format!("bad variant payload index {index}"))
+                        }),
+                    v => Err(RuntimeError::Trap(format!("payload of non-variant {v:?}"))),
+                }
+            }
+            Rvalue::Duplicate(op) => Ok(self.operand(locals, op)?.deep_clone()),
             Rvalue::Call {
                 def,
                 args,
@@ -486,6 +554,26 @@ fn deep_eq(a: &Value, b: &Value) -> bool {
                 && ea
                     .iter()
                     .zip(eb.iter())
+                    .all(|(x, y)| deep_eq(&x.borrow(), &y.borrow()))
+        }
+        (
+            Value::Variant {
+                def: da,
+                tag: ta,
+                payload: pa,
+            },
+            Value::Variant {
+                def: db,
+                tag: tb,
+                payload: pb,
+            },
+        ) => {
+            da == db
+                && ta == tb
+                && pa.len() == pb.len()
+                && pa
+                    .iter()
+                    .zip(pb.iter())
                     .all(|(x, y)| deep_eq(&x.borrow(), &y.borrow()))
         }
         _ => values_eq(a, b),

@@ -184,6 +184,18 @@ pub enum SyntaxKind {
     ARRAY_EXPR,
     /// `for x in e { .. }` — iteration over arrays and ranges.
     FOR_EXPR,
+    /// `Name(T, ..)` or `Name` — a variant member of a `data` decl.
+    VARIANT,
+    /// `match expr { pat => expr, .. }`.
+    MATCH_EXPR,
+    /// `{ pat => expr, .. }` — the braced arm list of a match.
+    MATCH_ARM_LIST,
+    /// `pat => expr` — one match arm.
+    MATCH_ARM,
+    /// `path` or `path(binds)` — a variant pattern.
+    PAT_VARIANT,
+    /// `name` or `_` — a binding (or ignored) pattern slot.
+    PAT_BIND,
     /// Parser error recovery node; wraps skipped tokens.
     ERROR,
     /// End of input marker used by the parser internally.
@@ -514,6 +526,12 @@ static KIND_TABLE: &[SyntaxKind] = &[
     SyntaxKind::RANGE,
     SyntaxKind::ARRAY_EXPR,
     SyntaxKind::FOR_EXPR,
+    SyntaxKind::VARIANT,
+    SyntaxKind::MATCH_EXPR,
+    SyntaxKind::MATCH_ARM_LIST,
+    SyntaxKind::MATCH_ARM,
+    SyntaxKind::PAT_VARIANT,
+    SyntaxKind::PAT_BIND,
     SyntaxKind::ERROR,
     SyntaxKind::EOF,
 ];

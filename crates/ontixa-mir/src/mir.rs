@@ -149,6 +149,29 @@ pub enum Rvalue {
         /// `(declared field index, value)` pairs.
         fields: Vec<(u32, Operand)>,
     },
+    /// `T::V(args)` — variant construction; `variant` is the
+    /// discriminant index into the def's declared variants.
+    VariantLit {
+        /// The enum `data` definition.
+        def: DefId,
+        /// Discriminant index.
+        variant: u32,
+        /// Payload operands, in declared order.
+        args: Vec<Operand>,
+    },
+    /// Reads payload element `index` out of a variant value —
+    /// produced only inside a `match` arm whose pattern proved the
+    /// discriminant, so the read is always in bounds.
+    VariantPayload {
+        /// The matched variant value.
+        base: Operand,
+        /// Payload position.
+        index: u32,
+    },
+    /// Produces an independently-owned deep copy of the operand.
+    /// `match` binds with this: the scrutinee is only borrowed by
+    /// matching, so a bound name gets a copy that shares no cells.
+    Duplicate(Operand),
 }
 
 /// A statement inside a basic block.
@@ -197,6 +220,19 @@ pub enum Terminator {
     Goto {
         /// Target block.
         target: BlockId,
+    },
+    /// `match` dispatch: read the scrutinee's discriminant and jump
+    /// to the first arm whose discriminant matches; `default` catches
+    /// everything else (a `_`/binding arm). A value matching nothing
+    /// and no default is unreachable in accepted programs — the
+    /// checker requires exhaustiveness — and traps at runtime.
+    Match {
+        /// The matched variant value.
+        scrutinee: Operand,
+        /// `(discriminant, target)` in written arm order.
+        arms: Vec<(u32, BlockId)>,
+        /// Catch-all target for `_`/`x` patterns.
+        default: Option<BlockId>,
     },
 }
 

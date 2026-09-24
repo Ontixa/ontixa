@@ -98,6 +98,12 @@ pub enum Code {
     /// An operation on a type that does not support it
     /// (e.g. `==` between struct values).
     UnsupportedOperation,
+    /// A `match` over an enum `data` value does not cover every
+    /// variant (and has no `_`/binding catch-all arm).
+    NonExhaustive,
+    /// A `match` arm can never run — a previous arm already covers
+    /// every value it could match.
+    UnreachableArm,
     /// Internal compiler error. Never caused by user code.
     Internal,
 }
@@ -142,6 +148,8 @@ impl Code {
             Code::MissingReturn => "E_MISSING_RETURN",
             Code::LiteralOverflow => "E_LITERAL_OVERFLOW",
             Code::UnsupportedOperation => "E_UNSUPPORTED_OP",
+            Code::NonExhaustive => "E_NON_EXHAUSTIVE",
+            Code::UnreachableArm => "W_UNREACHABLE_ARM",
             Code::Internal => "I_INTERNAL",
         }
     }
