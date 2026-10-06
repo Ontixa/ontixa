@@ -98,6 +98,11 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   and move checks join skipped and executed paths; both operands still
   type-check. This changes the earlier eager behavior (ADR-0005).
   Demo: `examples/short-circuit.ixa`
+- function completion checks distinguish discarded values from explicit
+  returns, including optional short-circuit RHS paths. This corrects a
+  checker hole exposed by short-circuiting; nested explicit returns and
+  return-only match arms use the same structural check (ADR-0005).
+  Demo: `examples/return-completion.ixa`
 
 Remaining:
 - `return`-less tail returns everywhere (blocks already tail-expr)

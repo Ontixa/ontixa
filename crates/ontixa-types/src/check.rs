@@ -209,6 +209,12 @@ impl Checker<'_> {
 
         self.expr_ty(body.root, Some(self.ret));
 
+        // Only completing paths need a root value. Every expression and
+        // explicit return above is still checked, including unreachable code.
+        if !self.can_complete(body.root) {
+            return;
+        }
+
         // Return-surface checks.
         if let HirExprKind::Block { tail, .. } = &self.node(body.root).kind {
             match tail {
@@ -217,10 +223,7 @@ impl Checker<'_> {
                     let tspan = self.node(*t).span;
                     self.unify(tail_ty, self.ret, tspan);
                 }
-                None if self.ret != Ty::Unit
-                    && self.ret != Ty::Poison
-                    && !self.diverges(body.root) =>
-                {
+                None if self.ret != Ty::Unit && self.ret != Ty::Poison => {
                     let name_sym = self.scope.def(body.def).name;
                     let name_span = self.scope.symbols.get(name_sym).span;
                     let name = self.interner.resolve(self.scope.symbols.get(name_sym).name);
@@ -238,34 +241,59 @@ impl Checker<'_> {
         }
     }
 
-    /// Whether control cannot reach the end of `id` — i.e. the
-    /// expression yields a value (a block tail) or every path diverges
-    /// via `return`. Used for the missing-return check.
-    fn diverges(&self, id: ExprId) -> bool {
+    /// Whether evaluation can reach the end of this expression. A value
+    /// tail completes its block; it does not return from the function.
+    /// PR #19's short-circuit evaluation exposed that distinction: an
+    /// optional RHS return cannot make a discarded block return a value.
+    /// Calls and literal conditions remain conservative.
+    fn can_complete(&self, id: ExprId) -> bool {
         match &self.node(id).kind {
             HirExprKind::Block { stmts, tail } => {
-                if tail.is_some() {
-                    return true;
-                }
-                match stmts.last() {
-                    Some(HirStmt::Return { .. }) => true,
-                    Some(HirStmt::Expr { expr, .. }) => self.diverges(*expr),
-                    _ => false,
-                }
+                stmts.iter().all(|s| match s {
+                    HirStmt::Return { .. } => false,
+                    HirStmt::Let { init, .. } => init.is_none_or(|e| self.can_complete(e)),
+                    HirStmt::Assign { value, .. } => self.can_complete(*value),
+                    HirStmt::Expr { expr, .. } => self.can_complete(*expr),
+                }) && tail.is_none_or(|e| self.can_complete(e))
             }
-            HirExprKind::If {
-                then,
-                else_: Some(e),
-                ..
-            } => self.diverges(*then) && self.diverges(*e),
-            // A `match` diverges when it is exhaustive — some arm
-            // always runs — and every arm diverges.
+            HirExprKind::If { cond, then, else_ } => {
+                self.can_complete(*cond)
+                    && (self.can_complete(*then) || else_.is_none_or(|e| self.can_complete(e)))
+            }
             HirExprKind::Match { scrutinee, arms } => {
-                !arms.is_empty()
-                    && self.match_is_exhaustive(*scrutinee, arms)
-                    && arms.iter().all(|a| self.diverges(a.body))
+                self.can_complete(*scrutinee)
+                    && (arms.is_empty()
+                        || !self.match_is_exhaustive(*scrutinee, arms)
+                        || arms.iter().any(|a| self.can_complete(a.body)))
             }
-            _ => false,
+            HirExprKind::Binary { op, lhs, rhs } => {
+                self.can_complete(*lhs)
+                    && (matches!(op, BinOp::And | BinOp::Or) || self.can_complete(*rhs))
+            }
+            HirExprKind::Unary { expr, .. } => self.can_complete(*expr),
+            HirExprKind::Field { base, .. } | HirExprKind::Len { base } => self.can_complete(*base),
+            HirExprKind::Index { base, index } => {
+                self.can_complete(*base) && self.can_complete(*index)
+            }
+            HirExprKind::Slice { base, lo, hi } => {
+                self.can_complete(*base)
+                    && lo.is_none_or(|e| self.can_complete(e))
+                    && hi.is_none_or(|e| self.can_complete(e))
+            }
+            HirExprKind::Call { args, .. } | HirExprKind::VariantLit { args, .. } => {
+                args.iter().all(|e| self.can_complete(*e))
+            }
+            HirExprKind::StructLit { fields, .. } => {
+                fields.iter().all(|(_, e)| self.can_complete(*e))
+            }
+            HirExprKind::ArrayLit { elems } => elems.iter().all(|e| self.can_complete(*e)),
+            HirExprKind::Range { lo, hi } => {
+                lo.is_none_or(|e| self.can_complete(e)) && hi.is_none_or(|e| self.can_complete(e))
+            }
+            // The loop body may execute zero times; only the iterable
+            // (including range bounds) is evaluated unconditionally.
+            HirExprKind::For { iter, .. } => self.can_complete(*iter),
+            HirExprKind::Literal(_) | HirExprKind::Var(_) | HirExprKind::Poison => true,
         }
     }
 
@@ -1231,7 +1259,7 @@ impl Checker<'_> {
             // An arm that only `return`s yields no value — like `!`
             // it unifies with anything and does not constrain the
             // result type.
-            if self.never_falls_through(arm.body) {
+            if !self.can_complete(arm.body) {
                 continue;
             }
             result = Some(match result {
@@ -1275,35 +1303,6 @@ impl Checker<'_> {
         result.or(expected).unwrap_or(Ty::Unit)
     }
 
-    /// Whether evaluation of `id` can never reach its end — every
-    /// path leaves via `return`. Unlike `diverges`, a block that
-    /// *yields* a tail value still "falls through" to that tail.
-    fn never_falls_through(&self, id: ExprId) -> bool {
-        match &self.node(id).kind {
-            HirExprKind::Block { stmts, tail } => {
-                if tail.is_some() {
-                    return false;
-                }
-                match stmts.last() {
-                    Some(HirStmt::Return { .. }) => true,
-                    Some(HirStmt::Expr { expr, .. }) => self.never_falls_through(*expr),
-                    _ => false,
-                }
-            }
-            HirExprKind::If {
-                then,
-                else_: Some(e),
-                ..
-            } => self.never_falls_through(*then) && self.never_falls_through(*e),
-            HirExprKind::Match { scrutinee, arms } => {
-                !arms.is_empty()
-                    && self.match_is_exhaustive(*scrutinee, arms)
-                    && arms.iter().all(|a| self.never_falls_through(a.body))
-            }
-            _ => false,
-        }
-    }
-
     /// `T::V` rendered for diagnostics.
     fn variant_name(&self, def: DefId, variant: u32) -> String {
         let tname = self.show(Ty::Struct(def));
@@ -1330,7 +1329,7 @@ impl Checker<'_> {
 
     /// Whether every value of `scrutinee`'s type matches some arm —
     /// a catch-all exists, or the enum's variants are all covered.
-    /// Used by `diverges`; the checker reports non-exhaustiveness
+    /// Used by `can_complete`; the checker reports non-exhaustiveness
     /// separately.
     fn match_is_exhaustive(&self, scrutinee: ExprId, arms: &[HirArm]) -> bool {
         if arms.iter().any(|a| matches!(a.pat, HirPat::Bind { .. })) {
