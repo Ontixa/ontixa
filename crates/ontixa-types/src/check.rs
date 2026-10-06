@@ -1063,7 +1063,14 @@ impl Checker<'_> {
         match else_ {
             Some(e) => {
                 let el = self.expr_ty(e, expected);
-                self.unify(el, t, span)
+                // Check both branches, but only values that reach the
+                // continuation constrain the result, like match arms.
+                match (self.can_complete(then), self.can_complete(e)) {
+                    (true, true) => self.unify(el, t, span),
+                    (true, false) => t,
+                    (false, true) => el,
+                    (false, false) => expected.unwrap_or(Ty::Unit),
+                }
             }
             // `if c { ... }` without else discards the then-value.
             None => Ty::Unit,

@@ -123,7 +123,7 @@ fn completion_does_not_suppress_type_errors() {
     ] {
         assert!(codes(src).contains(&Code::TypeMismatch), "{src}");
     }
-    // Mixed return/value if typing is a separate, pre-existing limitation.
+    // A returning branch does not constrain the continuing branch's type.
     let mixed = "fn f(c: bool) -> i32 { if c { return 7; } else { 42 } }";
-    assert!(codes(mixed).contains(&Code::TypeMismatch));
+    assert!(codes(mixed).is_empty());
 }

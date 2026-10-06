@@ -99,7 +99,36 @@ The shared completion check also removes pre-existing false errors for
 nested explicit returns and returns followed by dead statements, and
 recognizes nested returning match arms. All expressions and explicit
 return values are still type-checked, including unreachable children.
-This adds no never type or general coercions: mixed return/value if
-typing and ownership joins remain separate work. Diagnostic codes,
-schemas, ownership contracts, and interpreter operations are unchanged.
+This added no never type or general coercions; mixed return/value if
+typing and ownership joins were left to the bounded correction below.
+Diagnostic codes, schemas, ownership contracts, and interpreter operations
+are unchanged.
 See `examples/return-completion.ixa` for an early return plus fallback.
+
+### Returning branches of `if`
+
+An `if` with an `else` now uses only normally completing branches to
+determine its value type, following the existing match-arm convention.
+`if c { return 7; } else { 42 }` therefore has an `i32` continuing
+value. If neither arm completes, the type is the expected type or unit.
+An `if` without `else` still discards its then-value and has unit type;
+the skipped path can continue. Both arms and every explicit return
+payload remain checked, including unreachable children.
+
+Ownership enforcement likewise joins only completing branch states.
+`if c { return p; } p` no longer reports a move from the returning path,
+and initialization in the only continuing branch is definite. Moves or
+missing initialization on any continuing path remain errors. Both arms
+retain loan checking, including loans from an enclosing call. If neither
+arm completes, the saved state is used for subsequent dead-code checking,
+as for an all-returning match.
+
+These correct pre-existing false rejections, independently of the
+missing-return hole fixed above. The existing structural completion
+checks stay conservative: logical RHS paths are optional, loop bodies
+may run zero times, and calls and literal conditions do not establish
+termination. There is no general never type, constant folding, or
+interprocedural termination inference. MIR lowering, contract inference,
+escape summaries, diagnostic codes, and schemas are unchanged; the interpreter
+continues to execute the existing branches and returns. The broader
+tail-return milestone remains open. See `examples/returning-branches.ixa`.
