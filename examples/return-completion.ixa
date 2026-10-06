@@ -1,0 +1,9 @@
+// A logical RHS may return early, but its skipped path needs a fallback.
+fn guarded(c: bool) -> i32 {
+    { c && { return 7; true } };
+    35
+}
+
+fn main() -> i32 {
+    guarded(true) + guarded(false)
+}
