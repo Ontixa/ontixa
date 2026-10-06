@@ -98,6 +98,19 @@ $ ontixa run examples/structs.ixa
 25
 ```
 
+## Boolean guards
+
+`&&` and `||` short-circuit from left to right: `false && rhs` and
+`true || rhs` skip `rhs`, including its mutations, traps, and returns.
+Both operands still have to be valid `bool` expressions. `&&` binds
+tighter than `||`. Run `examples/short-circuit.ixa` for guarded string
+indexing and conditional mutation.
+
+This supersedes the early interpreter's eager boolean evaluation.
+Use separate statements for effects that must always happen; assigning
+a binding only in the RHS does not make it definitely initialized.
+See [ADR-0005](docs/adr/0005-typed-mir-interpreter-oracle.md).
+
 ## Ownership without annotations
 
 Ontixa source has **no ownership syntax**. The compiler infers what

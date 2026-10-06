@@ -93,6 +93,12 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   never fits `u8`. Widths still never mix implicitly. Demo:
   `examples/integers.ixa`
 
+- boolean short-circuit evaluation: `&&` / `||` lower to MIR branches,
+  skipping unnecessary RHS effects and traps. Definite-initialization
+  and move checks join skipped and executed paths; both operands still
+  type-check. This changes the earlier eager behavior (ADR-0005).
+  Demo: `examples/short-circuit.ixa`
+
 Remaining:
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - more primitives only if wanted (`u128`/`i128` — the lexer already

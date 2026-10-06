@@ -1,0 +1,18 @@
+// Boolean guards skip unnecessary work. `&&` binds tighter than `||`.
+// `ontixa run examples/short-circuit.ixa` prints 42.
+data Counter { n: i32; }
+
+fn tick(mut counter: Counter) -> bool {
+    counter.n = counter.n + 1;
+    return true;
+}
+
+fn main() -> i32 {
+    let empty = "";
+    // The string index is never evaluated when the string is empty.
+    let starts_with_x = empty.len > 0 && empty[0] == "x";
+    let mut counter = Counter { n: 41 };
+    let skipped = true || tick(counter);
+    let required = !starts_with_x && tick(counter);
+    return counter.n;
+}

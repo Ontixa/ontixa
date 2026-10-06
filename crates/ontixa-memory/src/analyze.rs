@@ -37,7 +37,8 @@ use crate::behavior::ParamBehavior;
 use crate::place::{Loan, LoanKind, Place, Region, place_of};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics};
 use ontixa_hir::{
-    DefKind, HirBody, HirExpr, HirExprKind, HirModule, HirPat, HirPlace, HirStmt, ModuleScope,
+    BinOp, DefKind, HirBody, HirExpr, HirExprKind, HirModule, HirPat, HirPlace, HirStmt,
+    ModuleScope,
 };
 use ontixa_source::{DefId, DefKey, ExprId, FileId, Interner, Span, SymbolId};
 use ontixa_types::{ModuleTypes, Ty, TypeTables};
@@ -1172,9 +1173,23 @@ impl Enforcer<'_> {
                 }
                 self.loans.truncate(mark);
             }
-            HirExprKind::Binary { lhs, rhs, .. } => {
+            HirExprKind::Binary { op, lhs, rhs } => {
                 self.eval(lhs, Ctx::Read);
-                self.eval(rhs, Ctx::Read);
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    // RHS may be skipped. Its assignments cannot make
+                    // initialization/reinitialization definite, and its
+                    // moves apply only on the executed path. Still walk
+                    // it for diagnostics, even for a literal LHS.
+                    let skipped = self.state.clone();
+                    self.eval(rhs, Ctx::Read);
+                    self.state = if self.can_complete(rhs) {
+                        merge(skipped, std::mem::take(&mut self.state))
+                    } else {
+                        skipped
+                    };
+                } else {
+                    self.eval(rhs, Ctx::Read);
+                }
             }
             HirExprKind::Unary { expr, .. } => self.eval(expr, Ctx::Read),
             HirExprKind::If { cond, then, else_ } => {
@@ -1283,28 +1298,53 @@ impl Enforcer<'_> {
     }
 
     /// Whether evaluation of `id` can reach its end — false only when
-    /// every path leaves via `return`. Used to keep diverging match
-    /// arms out of the post-match state merge.
+    /// every path leaves via `return`. Used to keep returning match
+    /// arms and logical RHS expressions out of continuing-state joins.
+    /// Calls and literal conditions remain conservative.
     fn can_complete(&self, id: ExprId) -> bool {
         match &self.expr(id).kind {
             HirExprKind::Block { stmts, tail } => {
-                if tail.is_some() {
-                    return true;
-                }
-                match stmts.last() {
-                    Some(HirStmt::Return { .. }) => false,
-                    Some(HirStmt::Expr { expr, .. }) => self.can_complete(*expr),
-                    _ => true,
-                }
+                stmts.iter().all(|s| match s {
+                    HirStmt::Return { .. } => false,
+                    HirStmt::Let { init, .. } => init.is_none_or(|e| self.can_complete(e)),
+                    HirStmt::Assign { value, .. } => self.can_complete(*value),
+                    HirStmt::Expr { expr, .. } => self.can_complete(*expr),
+                }) && tail.is_none_or(|e| self.can_complete(e))
             }
-            HirExprKind::If {
-                then,
-                else_: Some(e),
-                ..
-            } => self.can_complete(*then) || self.can_complete(*e),
-            HirExprKind::Match { arms, .. } => {
-                arms.is_empty() || arms.iter().any(|a| self.can_complete(a.body))
+            HirExprKind::If { cond, then, else_ } => {
+                self.can_complete(*cond)
+                    && (self.can_complete(*then) || else_.is_none_or(|e| self.can_complete(e)))
             }
+            HirExprKind::Match { scrutinee, arms } => {
+                self.can_complete(*scrutinee)
+                    && (arms.is_empty() || arms.iter().any(|a| self.can_complete(a.body)))
+            }
+            HirExprKind::Binary { op, lhs, rhs } => {
+                self.can_complete(*lhs)
+                    && (matches!(op, BinOp::And | BinOp::Or) || self.can_complete(*rhs))
+            }
+            HirExprKind::Unary { expr, .. } => self.can_complete(*expr),
+            HirExprKind::Field { base, .. } | HirExprKind::Len { base } => self.can_complete(*base),
+            HirExprKind::Index { base, index } => {
+                self.can_complete(*base) && self.can_complete(*index)
+            }
+            HirExprKind::Slice { base, lo, hi } => {
+                self.can_complete(*base)
+                    && lo.is_none_or(|e| self.can_complete(e))
+                    && hi.is_none_or(|e| self.can_complete(e))
+            }
+            HirExprKind::Call { args, .. } | HirExprKind::VariantLit { args, .. } => {
+                args.iter().all(|e| self.can_complete(*e))
+            }
+            HirExprKind::StructLit { fields, .. } => {
+                fields.iter().all(|(_, e)| self.can_complete(*e))
+            }
+            HirExprKind::ArrayLit { elems } => elems.iter().all(|e| self.can_complete(*e)),
+            HirExprKind::Range { lo, hi } => {
+                lo.is_none_or(|e| self.can_complete(e)) && hi.is_none_or(|e| self.can_complete(e))
+            }
+            // The loop body may run zero times.
+            HirExprKind::For { iter, .. } => self.can_complete(*iter),
             _ => true,
         }
     }

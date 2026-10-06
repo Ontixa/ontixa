@@ -14,7 +14,9 @@ use crate::mir::{
     BasicBlock, BlockId, Const, Local, LocalDecl, MirBody, MirModule, MirStmt, Operand, Place,
     Rvalue, Terminator,
 };
-use ontixa_hir::{HirArm, HirBody, HirExprKind, HirModule, HirPat, HirPlace, HirStmt, ModuleScope};
+use ontixa_hir::{
+    BinOp, HirArm, HirBody, HirExprKind, HirModule, HirPat, HirPlace, HirStmt, ModuleScope,
+};
 use ontixa_memory::OwnershipTables;
 use ontixa_source::{ExprId, SymbolId};
 use ontixa_types::{ModuleTypes, Ty, TypeTables};
@@ -298,6 +300,44 @@ impl FnLowerer<'_> {
 
     // ---------- expressions ----------
 
+    /// Branch before evaluating RHS. Both continuing paths write the
+    /// same boolean temporary; a returning RHS keeps its terminator.
+    fn short_circuit(&mut self, lhs: ExprId, rhs: ExprId, skip: bool) -> Operand {
+        let cond = self.eval(lhs);
+        let result = self.temp(Ty::Bool);
+        let rhs_bb = self.new_block();
+        let skip_bb = self.new_block();
+        let join_bb = self.new_block();
+        self.close(Terminator::Branch {
+            cond,
+            then: if skip { skip_bb } else { rhs_bb },
+            else_: if skip { rhs_bb } else { skip_bb },
+        });
+
+        self.cur = rhs_bb;
+        self.cur_closed = false;
+        let rhs_value = self.eval(rhs);
+        if !self.cur_closed {
+            self.emit(MirStmt::Assign {
+                dst: result.clone(),
+                val: Rvalue::Use(rhs_value),
+            });
+            self.close(Terminator::Goto { target: join_bb });
+        }
+
+        self.cur = skip_bb;
+        self.cur_closed = false;
+        self.emit(MirStmt::Assign {
+            dst: result.clone(),
+            val: Rvalue::Use(Operand::Const(Const::Bool(skip))),
+        });
+        self.close(Terminator::Goto { target: join_bb });
+
+        self.cur = join_bb;
+        self.cur_closed = false;
+        Operand::Place(result)
+    }
+
     /// Evaluates an expression, appending any needed statements to the
     /// current block, and returns the operand holding its value.
     fn eval(&mut self, id: ExprId) -> Operand {
@@ -310,6 +350,16 @@ impl FnLowerer<'_> {
                 ontixa_hir::Literal::Bool(b) => Const::Bool(b),
             }),
             HirExprKind::Var(_) | HirExprKind::Field { .. } => Operand::Place(self.eval_place(id)),
+            HirExprKind::Binary {
+                op: BinOp::And,
+                lhs,
+                rhs,
+            } => self.short_circuit(lhs, rhs, false),
+            HirExprKind::Binary {
+                op: BinOp::Or,
+                lhs,
+                rhs,
+            } => self.short_circuit(lhs, rhs, true),
             HirExprKind::Binary { op, lhs, rhs } => {
                 let l = self.eval(lhs);
                 let r = self.eval(rhs);
