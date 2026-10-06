@@ -1,0 +1,22 @@
+// A return leaves the function; only the other branch continues.
+data Parcel { value: i32; }
+
+fn keep(parcel: Parcel, early: bool) -> Parcel {
+    if early { return parcel; }
+    parcel
+}
+
+fn choose(early: bool) -> i32 {
+    if early { return 7; } else { 20 }
+}
+
+fn initialized(early: bool) -> i32 {
+    let value: i32;
+    if early { return 7; } else { value = 22; }
+    value
+}
+
+fn main() -> i32 {
+    let parcel = keep(Parcel { value: choose(false) }, true);
+    parcel.value + initialized(false)
+}

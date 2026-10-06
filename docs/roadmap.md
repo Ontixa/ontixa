@@ -103,6 +103,12 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   checker hole exposed by short-circuiting; nested explicit returns and
   return-only match arms use the same structural check (ADR-0005).
   Demo: `examples/return-completion.ixa`
+- returning `if` branches no longer constrain the continuing value type
+  or ownership state. Early returns of owned values and initialization
+  in the only continuing branch are accepted; both branches retain type
+  and loan diagnostics (ADR-0005). This fixes pre-existing false errors;
+  it does not complete the broader tail-return item below.
+  Demo: `examples/returning-branches.ixa`
 
 Remaining:
 - `return`-less tail returns everywhere (blocks already tail-expr)

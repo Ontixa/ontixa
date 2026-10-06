@@ -1196,11 +1196,22 @@ impl Enforcer<'_> {
                 self.eval(cond, Ctx::Read);
                 let saved = self.state.clone();
                 self.eval(then, ctx);
-                let then_state = std::mem::replace(&mut self.state, saved);
+                let then_state = std::mem::replace(&mut self.state, saved.clone());
                 if let Some(e) = else_ {
                     self.eval(e, ctx);
                 }
-                self.state = merge(self.state.clone(), then_state);
+                // Both arms are checked, including their loans and
+                // return values. Only completing paths reach the join;
+                // without an else, the skipped path keeps `saved`.
+                self.state = match (
+                    self.can_complete(then),
+                    else_.is_none_or(|e| self.can_complete(e)),
+                ) {
+                    (true, true) => merge(std::mem::take(&mut self.state), then_state),
+                    (true, false) => then_state,
+                    (false, true) => std::mem::take(&mut self.state),
+                    (false, false) => saved,
+                };
             }
             HirExprKind::Block { stmts, tail } => {
                 for s in &stmts {
@@ -1298,7 +1309,7 @@ impl Enforcer<'_> {
     }
 
     /// Whether evaluation of `id` can reach its end — false only when
-    /// every path leaves via `return`. Used to keep returning match
+    /// every path leaves via `return`. Used to keep returning if/match
     /// arms and logical RHS expressions out of continuing-state joins.
     /// Calls and literal conditions remain conservative.
     fn can_complete(&self, id: ExprId) -> bool {
