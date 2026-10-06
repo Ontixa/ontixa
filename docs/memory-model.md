@@ -40,13 +40,20 @@ converges to `unknown` rather than hanging or guessing.
 
 **Phase B — enforcement.** A per-function walk tracks each binding's
 state (`live`, `moved`, `maybe-moved`, `uninit`) and merges states
-across `if` branches:
+across `if` branches and short-circuit `&&` / `||` paths:
 
 - read of `moved`/`maybe-moved` → `E_USE_AFTER_MOVE`
 - read of `uninit` → `E_UNINITIALIZED`
 - `borrow`/`borrow_mut`/`copy` calls leave the argument's state alone
 - `move`/`escape`/`unknown` calls consume it
 - assignment to a `moved` binding is a legal re-initialization
+
+For `&&` and `||`, the LHS always runs, while the RHS may be skipped.
+RHS-only initialization or reinitialization is not definite, and a
+RHS-only move leaves the binding maybe-moved. A RHS that always returns
+is excluded from the continuing state. Both operands are still checked,
+even with a literal LHS; this is conservative analysis, not constant
+folding. Inferred parameter contracts include possible RHS uses.
 
 ## Mutability (immutable by default)
 
