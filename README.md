@@ -120,6 +120,18 @@ and unary negation, including nested expressions. For example,
 works in assignments, call arguments, fields, arrays, and branch tails.
 Run `examples/numeric-context.ixa` for a complete example.
 
+A bare numeric literal, or one negation of it, can also adopt a typed
+peer's numeric type in arithmetic and comparisons. With `x: i64`,
+both `0 < x` and `x > 0` work, and `let y = 1 + x;` infers `i64`.
+With `x: f32`, the same applies to `0.0 < x` and `-1.0 + x`.
+A declared arithmetic result type takes priority. Left literals can use
+variables, calls, fields, and indexed values as peers, including block
+tails, negation, and arithmetic rooted in those expressions. Other peer
+shapes retain left-to-right checking: `(1 + 2) < x`, `0 < (1 + x)`,
+and `0 < if true { x } else { x }` with `x: i64` still need a typed
+intermediate binding. Two literal operands keep their defaults. Run
+`examples/numeric-peers.ixa` for an example.
+
 Without a numeric context, integer and float literals still default to
 `i32` and `f64`. Typed values never change width implicitly. Each integer
 literal must fit its adopted type (`E_LITERAL_OVERFLOW`); arithmetic
