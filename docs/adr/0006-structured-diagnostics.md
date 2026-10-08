@@ -28,3 +28,14 @@ ICEs.
 - `--json` on `check` emits a schema-versioned document.
 - Exit codes are contractual: 0 ok / 1 errors / 2 trap / 3 ICE.
 - Adding a code is additive; changing one is a schema break.
+
+## Addendum: offline diagnostic guides
+
+The CLI also exposes `diagnostic <CODE> [--json]` for source-independent,
+authored explanations and checked example pairs. Coverage is explicit; a
+recognized code without a guide is distinct from an unknown code. Lookup
+failure exits 2 with `diagnostic_guide_unavailable` or `unknown_diagnostic_code`
+in the existing envelope's `error.kind`. These are additive command-level
+errors, not compiler diagnostic codes. Existing diagnostic objects and JSON
+rendering are unchanged. Human `check` may append a deduplicated lookup hint
+for a covered code. See [the guide contract](../diagnostics.md#offline-code-guides).

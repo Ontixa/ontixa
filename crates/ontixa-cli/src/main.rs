@@ -1,12 +1,12 @@
 //! `ontixa` — the Ontixa developer tool.
 //!
 //! Commands: `check`, `run`, `tokens`, `ast`, `mir`, `graph`,
-//! `explain`, `rename`, `patch`, `recover`, `fmt`. Exit codes are part of the
+//! `diagnostic`, `explain`, `rename`, `patch`, `recover`, `fmt`. Exit codes are part of the
 //! tool contract:
 //!
 //! - `0` — success (diagnostics, if any, are warnings)
 //! - `1` — source error diagnostics or an unresolved recovery conflict
-//! - `2` — runtime trap, missing entry function, or unreadable input
+//! - `2` — runtime trap, missing entry function, unreadable input, or failed code lookup
 //! - `3` — internal compiler error (ICE); never the user's fault
 //!
 //! Machine output: every `--json` invocation prints **exactly one**
@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use ontixa_cli::envelope::{
     CompileFailure, Envelope, emit_failure, emit_human_diags, print_timings,
 };
-use ontixa_cli::explain;
+use ontixa_cli::{diagnostic, explain};
 use ontixa_db::{Artifacts, CheckReport, Db};
 use ontixa_diagnostics::{Code, Diagnostic, Diagnostics, Severity};
 use ontixa_interpreter::Value;
@@ -52,6 +52,18 @@ enum Cmd {
         /// Include per-stage compilation timings.
         #[arg(long)]
         timings: bool,
+    },
+    /// Look up an offline diagnostic guide with failing and corrected examples.
+    #[command(
+        after_help = "Available guides: E_USE_AFTER_MOVE, E_UNINITIALIZED, E_IMMUTABLE_ASSIGNMENT, E_MUTABLE_BORROW_OF_IMMUTABLE.
+Codes are case-sensitive. No source file or network is needed."
+    )]
+    Diagnostic {
+        /// The stable diagnostic code printed by the compiler.
+        code: String,
+        /// Emit machine-readable JSON (one envelope document).
+        #[arg(long)]
+        json: bool,
     },
     /// Compile and execute a function (default `main`).
     Run {
@@ -203,6 +215,7 @@ fn main() -> ExitCode {
             json,
             timings,
         } => check(file, json, timings),
+        Cmd::Diagnostic { code, json } => diagnostic::run(&code, json),
         Cmd::Run {
             file,
             entry,
@@ -379,6 +392,7 @@ fn check(file: PathBuf, json: bool, timings: bool) -> ExitCode {
         return e.emit();
     }
     let code = emit_human_diags(&report.diags, &sfs);
+    diagnostic::print_check_hints(&report.diags);
     if timings {
         print_timings(&report.timings);
     }

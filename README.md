@@ -55,6 +55,23 @@ can always replace it with `cargo run --quiet --locked -p ontixa-cli
 required. See [the agent interface](docs/agent-interface.md) for JSON
 responses, the persistent daemon, and transactional renames.
 
+## Understanding a diagnostic
+
+After `check` reports an ownership error, look up its stable code:
+
+```sh
+cargo run --quiet --locked -p ontixa-cli --bin ontixa -- diagnostic E_USE_AFTER_MOVE
+cargo run --quiet --locked -p ontixa-cli --bin ontixa -- diagnostic E_UNINITIALIZED --json
+```
+
+The guide includes the meaning, a common cause, and complete failing and
+corrected examples. It works offline without a source file. Human `check`
+output points to a guide when one is available. The initial guides cover
+`E_USE_AFTER_MOVE`, `E_UNINITIALIZED`, `E_IMMUTABLE_ASSIGNMENT`, and
+`E_MUTABLE_BORROW_OF_IMMUTABLE`; see [diagnostic lookup](docs/diagnostics.md#offline-code-guides)
+for output and coverage. `explain file.ixa [symbol]` continues to inspect
+inferred program contracts.
+
 ## Implemented pipeline
 
 What works today, end to end:
@@ -184,6 +201,7 @@ examples/borrow-inference.ixa
 
 ```console
 $ ontixa check file.ixa            # compile; diagnostics, exit 0/1
+$ ontixa diagnostic E_USE_AFTER_MOVE # offline explanation + correction examples
 $ ontixa run file.ixa              # compile + interpret, print result
 $ ontixa tokens file.ixa           # token stream
 $ ontixa ast file.ixa              # canonical AST (JSON)
@@ -209,7 +227,8 @@ $ ontixa fmt file.ixa --write               # overwrite in place (staged+journal
 
 Common flags: `--json` (machine-readable output), `--timings`
 (per-stage latency). Exit codes: `0` ok, `1` source errors or recovery
-conflict, `2` runtime trap/unreadable input, `3` internal compiler error.
+conflict, `2` runtime trap/unreadable input or unsuccessful diagnostic lookup,
+`3` internal compiler error.
 
 ## Layout
 

@@ -1,0 +1,13 @@
+data Point {
+    x: i32;
+}
+
+fn keep(p: Point) -> Point {
+    return p;
+}
+
+fn main() -> i32 {
+    let p = Point { x: 1 };
+    let q = keep(p);
+    return q.x;
+}

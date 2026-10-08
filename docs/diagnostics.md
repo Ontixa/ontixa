@@ -63,6 +63,49 @@ Codes are a public contract. Never reuse; retire instead.
 | `W_UNREACHABLE_ARM`    | types     | match arm shadowed by earlier coverage |
 | `I_INTERNAL`           | any       | compiler bug (ICE); exit 3       |
 
+## Offline code guides
+
+`ontixa diagnostic <CODE> [--json]` looks up a bundled guide without a
+source file, workspace, or network request. Codes are exact and case-sensitive.
+Run `ontixa diagnostic --help` to see the available guides:
+
+- `E_USE_AFTER_MOVE`: follow ownership into the returned binding; adding
+  `mut` alone cannot restore a moved value
+- `E_UNINITIALIZED`: initialize before reading, on every continuing path
+- `E_IMMUTABLE_ASSIGNMENT`: declare mutable authority when reassignment is intended
+- `E_MUTABLE_BORROW_OF_IMMUTABLE`: give the caller's binding mutable authority
+  when passing it to a mutating callee
+
+Each guide has a title, meaning, common cause, correction explanation,
+complete failing and corrected `.ixa` examples, and repository-relative
+`see_also` paths. The examples are bundled into the executable and tested
+against the real checker: the failing program reports exactly its stated
+code, and the correction has no diagnostics. Browse the pairs in
+[examples/diagnostics](../examples/diagnostics/README.md).
+
+Human `check` prints one lookup hint per distinct covered code on stderr.
+It adds no hints for uncovered codes or successful checks. This does not
+change diagnostic objects or existing JSON output. `explain file.ixa [symbol]`
+still inspects program signatures and inferred contracts.
+
+JSON lookup uses the same schema-1 envelope:
+
+- Success: exit 0, `command: "diagnostic"`, `success: true`, and
+  `result.guide` with `code`, `title`, `meaning`, `cause`, `correction`,
+  `failing_example`, `corrected_example`, and `see_also`
+- Recognized code without a guide: exit 2, `success: false`, and
+  `error.kind: "diagnostic_guide_unavailable"`
+- Unknown code: exit 2, `success: false`, and
+  `error.kind: "unknown_diagnostic_code"`
+
+Both lookup failures return `result.code` and `result.available_codes`,
+plus an `error.message`. These two additive error kinds are specific to
+`diagnostic`; neither means the user's source failed compilation. All lookup
+responses have empty `diagnostics` and `timings` arrays. Successful lookup
+has `error: null`. Output is deterministic and stdout contains exactly one
+JSON document. Uncovered codes are recognized honestly, without a generated
+placeholder guide.
+
 ## JSON schema (version 1)
 
 Every `--json` command emits **exactly one** envelope document on
@@ -98,10 +141,11 @@ stdout — never concatenated documents, never bare logs:
 - `timings` is `[]` unless `--timings` was passed (timings are
   nondeterministic and opt-in).
 - `error` is `{ "kind": "io"|"runtime"|"internal"|"conflict", "message": ... }`
-  for non-diagnostic failures, else `null`.
+  for non-diagnostic failures, else `null`. The `diagnostic` command also uses
+  the two lookup-specific error kinds described above.
 
 Agents should key off `code` + `details`, never off rendered text.
-Exit codes: `0` ok, `1` error diagnostics or recovery conflict, `2` io/runtime, `3` ICE.
+Exit codes: `0` ok, `1` error diagnostics or recovery conflict, `2` io/runtime/diagnostic lookup failure, `3` ICE.
 
 `recover --json` keeps schema 1 and all per-journal `result.outcomes`. If any
 outcome is `conflict`, the envelope now has `success: false`,
