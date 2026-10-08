@@ -12,6 +12,7 @@ gets — no privileged back door, and no LLM inside the compiler.
 | Diagnostics (JSON)       | `ontixa check --json`    | stable codes + spans + structured details |
 | Canonical AST            | `ontixa ast f.ixa`       | owned tree, positions preserved        |
 | Typed MIR                | `ontixa mir f.ixa`       | execution-facing CFG                   |
+| Offline diagnostic guide | `ontixa diagnostic E_USE_AFTER_MOVE --json` | meaning, cause, checked correction examples |
 | Contracts                | `ontixa explain --json`  | per-param behavior summary             |
 | Stage timings            | `--timings`              | pipeline latency budget                |
 

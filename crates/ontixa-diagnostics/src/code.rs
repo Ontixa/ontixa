@@ -109,6 +109,58 @@ pub enum Code {
 }
 
 impl Code {
+    /// All currently recognized codes, including codes without a CLI guide.
+    /// Keep this registry in sync when adding a variant and its stable spelling.
+    pub const ALL: &[Self] = &[
+        Self::Parse,
+        Self::UnterminatedString,
+        Self::UnterminatedComment,
+        Self::UnexpectedCharacter,
+        Self::DuplicateDef,
+        Self::UnknownSymbol,
+        Self::UnknownModule,
+        Self::UnknownType,
+        Self::NotAStruct,
+        Self::UnknownField,
+        Self::ExtraField,
+        Self::DuplicateField,
+        Self::MissingField,
+        Self::ArgCount,
+        Self::NotCallable,
+        Self::TypeMismatch,
+        Self::CannotInfer,
+        Self::UseAfterMove,
+        Self::Uninitialized,
+        Self::ImmutableAssignment,
+        Self::MutableBorrowOfImmutable,
+        Self::BorrowConflict,
+        Self::MoveWhileBorrowed,
+        Self::AmbiguousSymbol,
+        Self::InvalidName,
+        Self::NameConflict,
+        Self::RenameRejected,
+        Self::StaleRevision,
+        Self::BaselineErrors,
+        Self::PlanMismatch,
+        Self::UnsupportedTarget,
+        Self::MalformedPatch,
+        Self::PatchRejected,
+        Self::MissingReturn,
+        Self::LiteralOverflow,
+        Self::UnsupportedOperation,
+        Self::NonExhaustive,
+        Self::UnreachableArm,
+        Self::Internal,
+    ];
+
+    /// Looks up the exact, case-sensitive public spelling of a code.
+    pub fn from_code(code: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|known| known.as_str() == code)
+    }
+
     /// The stable string form used in JSON and human output.
     pub const fn as_str(self) -> &'static str {
         match self {
