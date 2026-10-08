@@ -158,6 +158,23 @@ interpreter's existing `i128`/`f64` arithmetic representation remains;
 width-exact arithmetic overflow and float rounding are separate work.
 See `examples/numeric-context.ixa`.
 
+### Default integer signs
+
+When a directly negated integer literal has no expected type, its
+negated value is checked against the existing `i32` default. Thus
+`let x = -2147483648;` and `let y = -2147483648 + 1;` are valid, just
+like the corresponding annotated `i32` bindings. Previously the
+unannotated path checked the positive magnitude before the sign and
+rejected the minimum. This is a narrow default-sign correction.
+
+The existing paths for expected integer and noninteger types are
+unchanged. Positive `2147483648`, negative `-2147483649`, and
+`-(2147483648 + 0)` still report `E_LITERAL_OVERFLOW` without context.
+This does not fold compound expressions, widen default types, convert
+numeric families or existing bindings, or extend peer/range inference.
+MIR still emits negation, and the interpreter keeps its `i128`/`f64`
+representation. See `examples/default-integer-minimum.ixa`.
+
 ### Numeric literal peers
 
 Bare numeric literals and a single negation of a numeric literal can

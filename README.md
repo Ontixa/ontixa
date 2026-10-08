@@ -133,7 +133,12 @@ intermediate binding. Two literal operands keep their defaults. Run
 `examples/numeric-peers.ixa` for an example.
 
 Without a numeric context, integer and float literals still default to
-`i32` and `f64`. Typed values never change width implicitly. Each integer
+`i32` and `f64`. A directly negated integer literal is checked after its
+sign, so `let x = -2147483648;` fits the default `i32`, as does
+`let y = -2147483648 + 1;`. This does not fold compound expressions:
+`-(2147483648 + 0)` still rejects the overflowing positive literal.
+Run `examples/default-integer-minimum.ixa` for an example.
+Typed values never change width implicitly. Each integer
 literal must fit its adopted type (`E_LITERAL_OVERFLOW`); arithmetic
 itself still uses the reference interpreter's `i128`/`f64` superset,
 not width-exact overflow or rounding semantics (see ADR-0005).

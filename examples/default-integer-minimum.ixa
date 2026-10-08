@@ -1,0 +1,6 @@
+// Directly negated literals include the minimum of the default i32.
+fn main() -> i32 {
+    let minimum = -2147483648;
+    let successor = -2147483648 + 1;
+    successor - minimum
+}

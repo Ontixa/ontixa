@@ -141,3 +141,58 @@ fn context_does_not_coerce_typed_operands_or_change_operator_domains() {
     }
     assert!(codes("fn f() -> i8 { true + false }").contains(&Code::UnsupportedOperation));
 }
+
+#[test]
+fn default_negated_integer_literals_include_the_i32_minimum() {
+    for expression in [
+        "-2147483648",
+        "-(2147483648)",
+        "((-2147483648))",
+        "-(-2147483648)",
+        "-2147483648 + 0",
+        "0 + -2147483648",
+        "-2147483648 + 1",
+        "-2147483647",
+        "-1",
+        "-0",
+    ] {
+        let src = format!("fn f() {{ let x = {expression}; }}");
+        let (module, tables, _, diags) = check_src(&src);
+        assert!(diags.is_empty(), "{src}: {diags:?}");
+        let body = module.bodies.iter().flatten().next().unwrap();
+        let types = tables[body.def.index()].as_ref().unwrap();
+        assert!(types.local_types.values().all(|ty| *ty == Ty::I32));
+        for expr in &body.exprs {
+            if !matches!(expr.kind, HirExprKind::Block { .. }) {
+                assert_eq!(types.ty_of(expr.id), Ty::I32, "{src}: {expr:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn default_sign_checking_preserves_overflow_context_and_family_rules() {
+    for (src, expected) in [
+        ("fn f() { let x = -2147483649; }", Code::LiteralOverflow),
+        ("fn f() { let x = 2147483648; }", Code::LiteralOverflow),
+        (
+            "fn f() { let x = -(2147483648 + 0); }",
+            Code::LiteralOverflow,
+        ),
+        (
+            "fn f() { let x = -(-(2147483648 + 0)); }",
+            Code::LiteralOverflow,
+        ),
+        ("fn f() -> i8 { -129 }", Code::LiteralOverflow),
+        ("fn f() -> u8 { -1 }", Code::LiteralOverflow),
+        ("fn f() -> f64 { -2147483648 }", Code::LiteralOverflow),
+        ("fn f() -> f64 { -1 }", Code::TypeMismatch),
+        ("fn f() -> bool { -1 }", Code::TypeMismatch),
+        (
+            "fn f() -> i64 { let x = -2147483648; x }",
+            Code::TypeMismatch,
+        ),
+    ] {
+        assert_eq!(codes(src), [expected], "{src}");
+    }
+}
