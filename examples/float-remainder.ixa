@@ -1,0 +1,10 @@
+// Floating remainder keeps the dividend's sign at both declared widths.
+fn main() -> f64 {
+    let negative: f32 = -5.5 % 2.0;
+    let phase: f64 = 85.5 % 43.5;
+    if negative == -1.5 {
+        phase
+    } else {
+        0.0
+    }
+}

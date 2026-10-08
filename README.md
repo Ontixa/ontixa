@@ -125,8 +125,12 @@ Without a numeric context, integer and float literals still default to
 literal must fit its adopted type (`E_LITERAL_OVERFLOW`); arithmetic
 itself still uses the reference interpreter's `i128`/`f64` superset,
 not width-exact overflow or rounding semantics (see ADR-0005).
-Floating-point `%` currently type-checks but is not implemented by the
-reference interpreter; running it traps.
+Floating-point `%` uses truncating remainder: `5.5 % 2.0` is `1.5`,
+and `-5.5 % 2.0` is `-1.5`. The result keeps the dividend's sign,
+including signed zero. A zero divisor, infinite dividend, or NaN operand
+produces NaN; a finite dividend modulo infinity returns the dividend.
+Integer remainder by zero still traps. See
+`examples/float-remainder.ixa` and ADR-0005 for the reference semantics.
 
 ## Ownership without annotations
 
