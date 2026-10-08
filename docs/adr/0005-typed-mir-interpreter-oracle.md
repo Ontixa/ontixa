@@ -132,3 +132,27 @@ interprocedural termination inference. MIR lowering, contract inference,
 escape summaries, diagnostic codes, and schemas are unchanged; the interpreter
 continues to execute the existing branches and returns. The broader
 tail-return milestone remains open. See `examples/returning-branches.ixa`.
+
+### Numeric context through arithmetic
+
+Arithmetic (`+`, `-`, `*`, `/`, `%`) and numeric negation preserve a
+required numeric result type when checking their operands. This lets
+`fn f() -> i64 { 40 + 2 }` and `let x: f32 = -(1.0 + 2.0);` adopt the
+declared type at their literal leaves. Previously these expressions
+lost that context and were rejected as default-width values. The same
+rule applies wherever the checker already supplies a numeric context,
+including call arguments, aggregate elements, and continuing branch tails.
+
+The left operand's actual type still guides the right operand; existing
+typed values are never coerced. Without context, literals still default
+to `i32`/`f64`. Comparisons and boolean operators do not propagate their
+result context into numeric operands. String concatenation is unchanged.
+Every adopted integer literal is range-checked, including folded signed
+minima: `-128 + 0` fits `i8`, while `-(128 + 0)` contains an overflowing
+positive `i8` literal and is rejected. This is not constant folding.
+
+This changes only checking and inferred expression types. MIR operations,
+ownership contracts, diagnostic codes and schemas stay the same. The
+interpreter's existing `i128`/`f64` arithmetic representation remains;
+width-exact arithmetic overflow and float rounding are separate work.
+See `examples/numeric-context.ixa`.

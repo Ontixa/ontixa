@@ -1,0 +1,17 @@
+// Declared numeric types reach arithmetic literals, including nested
+// expressions. No suffixes or intermediate annotated bindings are needed.
+data Reading {
+    value: i64;
+}
+
+fn twice(x: i64) -> i64 {
+    x * 2
+}
+
+fn main() -> i64 {
+    let reading = Reading { value: 30 + 10 };
+    let mut offset: i64 = 0;
+    offset = -(3 - 4);
+    let adjustments: [i64] = [1 + offset];
+    reading.value + twice(adjustments[0] / 2)
+}
