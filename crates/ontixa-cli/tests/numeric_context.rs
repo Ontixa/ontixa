@@ -92,3 +92,57 @@ fn nested_branch_values_and_early_returns_keep_numeric_context() {
         assert_eq!(json["result"]["value"], expected);
     }
 }
+
+#[test]
+fn default_integer_minimum_reaches_check_mir_and_execution() {
+    for (expression, expected) in [
+        ("-2147483648", -2147483648_i64),
+        ("-(2147483648)", -2147483648),
+        // Arithmetic still uses the interpreter's i128 superset.
+        ("-(-2147483648)", 2147483648),
+        ("-2147483648 + 0", -2147483648),
+        ("0 + -2147483648", -2147483648),
+        ("-2147483648 + 1", -2147483647),
+        ("-1", -1),
+    ] {
+        let src = format!("fn main() -> i32 {{ let x = {expression}; x }}");
+        for command in ["check", "mir", "run"] {
+            let (out, json) = invoke(command, &src);
+            assert!(out.status.success(), "{src}: {json}");
+            assert_eq!(json["success"], true);
+            if command == "mir" {
+                let locals = json["result"]["mir"]["fns"][0]["locals"]
+                    .as_array()
+                    .unwrap();
+                assert!(!locals.is_empty());
+                assert!(locals.iter().all(|local| local["ty"]["kind"] == "i32"));
+            }
+            if command == "run" {
+                assert_eq!(json["result"]["value"], expected, "{src}");
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_default_integer_literals_poison_mir_and_stop_execution() {
+    for expression in ["-2147483649", "2147483648", "-(2147483648 + 0)"] {
+        let src = format!("fn main() -> i32 {{ let x = {expression}; x }}");
+        for command in ["check", "mir", "run"] {
+            let (out, json) = invoke(command, &src);
+            assert_eq!(out.status.code(), Some(1), "{src}: {json}");
+            assert_eq!(json["success"], false);
+            if command == "mir" {
+                let locals = json["result"]["mir"]["fns"][0]["locals"]
+                    .as_array()
+                    .unwrap();
+                assert!(locals.iter().any(|local| local["ty"]["kind"] == "poison"));
+            } else {
+                assert!(json["result"].is_null());
+            }
+            let diagnostics = json["diagnostics"].as_array().unwrap();
+            assert_eq!(diagnostics.len(), 1, "{src}: {json}");
+            assert_eq!(diagnostics[0]["code"], "E_LITERAL_OVERFLOW");
+        }
+    }
+}

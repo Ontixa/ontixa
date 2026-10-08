@@ -1065,7 +1065,8 @@ impl Checker<'_> {
     }
 
     fn unary_ty(&mut self, op: UnOp, expr: ExprId, expected: Option<Ty>, span: Span) -> Ty {
-        // Fold `-<int-literal>` against the expected type: the
+        // Fold `-<int-literal>` against the expected integer type,
+        // or the default `i32` when no type is expected: the
         // *negated* value is range-checked, so `let x: i8 = -128`
         // works (its operand `128` alone would overflow `i8`) while
         // `-129` and `-1` in `u8` report `E_LITERAL_OVERFLOW` instead
@@ -1075,6 +1076,9 @@ impl Checker<'_> {
                 if op == UnOp::Neg && t.is_integer() =>
             {
                 Some((*v, t))
+            }
+            (HirExprKind::Literal(LitValue::Int(v)), None) if op == UnOp::Neg => {
+                Some((*v, Ty::I32))
             }
             _ => None,
         };
