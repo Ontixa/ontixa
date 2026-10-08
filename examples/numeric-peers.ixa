@@ -1,0 +1,12 @@
+// A numeric peer guides a bare or single-negated literal on either side.
+fn main() -> i64 {
+    let x: i64 = 40;
+    let answer = 2 + x;
+    let floor: i8 = -127;
+    let fraction: f32 = 1.5;
+    if 0 < answer && -128 < floor && -2.0 < fraction {
+        answer
+    } else {
+        0
+    }
+}

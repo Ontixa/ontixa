@@ -143,8 +143,9 @@ lost that context and were rejected as default-width values. The same
 rule applies wherever the checker already supplies a numeric context,
 including call arguments, aggregate elements, and continuing branch tails.
 
-The left operand's actual type still guides the right operand; existing
-typed values are never coerced. Without context, literals still default
+Except for the literal-peer extension below, the left operand's actual
+type guides the right operand; existing typed values are never coerced.
+Without context, literals still default
 to `i32`/`f64`. Comparisons and boolean operators do not propagate their
 result context into numeric operands. String concatenation is unchanged.
 Every adopted integer literal is range-checked, including folded signed
@@ -156,6 +157,50 @@ ownership contracts, diagnostic codes and schemas stay the same. The
 interpreter's existing `i128`/`f64` arithmetic representation remains;
 width-exact arithmetic overflow and float rounding are separate work.
 See `examples/numeric-context.ixa`.
+
+### Numeric literal peers
+
+Bare numeric literals and a single negation of a numeric literal can
+adopt an independently checked peer's numeric type for arithmetic and
+equality/ordering comparisons. This deliberately extends the earlier
+left-to-right rule: with `x: i64`, `0 < x` now works like `x > 0`, and
+`let y = 1 + x;` infers `i64`. The corresponding float cases adopt
+`f32` or `f64`; integer literals never become floats or vice versa.
+
+A declared arithmetic result context retains priority. Without that
+context, a literal-like left operand is deferred only beside a peer
+whose type checking is independent of its incoming expected type:
+variables, calls, fields, indexes, and the built-in length property;
+blocks with such a tail; negation of such an operand; and arithmetic
+with such a left operand. Those checker arms ignore the incoming
+context or propagate it only through an already independent child.
+The peer is checked once without an expected type, then its numeric
+type guides the literal. Other shapes use the original left-to-right
+traversal. This preserves contexts needed by literal-valued blocks
+with signed minima and if/match peers whose branches all return.
+Grouping parentheses do not change these rules. Two literal-like
+operands retain their existing defaults and checks. Existing typed
+values keep their types, including bindings inferred from literals.
+
+This is not general bidirectional inference. Compound left operands
+such as `(1 + 2) < x`, `-(1 + 2) < x`, and `{ 0 } < x` still need an
+appropriate declared context or typed intermediate binding when
+`x: i64`. Context-dependent right peers such as `0 < (1 + x)` and
+`0 < if true { x } else { x }` also retain the earlier behavior;
+use a typed intermediate binding when needed. Existing inward
+propagation through those peers stays unchanged. Integer ranges and
+negated signed-minimum checks remain in
+force: `-128 < x` accepts an `i8` peer; `128 > x` and `-129 < x`
+report `E_LITERAL_OVERFLOW`. The separate `for` range-bound rule is
+unchanged, including its restriction to bare literals.
+
+Only literal syntax with no binding reads, declarations, or effects
+is deferred during type checking. HIR operand order, MIR lowering,
+runtime evaluation, definite initialization, ownership analysis, and
+boolean short-circuiting are unchanged. The interpreter still uses
+its `i128`/`f64` arithmetic representation; this does not add casts,
+constant folding, or width-exact overflow/rounding semantics. See
+`examples/numeric-peers.ixa`.
 
 ### Floating-point remainder
 

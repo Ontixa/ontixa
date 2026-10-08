@@ -873,6 +873,47 @@ impl Checker<'_> {
         }
     }
 
+    /// Literal syntax whose checking can be deferred without moving any
+    /// binding reads, declarations, or effects. Grouping is absent from HIR.
+    fn numeric_literal_operand(&self, id: ExprId) -> bool {
+        match self.node(id).kind {
+            HirExprKind::Literal(LitValue::Int(_) | LitValue::Float(_)) => true,
+            HirExprKind::Unary {
+                op: UnOp::Neg,
+                expr,
+            } => matches!(
+                self.node(expr).kind,
+                HirExprKind::Literal(LitValue::Int(_) | LitValue::Float(_))
+            ),
+            _ => false,
+        }
+    }
+
+    /// These expression arms ignore their incoming expected type, or pass
+    /// it only through a child already known to ignore it. Keep contextual
+    /// branches and literal-valued blocks on the original checking path:
+    /// their signed minima and non-completing paths may need that context.
+    fn context_independent_peer(&self, id: ExprId) -> bool {
+        match self.node(id).kind {
+            HirExprKind::Var(_)
+            | HirExprKind::Call { .. }
+            | HirExprKind::Field { .. }
+            | HirExprKind::Index { .. }
+            | HirExprKind::Len { .. } => true,
+            HirExprKind::Block { tail: Some(t), .. } => self.context_independent_peer(t),
+            HirExprKind::Unary {
+                op: UnOp::Neg,
+                expr,
+            } => self.context_independent_peer(expr),
+            HirExprKind::Binary {
+                op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem,
+                lhs,
+                ..
+            } => self.context_independent_peer(lhs),
+            _ => false,
+        }
+    }
+
     fn binary_ty(
         &mut self,
         op: BinOp,
@@ -891,8 +932,37 @@ impl Checker<'_> {
             }
             _ => None,
         };
-        let l = self.expr_ty(lhs, operand_context);
-        let r = self.expr_ty(rhs, Some(l));
+        let peer_operator = matches!(
+            op,
+            BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Rem
+                | BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+        );
+        let (l, r) = if operand_context.is_none()
+            && peer_operator
+            && self.numeric_literal_operand(lhs)
+            && self.context_independent_peer(rhs)
+        {
+            // Establish the peer independently, once. Only effect-free literal
+            // syntax is deferred; HIR, MIR, and ownership evaluation keep their
+            // written order. Declared contexts and two-literal defaults stay on
+            // the ordinary path, and literal_ty preserves numeric families.
+            let r = self.expr_ty(rhs, None);
+            let l = self.expr_ty(lhs, Some(r).filter(|t| t.is_numeric()));
+            (l, r)
+        } else {
+            let l = self.expr_ty(lhs, operand_context);
+            let r = self.expr_ty(rhs, Some(l));
+            (l, r)
+        };
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 if l.is_numeric() && l.compatible(r) {
