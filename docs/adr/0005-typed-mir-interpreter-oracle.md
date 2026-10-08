@@ -156,3 +156,25 @@ ownership contracts, diagnostic codes and schemas stay the same. The
 interpreter's existing `i128`/`f64` arithmetic representation remains;
 width-exact arithmetic overflow and float rounding are separate work.
 See `examples/numeric-context.ixa`.
+
+### Floating-point remainder
+
+The reference interpreter now executes `%` for `f32` and `f64` operands;
+previously, valid typed MIR reached an unsupported-operation trap.
+Like the existing float arithmetic, it uses Rust's `f64` operation on
+the interpreter's `Value::Float(f64)` representation at both declared
+widths. This retains the documented arithmetic superset; it does not
+introduce width-exact `f32` rounding.
+
+The operation follows [Rust's truncating remainder](https://doc.rust-lang.org/std/ops/trait.Rem.html#impl-Rem-for-f64),
+with the dividend's sign: `5.5 % 2.0` is `1.5`, and `-5.5 % 2.0` is
+`-1.5` regardless of the divisor's sign. A zero result preserves the
+dividend's sign. A zero divisor, infinite dividend, or NaN operand
+produces NaN without trapping; a finite dividend modulo either infinity
+returns the dividend. Tests check NaN classification, not its sign or
+payload. Integer remainder and its zero-divisor trap are unchanged.
+
+This fills the missing interpreter dispatch case without changing
+checking, MIR, diagnostic codes, or output schemas. Existing float
+output applies: human output displays NaN as `NaN`, while JSON encodes
+non-finite float results as `null`. See `examples/float-remainder.ixa`.

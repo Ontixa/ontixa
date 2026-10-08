@@ -514,6 +514,7 @@ fn binary(op: BinOp, l: Value, r: Value) -> Result<Value, RuntimeError> {
             }
             Int(a % b)
         }
+        (BinOp::Rem, Float(a), Float(b)) => Float(a % b),
         (BinOp::Eq, a, b) => Bool(values_eq(&a, &b)),
         (BinOp::Ne, a, b) => Bool(!values_eq(&a, &b)),
         (BinOp::Lt, Int(a), Int(b)) => Bool(a < b),

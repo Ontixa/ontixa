@@ -115,6 +115,10 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   fields, arrays, and assignments. This repairs lost expected-type context;
   unannotated defaults, strict width matching, and the interpreter's
   arithmetic representation are unchanged. Demo: `examples/numeric-context.ixa`
+- floating-point remainder: valid `f32`/`f64` `%` now executes with
+  truncating remainder semantics, including signed zero and non-finite
+  inputs, using the existing `f64` runtime representation (ADR-0005).
+  Demo: `examples/float-remainder.ixa`
 
 Remaining:
 - `return`-less tail returns everywhere (blocks already tail-expr)
