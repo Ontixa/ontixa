@@ -111,6 +111,23 @@ Use separate statements for effects that must always happen; assigning
 a binding only in the RHS does not make it definitely initialized.
 See [ADR-0005](docs/adr/0005-typed-mir-interpreter-oracle.md).
 
+## Numeric expressions
+
+Declared numeric types guide literals through `+`, `-`, `*`, `/`, `%`,
+and unary negation, including nested expressions. For example,
+`fn answer() -> i64 { 40 + 2 }`, `let x: i8 = -128 + 1;`, and
+`let y: f32 = -(1.0 + 2.0);` all keep their declared types. This also
+works in assignments, call arguments, fields, arrays, and branch tails.
+Run `examples/numeric-context.ixa` for a complete example.
+
+Without a numeric context, integer and float literals still default to
+`i32` and `f64`. Typed values never change width implicitly. Each integer
+literal must fit its adopted type (`E_LITERAL_OVERFLOW`); arithmetic
+itself still uses the reference interpreter's `i128`/`f64` superset,
+not width-exact overflow or rounding semantics (see ADR-0005).
+Floating-point `%` currently type-checks but is not implemented by the
+reference interpreter; running it traps.
+
 ## Ownership without annotations
 
 Ontixa source has **no ownership syntax**. The compiler infers what

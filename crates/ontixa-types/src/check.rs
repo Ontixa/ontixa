@@ -533,7 +533,7 @@ impl Checker<'_> {
                 Ty::Poison
             }
             HirExprKind::For { var, iter, body } => self.for_ty(var, iter, body),
-            HirExprKind::Binary { op, lhs, rhs } => self.binary_ty(op, lhs, rhs, span),
+            HirExprKind::Binary { op, lhs, rhs } => self.binary_ty(op, lhs, rhs, expected, span),
             HirExprKind::Unary { op, expr } => self.unary_ty(op, expr, expected, span),
             HirExprKind::If { cond, then, else_ } => self.if_ty(cond, then, else_, expected, span),
             HirExprKind::Block { stmts, tail } => {
@@ -873,8 +873,25 @@ impl Checker<'_> {
         }
     }
 
-    fn binary_ty(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId, span: Span) -> Ty {
-        let l = self.expr_ty(lhs, None);
+    fn binary_ty(
+        &mut self,
+        op: BinOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        expected: Option<Ty>,
+        span: Span,
+    ) -> Ty {
+        // Arithmetic preserves its operands' numeric type, so a required
+        // result type can guide literal adoption all the way to the leaves.
+        // Comparisons produce bool instead and must not pass result context
+        // to their operands. Existing typed values still keep their types.
+        let operand_context = match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                expected.filter(|t| t.is_numeric())
+            }
+            _ => None,
+        };
+        let l = self.expr_ty(lhs, operand_context);
         let r = self.expr_ty(rhs, Some(l));
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
@@ -1006,7 +1023,12 @@ impl Checker<'_> {
             self.set_ty(expr, Ty::Poison);
             return Ty::Poison;
         }
-        let t = self.expr_ty(expr, None);
+        let operand_context = if op == UnOp::Neg {
+            expected.filter(|t| t.is_numeric())
+        } else {
+            None
+        };
+        let t = self.expr_ty(expr, operand_context);
         match op {
             UnOp::Neg => {
                 if t.is_numeric() {

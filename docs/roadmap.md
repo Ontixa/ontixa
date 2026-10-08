@@ -110,6 +110,12 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   it does not complete the broader tail-return item below.
   Demo: `examples/returning-branches.ixa`
 
+- contextual numeric arithmetic: declared numeric types reach literals
+  through nested arithmetic and negation in returns, bindings, arguments,
+  fields, arrays, and assignments. This repairs lost expected-type context;
+  unannotated defaults, strict width matching, and the interpreter's
+  arithmetic representation are unchanged. Demo: `examples/numeric-context.ixa`
+
 Remaining:
 - `return`-less tail returns everywhere (blocks already tail-expr)
 - more primitives only if wanted (`u128`/`i128` — the lexer already
