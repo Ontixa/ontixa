@@ -3,6 +3,13 @@
 Every diagnostic is a structure, not a string. Human rendering and
 JSON rendering are two views of the same `Diagnostic` value.
 
+Workspace lexer and parser errors carry the file where they were
+produced. This corrects earlier dependency errors that displayed the
+entry file, and retains identical errors from distinct modules. Codes,
+messages and byte offsets are unchanged; malformed multi-module output
+can therefore have corrected file labels and additional previously
+collapsed diagnostics.
+
 ## Anatomy
 
 | field     | meaning                                          |

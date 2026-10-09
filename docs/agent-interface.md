@@ -15,6 +15,7 @@ gets — no privileged back door, and no LLM inside the compiler.
 | Offline diagnostic guide | `ontixa diagnostic E_USE_AFTER_MOVE --json` | meaning, cause, checked correction examples |
 | Contracts                | `ontixa explain --json`  | per-param behavior summary             |
 | Contract/signature changes | `ontixa diff --semantic old/main.ixa new/main.ixa --json` | bounded, qualified before/after facts |
+| Unsaved contract/signature changes | `ontixad` `diff` with inline `before`/`after` sources | same selected facts without temporary files or session changes |
 | Stage timings            | `--timings`              | pipeline latency budget                |
 
 ## Why this shape
@@ -49,6 +50,9 @@ per line, one schema-1 envelope per line.
 {"op":"set",     "path":"x.ixa", "text":"..."}    → the edit op (auto-opens)
 {"op":"check",   "path":"x.ixa"}                  → check envelope
 {"op":"explain", "path":"x.ixa", "symbol":"s"}    → explain envelope
+{"op":"diff", "semantic":true,                   → comparison envelope;
+ "before":{"entry":"main","sources":[...]},         isolated inline sources
+ "after":{"entry":"main","sources":[...]}}
 {"op":"rename",  "path":"x.ixa", "symbol":"m::s", "to":"new",
                  "apply":true, "revision":R}      → preview or apply
 {"op":"patch",   "path":"x.ixa", "ops":[{...}],   → preview or apply;
@@ -216,14 +220,46 @@ minimally and `ontixa fmt` owns canonical form.
 
 ## Contract and signature comparison
 
-The first read-only contract-diff slice is available through the CLI:
-[`diff --semantic`](semantic-diff.md). It compares two explicit source
-workspaces using the same compiler, including qualified signatures,
-data shapes and inferred parameter/escape facts. Matching entry module
-names are required. Changes and unchanged results both exit 0; errors
-make the comparison unavailable with side-tagged diagnostics. It does
-not compare runtime behavior or establish compatibility. There is no
-daemon operation or patch-transaction integration.
+[`diff --semantic`](semantic-diff.md) compares two explicit source
+workspaces through the CLI, including qualified signatures, data shapes
+and inferred parameter/escape facts. The CLI reads entry files and their
+sibling modules. Matching entry module names are required. Changes and
+unchanged results both exit 0; errors make the comparison unavailable
+with side-tagged diagnostics.
+
+The daemon accepts the same bounded comparison over two unsaved buffer
+sets in one request:
+
+```json
+{"op":"diff","semantic":true,"before":{"entry":"main","sources":[{"module":"main","text":"fn f(x: i32) -> i32 { x }"}]},"after":{"entry":"main","sources":[{"module":"main","text":"fn f(value: i32) -> i32 { value }"}]}}
+```
+
+Each side owns its entire workspace. Module names must be unique ASCII
+identifiers, the entry must be supplied, and both entries must match.
+Sources are registered entry-first, then by module name; only definitions
+in the entry and `use`-reachable modules are compared. Labels such as
+`before/main.ixa` and `after/main.ixa` identify inline sources in
+diagnostics; they are not paths read from disk. Inputs expose
+`source_kind: "inline"`, and `coverage.inputs` describes inline loading.
+
+Each request uses two fresh, isolated `Db` instances. It never reads or
+writes source files, consults or changes the persistent session, or
+affects its revision, caches or counters. This comparison is not
+incremental. It does not execute programs, compare runtime behavior,
+establish compatibility, or integrate with patch plans or apply.
+
+Responses use the existing schema-1 `command: "diff"` envelope and
+`comparison_schema: 1` payload, including the CLI's compared fields,
+uncertainties and limits. `changed` and `unchanged` both succeed.
+Missing/false `semantic`, malformed shapes, unknown fields, duplicate
+modules, invalid names or a missing entry return
+`error.kind: "invalid_comparison_request"` and `result: null`.
+Root mismatch or compiler source errors return
+`error.kind: "comparison_unavailable"` with input status and any
+side-tagged diagnostics. A failed request produces one response and
+leaves the daemon available for the next line. See the
+[full contract](semantic-diff.md#daemon-inline-inputs) and runnable
+[`inline.ndjson`](../examples/semantic-diff/inline.ndjson) example.
 
 ## Planned (roadmap)
 

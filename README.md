@@ -222,7 +222,7 @@ $ ontixa fmt file.ixa --write               # overwrite in place (staged+journal
 ```
 
 `ontixad` is the persistent daemon (NDJSON on stdio): `open`, `set`,
-`check`, `explain`, `rename`, `patch`, `fmt`, `stats`, `close`,
+`check`, `explain`, `diff`, `rename`, `patch`, `fmt`, `stats`, `close`,
 `shutdown` — see
 [docs/agent-interface.md](docs/agent-interface.md).
 
@@ -233,6 +233,25 @@ programs. `No changes in compared fields` is not a claim of behavioral
 equality or compatibility. Differences still exit 0; source/input
 failures make comparison unavailable. See
 [the comparison contract](docs/semantic-diff.md) for coverage and JSON.
+
+The daemon's `diff` operation compares two unsaved buffer sets supplied
+in one request, without temporary directories or changes to the live
+session. Each side supplies an `entry` module and `sources` containing
+module names and source text; `"semantic": true` is required. It uses
+two fresh, isolated compilations and reports the same selected facts
+and limits as the CLI. Try the synthetic NDJSON example from Bash or
+Zsh:
+
+```sh
+cargo run --quiet --locked -p ontixa-cli --bin ontixad < examples/semantic-diff/inline.ndjson
+```
+
+In PowerShell, use `Get-Content examples/semantic-diff/inline.ndjson |
+cargo run --quiet --locked -p ontixa-cli --bin ontixad`. The response
+reports `borrow` changing to `move` in `geom::read` and `main::relay`;
+the daemon does not execute either program. See
+[inline comparison inputs](docs/semantic-diff.md#daemon-inline-inputs)
+for the request and failure contract.
 
 Common flags: `--json` (machine-readable output), `--timings`
 (per-stage latency). Exit codes: `0` ok, `1` source errors or recovery

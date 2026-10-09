@@ -1,8 +1,9 @@
 //! Read-only comparison of explicitly bounded semantic fields.
 //!
-//! Each input is independently compiled by the CLI's existing workspace loader.
-//! This module does not execute source or interact with editing transactions.
+//! Inputs are independently compiled, either from CLI workspaces or explicit
+//! inline daemon snapshots. Neither route executes source or edits it.
 
+pub mod inline;
 mod snapshot;
 
 use crate::envelope::{CompileFailure, Envelope};
@@ -183,59 +184,86 @@ pub fn run(
     after: Compiled,
     json: bool,
 ) -> ExitCode {
-    let mut before = input(before_path, before, "before");
-    let mut after = input(after_path, after, "after");
-    if before.info["module"] != after.info["module"] {
-        let message = format!(
-            "entry module names must match: before `{}`, after `{}`; no root aliasing is performed",
-            before.info["module"].as_str().unwrap_or(""),
-            after.info["module"].as_str().unwrap_or("")
+    let comparison = Comparison::new(before_path, after_path, before, after);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&comparison.document()).unwrap()
         );
-        for input in [&mut before, &mut after] {
-            if input.code == 0 {
-                input.fail("root_mismatch", &message, 1);
+    } else {
+        print_human(&comparison.result, &comparison.before, &comparison.after);
+    }
+    ExitCode::from(comparison.code)
+}
+
+/// Shared comparison and envelope construction, without output or source I/O.
+struct Comparison {
+    before: Input,
+    after: Input,
+    result: Json,
+    code: u8,
+}
+
+impl Comparison {
+    fn new(before_path: &Path, after_path: &Path, before: Compiled, after: Compiled) -> Self {
+        let mut before = input(before_path, before, "before");
+        let mut after = input(after_path, after, "after");
+        if before.info["module"] != after.info["module"] {
+            let message = format!(
+                "entry module names must match: before `{}`, after `{}`; no root aliasing is performed",
+                before.info["module"].as_str().unwrap_or(""),
+                after.info["module"].as_str().unwrap_or("")
+            );
+            for input in [&mut before, &mut after] {
+                if input.code == 0 {
+                    input.fail("root_mismatch", &message, 1);
+                }
             }
         }
+        let changes = match (&before.snapshot, &after.snapshot) {
+            (Some(a), Some(b)) => Some(compare(a, b)),
+            _ => None,
+        };
+        let status = match &changes {
+            Some(changes) if changes.is_empty() => "unchanged",
+            Some(_) => "changed",
+            None => "unavailable",
+        };
+        let code = before.code.max(after.code);
+        let result = json!({
+            "comparison_schema": 1,
+            "coverage": coverage(),
+            "inputs": {"before": before.info, "after": after.info},
+            "status": status,
+            "changes": changes,
+        });
+        Self {
+            before,
+            after,
+            result,
+            code,
+        }
     }
-    let changes = match (&before.snapshot, &after.snapshot) {
-        (Some(a), Some(b)) => Some(compare(a, b)),
-        _ => None,
-    };
-    let status = match &changes {
-        Some(changes) if changes.is_empty() => "unchanged",
-        Some(_) => "changed",
-        None => "unavailable",
-    };
-    let code = before.code.max(after.code);
-    let result = json!({
-        "comparison_schema": 1,
-        "coverage": coverage(),
-        "inputs": {"before": before.info, "after": after.info},
-        "status": status,
-        "changes": changes,
-    });
-    if json {
-        let mut envelope = Envelope::new("diff").result(result);
-        if code != 0 {
+
+    fn document(&self) -> Json {
+        let mut envelope = Envelope::new("diff").result(self.result.clone());
+        if self.code != 0 {
             envelope = envelope.error(
                 "comparison_unavailable",
                 "comparison unavailable; see result.inputs and side-tagged diagnostics",
-                code,
+                self.code,
             );
         }
         let (mut document, _) = envelope.into_parts();
         document["diagnostics"] = json!(
-            before
+            self.before
                 .diagnostics
-                .into_iter()
-                .chain(after.diagnostics)
+                .iter()
+                .chain(&self.after.diagnostics)
                 .collect::<Vec<_>>()
         );
-        println!("{}", serde_json::to_string_pretty(&document).unwrap());
-    } else {
-        print_human(&result, &before, &after);
+        document
     }
-    ExitCode::from(code)
 }
 
 fn print_human(result: &Json, before: &Input, after: &Input) {

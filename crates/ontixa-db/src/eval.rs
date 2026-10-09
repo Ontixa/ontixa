@@ -36,7 +36,10 @@ pub(crate) fn eval(db: &mut Db, key: QueryKey) -> (Value, Vec<Diagnostic>) {
         QueryKey::Source(f) => Value::Text(db.file_text(f)),
         QueryKey::Parse(f) => {
             let text = text(db, f);
-            let (root, d) = ontixa_syntax::parse_file(&text);
+            let (root, mut d) = ontixa_syntax::parse_file(&text);
+            // `extend` preserves supplied diagnostics rather than applying the
+            // collector's current file. Stamp parser/lexer output at its source.
+            d.tag_file_from(0, f);
             diags.extend(d);
             Value::Tree(root)
         }
