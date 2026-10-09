@@ -173,7 +173,7 @@ pub(crate) struct Entry {
     pub value: Value,
     /// Direct dependencies, in demand order.
     pub deps: Vec<QueryKey>,
-    /// Diagnostics this query's evaluation emitted.
+    /// Diagnostics this query's evaluation emitted, excluding deps.
     pub diags: Vec<Diagnostic>,
     /// Revision at which `value` last *changed*.
     pub computed_at: u64,

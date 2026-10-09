@@ -351,10 +351,12 @@ fn graph(db: &mut Db, f: FileId) -> SemanticGraph {
 fn diagnostics(db: &mut Db, f: FileId) -> Vec<Diagnostic> {
     let _ = db.demand(QueryKey::Parse(f));
     let sc = scope(db, f);
-    // Demand every reachable file's AST — its parse/lower diags are
-    // part of the workspace's diagnostics even when it has no defs.
+    // Observe Parse directly for every reachable file: an edit can
+    // change its errors while the recovered AST stays equal. Without
+    // this edge, AST early cutoff would hide diagnostic-only changes.
     let mut asts: FxHashMap<FileId, Arc<AstModule>> = FxHashMap::default();
     for &file in &sc.files {
+        let _ = db.demand(QueryKey::Parse(file));
         asts.insert(file, ast(db, file));
     }
     for def in &sc.defs {
@@ -363,29 +365,26 @@ fn diagnostics(db: &mut Db, f: FileId) -> Vec<Diagnostic> {
         }
     }
     let _ = ownership_t(db, f);
-    // Entries store transitive diagnostics, so each dep's diags may
-    // repeat an earlier dep's — dedupe by value, keeping first-seen
-    // (pipeline) order. Rebasing happens before dedupe so two defs'
-    // identical item-relative diagnostics don't collapse.
+    // Collect current local emissions through the dependency graph,
+    // preserving pipeline order. Rebase before deduplication so two
+    // defs' identical item-relative diagnostics don't collapse.
     let mut out: Vec<Diagnostic> = Vec::new();
-    for dep in db.deps_so_far().to_vec() {
-        for d in db.entry_diags(dep) {
-            let d = match d.origin {
-                Some(did) => {
-                    let def = sc.def(did);
-                    let base = asts[&def.file].items[def.item as usize].span().start;
-                    let mut d = d.rebased(base);
-                    // The origin's file is authoritative — an
-                    // eval-level stamp names the *query's* file,
-                    // which for a dep's def is not the root.
-                    d.file = Some(def.file);
-                    d
-                }
-                None => d.clone(),
-            };
-            if !out.contains(&d) {
-                out.push(d);
+    for d in db.collect_diags(db.deps_so_far()) {
+        let d = match d.origin {
+            Some(did) => {
+                let def = sc.def(did);
+                let base = asts[&def.file].items[def.item as usize].span().start;
+                let mut d = d.rebased(base);
+                // The origin's file is authoritative — an
+                // eval-level stamp names the *query's* file,
+                // which for a dep's def is not the root.
+                d.file = Some(def.file);
+                d
             }
+            None => d.clone(),
+        };
+        if !out.contains(&d) {
+            out.push(d);
         }
     }
     out
