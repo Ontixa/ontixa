@@ -3,6 +3,13 @@
 Every diagnostic is a structure, not a string. Human rendering and
 JSON rendering are two views of the same `Diagnostic` value.
 
+Human output prints each annotated source line once, followed by a
+separate marker line for every primary and secondary span on that line.
+This includes overlapping spans and multiple labels at the same position;
+an earlier label no longer hides the primary error site. Annotations stay
+in source order, with the primary first at a shared starting position.
+Diagnostic structures, JSON output, and exit codes are unchanged.
+
 Workspace lexer and parser errors carry the file where they were
 produced. This corrects earlier dependency errors that displayed the
 entry file, and retains identical errors from distinct modules. Codes,

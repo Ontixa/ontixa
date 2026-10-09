@@ -65,21 +65,21 @@ pub fn render(d: &Diagnostic, file: &SourceFile) -> String {
         if last_line.is_some_and(|l| start.line > l + 1) {
             let _ = writeln!(out, "{gutter} ...");
         }
-        if last_line == Some(start.line) {
-            continue; // one annotation per line keeps output compact
-        }
-        last_line = Some(start.line);
-
         let text = file.line_text(start.line).unwrap_or("");
-        let _ = writeln!(
-            out,
-            "{:>width$} | {}",
-            start.line,
-            text,
-            width = line_no_width
-        );
+        if last_line != Some(start.line) {
+            let _ = writeln!(
+                out,
+                "{:>width$} | {}",
+                start.line,
+                text,
+                width = line_no_width
+            );
+            last_line = Some(start.line);
+        }
 
-        // Caret line: primary uses `^^^`, secondary `---`.
+        // Share the source line, never the annotation: even overlapping
+        // spans need their own caret/label line so no error site is hidden.
+        // Primary uses `^^^`, secondary `---`.
         let mark = if *is_primary { '^' } else { '-' };
         let col_char_count = text
             .chars()
