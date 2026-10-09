@@ -109,6 +109,12 @@ Shipped (semantic-workspace campaign, PRs #3–#5):
   and loan diagnostics (ADR-0005). This fixes pre-existing false errors;
   it does not complete the broader tail-return item below.
   Demo: `examples/returning-branches.ixa`
+- tail-less blocks proven unable to complete adopt an existing expected
+  type, removing false unit mismatches in arguments and other typed
+  contexts. All children still receive diagnostics, and absent-context
+  inference stays unchanged (ADR-0005). This is a bounded checker fix,
+  not completion of the broader tail-return item below.
+  Demo: `examples/returning-blocks.ixa`
 
 - contextual numeric arithmetic: declared numeric types reach literals
   through nested arithmetic and negation in returns, bindings, arguments,

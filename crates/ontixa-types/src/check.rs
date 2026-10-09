@@ -542,6 +542,10 @@ impl Checker<'_> {
                 }
                 match tail {
                     Some(t) => self.expr_ty(t, expected),
+                    // A returning block produces no value at this use site.
+                    // Check every child first, including unreachable ones;
+                    // without context, preserve the existing unit inference.
+                    None if !self.can_complete(id) => expected.unwrap_or(Ty::Unit),
                     None => Ty::Unit,
                 }
             }

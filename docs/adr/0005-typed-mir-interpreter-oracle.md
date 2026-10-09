@@ -133,6 +133,39 @@ escape summaries, diagnostic codes, and schemas are unchanged; the interpreter
 continues to execute the existing branches and returns. The broader
 tail-return milestone remains open. See `examples/returning-branches.ixa`.
 
+### Returning blocks in an expected type context
+
+A block without a value tail can adopt its supplied expected type when
+the existing structural completion check proves it cannot reach its end.
+For example, `id({ return 42; })` in an `i32` function now accepts an
+`i32` parameter context without requiring a dead `0` tail. The return
+leaves the enclosing function before `id` executes. This also applies
+to annotated initializers, assignments, explicit-return operands,
+aggregate elements, and arithmetic where a type context already exists.
+A logical RHS can use its LHS's boolean type, while the skipped path
+still reaches the continuation.
+
+Every statement is checked before the block adopts that context. Return
+payloads use the enclosing function's return type, and invalid dead
+declarations, later returns, and value tails still report their existing
+diagnostics. Completing blocks remain unit; optional returns in logical
+RHS expressions, branches without an else, non-exhaustive matches, and
+loop bodies cannot establish that the enclosing block always returns.
+Calls and literal conditions remain conservative.
+
+Without a supplied type context, tail-less blocks still infer unit. This
+does not add a never type or new context propagation: an unannotated
+array such as `[1, { return 42; }]` and a logical LHS such as
+`{ return 42; } && true` keep their existing errors. Existing typed
+returning blocks, including already-valid if/match arms and function
+bodies, now record the expected expression type instead of unit. Their
+type-table and semantic-graph annotations may therefore change; artifacts
+remain deterministic for the same source and compiler version. This is
+an intentional diagnostic and annotation improvement, with no new codes
+or schemas. Ownership joins, inferred contracts, MIR lowering, and
+interpreter operations are unchanged. It does not complete the broader
+tail-return milestone. See `examples/returning-blocks.ixa`.
+
 ### Numeric context through arithmetic
 
 Arithmetic (`+`, `-`, `*`, `/`, `%`) and numeric negation preserve a

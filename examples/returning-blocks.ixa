@@ -1,0 +1,12 @@
+// A block that always returns needs no dummy value tail in a typed context.
+// This returns from `early`, before `id` can run.
+fn id(x: i32) -> i32 { x }
+fn early() -> i32 { id({ return 21; }) }
+
+// The RHS is optional: false skips the return and reaches the fallback.
+fn choose(c: bool) -> i32 {
+    c && { return 7; };
+    21
+}
+
+fn main() -> i32 { early() + choose(false) }
