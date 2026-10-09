@@ -1,6 +1,7 @@
 //! The daemon comparison is a bounded, inline-only, session-independent query.
 
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -49,10 +50,10 @@ impl Drop for Workspace {
 }
 
 fn daemon(cwd: &Path, requests: &[Value]) -> Vec<Value> {
-    let input = requests
-        .iter()
-        .map(|r| format!("{r}\n"))
-        .collect::<String>();
+    let mut input = String::new();
+    for request in requests {
+        writeln!(input, "{request}").unwrap();
+    }
     daemon_lines(cwd, input, requests.len())
 }
 
