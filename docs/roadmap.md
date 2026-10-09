@@ -140,18 +140,24 @@ Remaining:
 
 ## M5 — agent platform
 
-Shipped first slice:
+Shipped:
 
 - read-only source-to-source contract/signature comparison
   (`ontixa diff --semantic`): qualified definitions/types, ordered
   signatures/data shapes and existing inferred parameter/escape facts.
   Explicit matching entry module names; no behavioral-equivalence or
   compatibility claim. See [semantic-diff.md](semantic-diff.md).
+- isolated inline comparison through `ontixad` `diff`: one request
+  contains two complete unsaved source workspaces, with matching entry
+  module names and the same selected fields, uncertainties and limits
+  as the CLI. Two fresh compilations; no filesystem loading, live-session
+  changes, incrementality or patch/apply integration. Runnable example:
+  `examples/semantic-diff/inline.ndjson`.
 
 Remaining:
 
 - evidence-carrying patches
-- broader contract-diff integration (beyond the bounded CLI report)
+- broader contract-diff integration (beyond standalone file/inline reports)
 - capability/effect system (see capabilities.md)
 - proof-carrying code changes for verified refactors
 

@@ -68,3 +68,41 @@ the flags that produced it.
   crashes.
 - `ParamSummary` is the explanation surface ADR-0011 promised; loans
   and regions can extend it without schema churn.
+
+## Addendum: isolated inline contract comparison
+
+Agents and editors need to compare two unsaved buffer sets without
+creating temporary source directories or replacing the sources in their
+live session. `diff` accepts both complete workspaces in one NDJSON
+request: `{"op":"diff","semantic":true,"before":{"entry":"main",
+"sources":[{"module":"main","text":"..."}]},"after":{...}}`.
+
+The operation deliberately uses two fresh, isolated `Db` instances.
+It does not read or write source files, access the persistent
+`Session`, or change its revision, caches or counters. This is not an
+incremental comparison. Comparison coverage and existing command schemas
+remain the same. The accompanying parser/lexer file-tag correction fixes
+dependency diagnostic locations in existing commands too; see
+[diagnostics](../diagnostics.md). There is no execution or patch/apply
+integration.
+
+Each side supplies unique ASCII-identifier module names and must include
+its entry module. Entry names must match across sides. Register the entry
+first, then other modules in name order, and compare only definitions
+reachable from the entry through `use`. Synthetic labels such as
+`before/main.ixa` identify diagnostics without implying filesystem
+access. Input provenance carries `source_kind: "inline"`, and coverage
+describes inline loading explicitly.
+
+Reuse the CLI's `command: "diff"` schema-1 envelope and
+`comparison_schema: 1` payload: the same qualified identities, selected
+fields, uncertainty disclosure and limits apply. Differences are
+successful results. Reject malformed requests, unknown fields,
+missing/false `semantic`, duplicate or invalid modules and missing entry
+sources as `invalid_comparison_request` with `result: null`. Mismatched
+roots or compiler source errors use `comparison_unavailable`, retaining
+per-input statuses and side-tagged diagnostics. Each failure is one
+response; subsequent requests continue to work.
+
+See [the comparison contract](../semantic-diff.md#daemon-inline-inputs)
+and [`inline.ndjson`](../../examples/semantic-diff/inline.ndjson).

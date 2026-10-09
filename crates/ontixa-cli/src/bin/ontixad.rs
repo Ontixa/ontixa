@@ -16,6 +16,8 @@
 //! {"op":"patch",   "path":"x.ixa", "ops":[...],     → patch envelope; `apply`+`revision`
 //!                  "apply":true, "revision":N}          commit in memory, `new_sources` returned
 //! {"op":"fmt",     "path":"x.ixa"}                  → fmt envelope: canonical text, no mutation
+//! {"op":"diff", "semantic":true, "before":{...},
+//!                  "after":{...}}                  → compare request-owned inline workspaces
 //! {"op":"stats"}                                   → result {queries, oracle, last_evaluated}
 //! {"op":"close",   "path":"x.ixa"}                  → drops the path mapping
 //! {"op":"shutdown"}                                → exits 0
@@ -161,6 +163,11 @@ fn compile(s: &mut Session, f: usize) -> (Artifacts, Json) {
 
 fn handle(s: &mut Session, req: &Json) -> Json {
     let op = req["op"].as_str().unwrap_or("");
+    // This query owns both snapshots and cannot inspect or modify Session.
+    // It remains usable even when a previous, unrelated session request failed.
+    if op == "diff" {
+        return ontixa_cli::diff::inline::response(req);
+    }
     let path = req["path"].as_str().unwrap_or("");
     if s.poisoned {
         // A handler panic may have left the Db mid-mutation — never
@@ -457,5 +464,48 @@ fn main() {
         });
         let _ = writeln!(out, "{resp}");
         let _ = out.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_comparison_preserves_every_session_field_even_when_poisoned() {
+        let mut session = Session::default();
+        let file = session.bind("/virtual/main.ixa", "fn original() -> i32 { 7 }".into());
+        session.db.compile_owned(file);
+        let id = session.db.id();
+        let revision = session.db.revision();
+        let stats = stats_result(&session.db);
+        let files = session.files.clone();
+        let display = session.display.clone();
+        let valid = json!({
+            "entry": "main", "sources": [{"module": "main", "text": "fn candidate() {}"}]
+        });
+        let invalid = json!({
+            "entry": "main", "sources": [{"module": "main", "text": "fn candidate( {"}]
+        });
+        let cases = [
+            json!({"op": "diff", "semantic": true, "before": valid, "after": valid}),
+            json!({"op": "diff", "semantic": true, "before": valid, "after": invalid}),
+            json!({"op": "diff", "semantic": false, "before": valid, "after": valid}),
+            json!({"op": "diff", "semantic": true}),
+        ];
+        for poisoned in [false, true] {
+            session.poisoned = poisoned;
+            for request in &cases {
+                let result = handle(&mut session, request);
+                assert_eq!(result["command"], "diff");
+                assert_eq!(session.db.id(), id);
+                assert_eq!(session.db.revision(), revision);
+                assert_eq!(session.db.source(file), "fn original() -> i32 { 7 }");
+                assert_eq!(stats_result(&session.db), stats);
+                assert_eq!(session.files, files);
+                assert_eq!(session.display, display);
+                assert_eq!(session.poisoned, poisoned);
+            }
+        }
     }
 }
