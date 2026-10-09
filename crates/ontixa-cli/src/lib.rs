@@ -2,6 +2,7 @@
 //! the schema-1 JSON envelope and semantic introspection.
 
 pub mod diagnostic;
+pub mod diff;
 pub mod envelope;
 pub mod explain;
 pub mod fmt;

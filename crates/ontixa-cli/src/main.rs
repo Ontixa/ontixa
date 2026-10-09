@@ -1,7 +1,7 @@
 //! `ontixa` — the Ontixa developer tool.
 //!
 //! Commands: `check`, `run`, `tokens`, `ast`, `mir`, `graph`,
-//! `diagnostic`, `explain`, `rename`, `patch`, `recover`, `fmt`. Exit codes are part of the
+//! `diagnostic`, `explain`, `diff`, `rename`, `patch`, `recover`, `fmt`. Exit codes are part of the
 //! tool contract:
 //!
 //! - `0` — success (diagnostics, if any, are warnings)
@@ -127,6 +127,21 @@ Codes are case-sensitive. No source file or network is needed."
         #[arg(long)]
         timings: bool,
     },
+    /// Compare selected definition, signature and inferred ownership fields.
+    /// The two entry files must have the same module name (file stem).
+    /// This does not compare function behavior or establish compatibility.
+    Diff {
+        /// The before snapshot's `.ixa` entry file.
+        before: PathBuf,
+        /// The after snapshot's `.ixa` entry file.
+        after: PathBuf,
+        /// Compare the documented semantic fields (required).
+        #[arg(long, required = true)]
+        semantic: bool,
+        /// Emit one schema-1 JSON envelope.
+        #[arg(long)]
+        json: bool,
+    },
     /// Preview or apply a semantic rename across the workspace.
     /// Edits are found through the compiler's own name resolution —
     /// the decl site, `use` paths, and every call/type/literal path
@@ -232,6 +247,12 @@ fn main() -> ExitCode {
             json,
             timings,
         } => explain_cmd(file, symbol, json, timings),
+        Cmd::Diff {
+            before,
+            after,
+            semantic: _,
+            json,
+        } => ontixa_cli::diff::run(&before, &after, compile(&before), compile(&after), json),
         Cmd::Rename {
             file,
             symbol,

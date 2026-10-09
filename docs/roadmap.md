@@ -140,8 +140,18 @@ Remaining:
 
 ## M5 — agent platform
 
+Shipped first slice:
+
+- read-only source-to-source contract/signature comparison
+  (`ontixa diff --semantic`): qualified definitions/types, ordered
+  signatures/data shapes and existing inferred parameter/escape facts.
+  Explicit matching entry module names; no behavioral-equivalence or
+  compatibility claim. See [semantic-diff.md](semantic-diff.md).
+
+Remaining:
+
 - evidence-carrying patches
-- contract-diff tooling (`ontixa diff --semantic`)
+- broader contract-diff integration (beyond the bounded CLI report)
 - capability/effect system (see capabilities.md)
 - proof-carrying code changes for verified refactors
 

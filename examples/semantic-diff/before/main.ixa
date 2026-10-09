@@ -1,0 +1,11 @@
+data Point {
+    x: i32;
+}
+
+fn read(p: Point) -> i32 {
+    return p.x;
+}
+
+fn relay(p: Point) -> i32 {
+    return read(p);
+}

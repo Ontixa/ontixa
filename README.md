@@ -209,6 +209,7 @@ $ ontixa mir file.ixa              # typed MIR (JSON)
 $ ontixa graph file.ixa            # Semantic Program Graph (JSON)
 $ ontixa explain file.ixa          # inferred contracts + timings
 $ ontixa explain file.ixa m::sym   # a single symbol, qualified ok
+$ ontixa diff --semantic old/main.ixa new/main.ixa # selected signature + contract changes
 $ ontixa rename file.ixa m::old new         # preview edits
 $ ontixa rename file.ixa @138 new           # local/param rename by byte offset
 $ ontixa rename file.ixa m::old new --apply # guarded apply; staged+journaled to disk
@@ -224,6 +225,14 @@ $ ontixa fmt file.ixa --write               # overwrite in place (staged+journal
 `check`, `explain`, `rename`, `patch`, `fmt`, `stats`, `close`,
 `shutdown` — see
 [docs/agent-interface.md](docs/agent-interface.md).
+
+`diff --semantic` independently compiles two source snapshots with the
+same entry module name. It reports qualified definition, signature,
+data-shape and inferred ownership changes; it never runs or edits the
+programs. `No changes in compared fields` is not a claim of behavioral
+equality or compatibility. Differences still exit 0; source/input
+failures make comparison unavailable. See
+[the comparison contract](docs/semantic-diff.md) for coverage and JSON.
 
 Common flags: `--json` (machine-readable output), `--timings`
 (per-stage latency). Exit codes: `0` ok, `1` source errors or recovery

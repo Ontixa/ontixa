@@ -14,6 +14,7 @@ gets — no privileged back door, and no LLM inside the compiler.
 | Typed MIR                | `ontixa mir f.ixa`       | execution-facing CFG                   |
 | Offline diagnostic guide | `ontixa diagnostic E_USE_AFTER_MOVE --json` | meaning, cause, checked correction examples |
 | Contracts                | `ontixa explain --json`  | per-param behavior summary             |
+| Contract/signature changes | `ontixa diff --semantic old/main.ixa new/main.ixa --json` | bounded, qualified before/after facts |
 | Stage timings            | `--timings`              | pipeline latency budget                |
 
 ## Why this shape
@@ -212,6 +213,17 @@ is meant to change behavior). Ops cannot reorder items, edit
 comments, or create/delete files; `use` edits are whole-declaration
 splices, not arbitrary header edits; layout seams are normalized
 minimally and `ontixa fmt` owns canonical form.
+
+## Contract and signature comparison
+
+The first read-only contract-diff slice is available through the CLI:
+[`diff --semantic`](semantic-diff.md). It compares two explicit source
+workspaces using the same compiler, including qualified signatures,
+data shapes and inferred parameter/escape facts. Matching entry module
+names are required. Changes and unchanged results both exit 0; errors
+make the comparison unavailable with side-tagged diagnostics. It does
+not compare runtime behavior or establish compatibility. There is no
+daemon operation or patch-transaction integration.
 
 ## Planned (roadmap)
 
