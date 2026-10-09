@@ -54,9 +54,14 @@ touch the body arena.
 
 ## Diagnostics
 
-`Db` entries record *transitive* diagnostics: an entry's `diags` are
-its dependencies' diagnostics (demand order) plus its own eval's.
-The `Diagnostics` query therefore only has to collect direct deps.
+`Db` entries record only their own evaluation's diagnostics. The
+`Diagnostics` query collects current emissions by walking its dependency
+graph in demand order, dependencies before their consumers. This avoids
+stale copies when semantic early cutoff reuses a consumer after its
+dependency's errors change. It also directly depends on `Parse` for
+every reachable file, so an edit that changes errors but preserves the
+recovered AST still refreshes diagnostics. Semantic values, stamps, and
+per-definition reuse remain governed by their existing dependencies.
 
 ## Item-relative spans
 

@@ -26,7 +26,7 @@ use ontixa_mir::{MirBody, MirModule};
 use ontixa_semantic::SemanticGraph;
 use ontixa_source::{DefKey, FileId, Interner};
 use ontixa_types::{ModuleTypes, TypeTables};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::eval;
 use crate::query::{Entry, QueryKey, QueryStats, Value, same_value};
@@ -514,19 +514,12 @@ impl Db {
     fn run_eval(&mut self, key: QueryKey) {
         self.frames.push(Vec::new());
         let t0 = Instant::now();
-        let (value, mut diags) = eval::eval(self, key);
+        let (value, diags) = eval::eval(self, key);
         let nanos = t0.elapsed().as_nanos() as u64;
         let deps = self.frames.pop().unwrap_or_default();
-        // Entries record their *transitive* diagnostics — dependencies'
-        // first (demand order), then this eval's own — so a consumer
-        // asking for "the diagnostics of X" never needs to walk the
-        // dep graph itself.
-        let mut all: Vec<Diagnostic> = Vec::new();
-        for dep in &deps {
-            all.extend(self.entry_diags(*dep).iter().cloned());
-        }
-        all.append(&mut diags);
-        let diags = all;
+        // Store only this eval's emissions. A dependency's diagnostics
+        // may change while its semantic value stays equal, so copying
+        // them here would retain stale errors across early cutoff.
         let computed_at = match self.memo.get(&key) {
             Some(old) if same_value(&old.value, &value) => old.computed_at,
             _ => self.revision,
@@ -557,9 +550,32 @@ impl Db {
         self.memo.get(&key).map_or(0, |e| e.computed_at)
     }
 
-    /// Diagnostics recorded on a query's entry.
-    pub(crate) fn entry_diags(&self, key: QueryKey) -> &[Diagnostic] {
-        self.memo.get(&key).map_or(&[], |e| e.diags.as_slice())
+    /// Current diagnostics reachable from already-demanded queries.
+    /// Visit each entry once, dependencies first and in demand order,
+    /// so shared dependencies neither repeat nor retain old emissions.
+    pub(crate) fn collect_diags(&self, roots: &[QueryKey]) -> Vec<&Diagnostic> {
+        fn visit<'a>(
+            db: &'a Db,
+            key: QueryKey,
+            seen: &mut FxHashSet<QueryKey>,
+            out: &mut Vec<&'a Diagnostic>,
+        ) {
+            if !seen.insert(key) {
+                return;
+            }
+            let entry = db.memo.get(&key).expect("demanded diagnostic dependency");
+            for &dep in &entry.deps {
+                visit(db, dep, seen, out);
+            }
+            out.extend(&entry.diags);
+        }
+
+        let mut seen = FxHashSet::default();
+        let mut out = Vec::new();
+        for &key in roots {
+            visit(self, key, &mut seen, &mut out);
+        }
+        out
     }
 
     /// Dependencies demanded so far by the in-flight eval.
